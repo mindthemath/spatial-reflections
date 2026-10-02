@@ -587,7 +587,7 @@ function createControls() {
     controlPanel.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
     controlPanel.style.color = 'white';
     controlPanel.style.padding = '10px';
-    controlPanel.style.borderRadius = '5px';
+    controlPanel.style.borderRadius = '0';
     controlPanel.style.fontFamily = 'Arial, sans-serif';
     controlPanel.style.fontSize = '14px';
     controlPanel.style.zIndex = '100';
@@ -973,6 +973,36 @@ function createControls() {
     `;
     controlPanel.appendChild(controlsInfo);
     
+    const panelContent = document.createElement('div');
+    panelContent.id = 'controlPanelContent';
+    while (controlPanel.firstChild) {
+        panelContent.appendChild(controlPanel.firstChild);
+    }
+
+    const panelToggle = document.createElement('button');
+    panelToggle.type = 'button';
+    panelToggle.textContent = '▾ Controls';
+    panelToggle.setAttribute('aria-expanded', 'true');
+    panelToggle.setAttribute('aria-controls', panelContent.id);
+    Object.assign(panelToggle.style, {
+        width: '100%',
+        background: 'transparent',
+        color: 'inherit',
+        border: 'none',
+        padding: '0',
+        textAlign: 'left',
+        font: 'inherit',
+        fontWeight: 'bold',
+        cursor: 'pointer',
+        marginBottom: '10px'
+    });
+    panelToggle.addEventListener('click', () => {
+        panelContent.hidden = !panelContent.hidden;
+        panelToggle.setAttribute('aria-expanded', String(!panelContent.hidden));
+        panelToggle.textContent = panelContent.hidden ? '▸ Controls' : '▾ Controls';
+        panelToggle.style.marginBottom = panelContent.hidden ? '0' : '10px';
+    });
+    controlPanel.append(panelToggle, panelContent);
     document.body.appendChild(controlPanel);
     
     // Update camera info display
@@ -1882,7 +1912,7 @@ function initFileUpload() {
     });
     
     loadButtonContainer.appendChild(loadButton);
-    controlPanel.appendChild(loadButtonContainer);
+    document.getElementById('controlPanelContent').appendChild(loadButtonContainer);
 }
 
 // Start the visualization
