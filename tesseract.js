@@ -8,6 +8,11 @@ let tesseract;
 let rotationSpeed = 0.005;
 let time = 0;
 let animationPaused = true;
+let timelineFrame = 0;
+let exportFps = 60;
+let loopTiming = { period: 0, frameCount: 1, timeStep: 0, exact: true };
+let lastAnimationTimestamp = null;
+let frameAccumulator = 0;
 // Track object references
 let vertices = [];
 let edges = [];
@@ -28,6 +33,12 @@ let controlPanel;
 let showVertices = false;
 let showOverlay = true;
 let cameraInfoDisplay;
+let motionStepSlider;
+let motionStepLabel;
+let loopInfoDisplay;
+let timelineSlider;
+let timelineFrameDisplay;
+let exportFpsSelect;
 // File drop zone
 let dropZone;
 let dropZoneVisible = false;
@@ -377,11 +388,23 @@ function applyViewSettings(metadata) {
             updateRotationSliders();
         }
         
-        // Set animation time
-        if (metadata.time !== undefined) {
-            time = parseFloat(metadata.time);
-            console.log("Set animation time to:", time);
+        // Restore video timing before mapping the saved time onto the deterministic timeline.
+        if (metadata.animation?.fps) {
+            exportFps = parseInt(metadata.animation.fps, 10) || exportFps;
+            if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
         }
+        if (metadata.animation?.motionStep !== undefined) {
+            rotationSpeed = Math.max(0, parseFloat(metadata.animation.motionStep) || 0);
+            if (motionStepSlider) motionStepSlider.value = String(rotationSpeed * 1000);
+            if (motionStepLabel) motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
+        }
+        refreshLoopTiming({ preserveTime: false });
+        if (metadata.animation?.frame !== undefined) {
+            setTimelineFrame(parseInt(metadata.animation.frame, 10) || 0);
+        } else if (metadata.time !== undefined) {
+            setTimelineTime(parseFloat(metadata.time) || 0);
+        }
+        console.log("Set animation time to:", time);
         
         // Set camera target
         if (metadata.target) {
@@ -542,23 +565,26 @@ function createControls() {
     const speedContainer = document.createElement('div');
     speedContainer.style.marginBottom = '10px';
     
-    const speedLabel = document.createElement('div');
-    speedLabel.textContent = 'Rotation Speed:';
-    speedLabel.style.marginBottom = '5px';
-    speedContainer.appendChild(speedLabel);
+    motionStepLabel = document.createElement('div');
+    motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
+    motionStepLabel.style.marginBottom = '5px';
+    speedContainer.appendChild(motionStepLabel);
     
-    const speedSlider = document.createElement('input');
-    speedSlider.type = 'range';
-    speedSlider.min = '0';
-    speedSlider.max = '10';
-    speedSlider.value = rotationSpeed * 1000;
-    speedSlider.style.width = '100%';
+    motionStepSlider = document.createElement('input');
+    motionStepSlider.type = 'range';
+    motionStepSlider.min = '0';
+    motionStepSlider.max = '10';
+    motionStepSlider.step = '1';
+    motionStepSlider.value = rotationSpeed * 1000;
+    motionStepSlider.style.width = '100%';
     
-    speedSlider.addEventListener('input', function() {
+    motionStepSlider.addEventListener('input', function() {
         rotationSpeed = this.value / 1000;
+        motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
+        refreshLoopTiming();
     });
     
-    speedContainer.appendChild(speedSlider);
+    speedContainer.appendChild(motionStepSlider);
     controlPanel.appendChild(speedContainer);
     
     // Create vertex visibility toggle (moved above rotation controls)
@@ -801,21 +827,118 @@ function createControls() {
     rotationSliders[0].addEventListener('input', function() {
         rotationCoefficients.xw = this.value / 20; // Divide by 20 for a step of 0.05
         rotationControls.querySelectorAll('span')[0].textContent = rotationCoefficients.xw.toFixed(2);
+        refreshLoopTiming();
         updateCameraInfo();
     });
     
     rotationSliders[1].addEventListener('input', function() {
         rotationCoefficients.yw = this.value / 20; // Divide by 20 for a step of 0.05
         rotationControls.querySelectorAll('span')[1].textContent = rotationCoefficients.yw.toFixed(2);
+        refreshLoopTiming();
         updateCameraInfo();
     });
     
     rotationSliders[2].addEventListener('input', function() {
         rotationCoefficients.zw = this.value / 20; // Divide by 20 for a step of 0.05
         rotationControls.querySelectorAll('span')[2].textContent = rotationCoefficients.zw.toFixed(2);
+        refreshLoopTiming();
         updateCameraInfo();
     });
     controlPanel.appendChild(rotationControls);
+
+    // Keep video-oriented controls collapsed until they are needed.
+    const videoTimingDetails = document.createElement('details');
+    videoTimingDetails.style.marginTop = '10px';
+    videoTimingDetails.style.paddingTop = '8px';
+    videoTimingDetails.style.borderTop = '1px solid #555';
+
+    const videoTimingSummary = document.createElement('summary');
+    videoTimingSummary.textContent = 'Video timing';
+    videoTimingSummary.style.cursor = 'pointer';
+    videoTimingDetails.appendChild(videoTimingSummary);
+
+    const videoTimingContent = document.createElement('div');
+    videoTimingContent.style.marginTop = '8px';
+
+    const fpsRow = document.createElement('label');
+    fpsRow.style.display = 'flex';
+    fpsRow.style.justifyContent = 'space-between';
+    fpsRow.style.alignItems = 'center';
+    fpsRow.textContent = 'FPS';
+
+    exportFpsSelect = document.createElement('select');
+    exportFpsSelect.style.background = '#222';
+    exportFpsSelect.style.color = 'white';
+    exportFpsSelect.style.border = '1px solid #555';
+    [24, 25, 30, 50, 60].forEach(fps => {
+        const option = document.createElement('option');
+        option.value = String(fps);
+        option.textContent = String(fps);
+        option.selected = fps === exportFps;
+        exportFpsSelect.appendChild(option);
+    });
+    exportFpsSelect.addEventListener('change', function() {
+        exportFps = parseInt(this.value, 10);
+        lastAnimationTimestamp = null;
+        frameAccumulator = 0;
+        updateLoopTimingUI();
+    });
+    fpsRow.appendChild(exportFpsSelect);
+    videoTimingContent.appendChild(fpsRow);
+
+    loopInfoDisplay = document.createElement('div');
+    loopInfoDisplay.style.marginTop = '7px';
+    loopInfoDisplay.style.fontSize = '11px';
+    loopInfoDisplay.style.lineHeight = '1.45';
+    loopInfoDisplay.style.color = '#c5cfdb';
+    videoTimingContent.appendChild(loopInfoDisplay);
+
+    timelineSlider = document.createElement('input');
+    timelineSlider.type = 'range';
+    timelineSlider.min = '0';
+    timelineSlider.max = '0';
+    timelineSlider.step = '1';
+    timelineSlider.value = '0';
+    timelineSlider.style.width = '100%';
+    timelineSlider.style.marginTop = '7px';
+    timelineSlider.addEventListener('input', function() {
+        setTimelineFrame(parseInt(this.value, 10));
+        frameAccumulator = 0;
+    });
+    videoTimingContent.appendChild(timelineSlider);
+
+    timelineFrameDisplay = document.createElement('div');
+    timelineFrameDisplay.style.fontSize = '11px';
+    timelineFrameDisplay.style.textAlign = 'center';
+    videoTimingContent.appendChild(timelineFrameDisplay);
+
+    const frameButtons = document.createElement('div');
+    frameButtons.style.display = 'flex';
+    frameButtons.style.gap = '5px';
+    frameButtons.style.marginTop = '6px';
+    [['− Frame', -1], ['+ Frame', 1]].forEach(([label, direction]) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.style.flex = '1';
+        button.style.padding = '4px';
+        button.addEventListener('click', () => {
+            animationPaused = true;
+            setTimelineFrame(timelineFrame + direction);
+        });
+        frameButtons.appendChild(button);
+    });
+    videoTimingContent.appendChild(frameButtons);
+
+    const videoTimingHint = document.createElement('div');
+    videoTimingHint.textContent = 'Exact frame timeline for a seamless future export.';
+    videoTimingHint.style.marginTop = '7px';
+    videoTimingHint.style.fontSize = '10px';
+    videoTimingHint.style.color = '#9cadc3';
+    videoTimingContent.appendChild(videoTimingHint);
+
+    videoTimingDetails.appendChild(videoTimingContent);
+    controlPanel.appendChild(videoTimingDetails);
     
     // Add control buttons below rotation sliders
     const buttonContainer = document.createElement('div');
@@ -836,6 +959,8 @@ function createControls() {
     playPauseButton.style.padding = '5px';
     playPauseButton.addEventListener('click', function() {
         animationPaused = !animationPaused;
+        lastAnimationTimestamp = null;
+        frameAccumulator = 0;
     });
     
     // Reset Time button
@@ -844,7 +969,7 @@ function createControls() {
     resetTimeButton.style.flex = '1';
     resetTimeButton.style.padding = '5px';
     resetTimeButton.addEventListener('click', function() {
-        time = 0;
+        setTimelineFrame(0);
         updateCameraInfo();
     });
     
@@ -950,8 +1075,112 @@ function createControls() {
     controlPanel.append(panelToggle, panelContent);
     document.body.appendChild(controlPanel);
     
-    // Update camera info display
+    // Initialize the exact loop timeline and camera display.
+    refreshLoopTiming({ preserveTime: false });
     updateCameraInfo();
+}
+
+const COEFFICIENT_SCALE = 1000000;
+
+function greatestCommonDivisor(a, b) {
+    a = Math.abs(a);
+    b = Math.abs(b);
+    while (b !== 0) {
+        [a, b] = [b, a % b];
+    }
+    return a;
+}
+
+function calculateLoopPeriod() {
+    const scaledCoefficients = Object.values(rotationCoefficients).map(value => {
+        const scaled = Math.round(value * COEFFICIENT_SCALE);
+        return Math.abs(value - scaled / COEFFICIENT_SCALE) < 1e-10 ? Math.abs(scaled) : null;
+    });
+
+    if (scaledCoefficients.some(value => value === null)) return null;
+    const activeCoefficients = scaledCoefficients.filter(value => value !== 0);
+    if (activeCoefficients.length === 0) return 0;
+
+    const divisor = activeCoefficients.reduce(greatestCommonDivisor);
+    return 2 * Math.PI * COEFFICIENT_SCALE / divisor;
+}
+
+function refreshLoopTiming({ preserveTime = true } = {}) {
+    const previousTime = preserveTime ? time : 0;
+    const period = calculateLoopPeriod();
+
+    if (period === null) {
+        loopTiming = { period: null, frameCount: 1, timeStep: 0, exact: false };
+    } else if (period === 0 || rotationSpeed === 0) {
+        loopTiming = { period, frameCount: 1, timeStep: 0, exact: true };
+    } else {
+        const frameCount = Math.max(1, Math.round(period / rotationSpeed));
+        loopTiming = {
+            period,
+            frameCount,
+            timeStep: period / frameCount,
+            exact: true
+        };
+    }
+
+    setTimelineTime(previousTime);
+}
+
+function setTimelineTime(requestedTime) {
+    if (loopTiming.frameCount <= 1 || !loopTiming.timeStep) {
+        timelineFrame = 0;
+        time = 0;
+    } else {
+        setTimelineFrame(Math.round(requestedTime / loopTiming.timeStep));
+        return;
+    }
+    updateLoopTimingUI();
+}
+
+function setTimelineFrame(requestedFrame) {
+    const count = loopTiming.frameCount;
+    timelineFrame = count > 1 ? ((requestedFrame % count) + count) % count : 0;
+    time = timelineFrame * loopTiming.timeStep;
+    updateLoopTimingUI();
+}
+
+function formatDuration(seconds) {
+    if (!Number.isFinite(seconds)) return '—';
+    if (seconds < 60) return `${seconds.toFixed(2)} s`;
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds - minutes * 60;
+    return `${minutes}:${remainingSeconds.toFixed(2).padStart(5, '0')}`;
+}
+
+function updateLoopTimingUI() {
+    if (timelineSlider) {
+        timelineSlider.max = String(Math.max(0, loopTiming.frameCount - 1));
+        timelineSlider.value = String(timelineFrame);
+        timelineSlider.disabled = loopTiming.frameCount <= 1;
+    }
+    if (timelineFrameDisplay) {
+        timelineFrameDisplay.textContent = `Frame ${timelineFrame + 1} / ${loopTiming.frameCount}`;
+    }
+    if (!loopInfoDisplay) return;
+
+    if (!loopTiming.exact) {
+        loopInfoDisplay.textContent = 'No practical exact loop for these coefficients.';
+        return;
+    }
+    if (loopTiming.period === 0) {
+        loopInfoDisplay.textContent = 'Stationary · 1 frame';
+        return;
+    }
+    if (rotationSpeed === 0) {
+        loopInfoDisplay.textContent = 'Speed is zero · 1 frame';
+        return;
+    }
+
+    const duration = loopTiming.frameCount / exportFps;
+    loopInfoDisplay.innerHTML = `
+        <div>${loopTiming.frameCount.toLocaleString()} frames · ${formatDuration(duration)}</div>
+        <div>Loop period ${loopTiming.period.toFixed(4)} · Δt ${loopTiming.timeStep.toFixed(6)}</div>
+    `;
 }
 
 // Function to update camera information display
@@ -1108,7 +1337,13 @@ function saveScreenshot() {
             yw: rotationCoefficients.yw,
             zw: rotationCoefficients.zw
         },
-        time: time, // Include the current animation time
+        time: time, // Include the current animation time for backward compatibility
+        animation: {
+            frame: timelineFrame,
+            frameCount: loopTiming.frameCount,
+            fps: exportFps,
+            motionStep: rotationSpeed
+        },
         target: {
             x: controls.target.x,
             y: controls.target.y,
@@ -1218,10 +1453,12 @@ function onKeyDown(event) {
         case 'Space':
             // Toggle animation pause
             animationPaused = !animationPaused;
+            lastAnimationTimestamp = null;
+            frameAccumulator = 0;
             break;
         case 'KeyR':
             // Reset animation time
-            time = 0;
+            setTimelineFrame(0);
             break;
         case 'KeyO':
             // Toggle overlay visibility
@@ -1801,20 +2038,31 @@ function onWindowResize() {
     renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-// Animation loop
-function animate() {
+// Animation loop. Time is derived from an integer frame so frame 0 follows the
+// final frame exactly, without accumulating floating-point additions.
+function animate(timestamp) {
     requestAnimationFrame(animate);
     
     // Update controls
     controls.update();
     
+    if (!animationPaused && loopTiming.frameCount > 1) {
+        if (lastAnimationTimestamp !== null) {
+            frameAccumulator += (timestamp - lastAnimationTimestamp) * exportFps / 1000;
+            const framesToAdvance = Math.floor(frameAccumulator);
+            if (framesToAdvance > 0) {
+                setTimelineFrame(timelineFrame + framesToAdvance);
+                frameAccumulator -= framesToAdvance;
+            }
+        }
+        lastAnimationTimestamp = timestamp;
+    } else {
+        lastAnimationTimestamp = null;
+        frameAccumulator = 0;
+    }
+
     // Update camera information
     updateCameraInfo();
-    
-    // Update time only if animation is not paused
-    if (!animationPaused) {
-        time += rotationSpeed;
-    }
     
     // Update the tesseract projection
     updateTesseractProjection();
