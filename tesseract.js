@@ -605,6 +605,37 @@ function updateRotationSliders() {
     }
 }
 
+function syncRangeStepper(slider) {
+    const buttons = slider.closest('.range-stepper')?.querySelectorAll('button');
+    buttons?.forEach(button => { button.disabled = slider.disabled; });
+}
+
+function addRangeStepper(slider) {
+    if (slider.closest('.range-stepper')) return;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'range-stepper';
+    const decrease = document.createElement('button');
+    const increase = document.createElement('button');
+    decrease.type = increase.type = 'button';
+    decrease.textContent = '−';
+    increase.textContent = '+';
+    decrease.title = 'Decrease by one step';
+    increase.title = 'Increase by one step';
+    decrease.setAttribute('aria-label', decrease.title);
+    increase.setAttribute('aria-label', increase.title);
+    slider.before(wrapper);
+    wrapper.append(decrease, slider, increase);
+    const step = direction => {
+        if (slider.disabled) return;
+        direction < 0 ? slider.stepDown() : slider.stepUp();
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+        slider.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    decrease.addEventListener('click', () => step(-1));
+    increase.addEventListener('click', () => step(1));
+    syncRangeStepper(slider);
+}
+
 // Create UI controls
 function createControls() {
     controlPanel = document.createElement('div');
@@ -612,7 +643,8 @@ function createControls() {
     controlPanel.style.position = 'absolute';
     controlPanel.style.top = '10px';
     controlPanel.style.left = '10px';
-    controlPanel.style.width = '205px';
+    controlPanel.style.width = 'min(290px, calc(100vw - 20px))';
+    controlPanel.style.boxSizing = 'border-box';
     controlPanel.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
     controlPanel.style.color = 'white';
     controlPanel.style.padding = '10px';
@@ -895,7 +927,7 @@ function createControls() {
     rotationControls.querySelectorAll('.rotation-row').forEach(row => {
         Object.assign(row.style, {
             display: 'grid',
-            gridTemplateColumns: '7.5em minmax(0, 1fr)',
+            gridTemplateColumns: '6em minmax(0, 1fr)',
             alignItems: 'center',
             gap: '6px'
         });
@@ -1169,6 +1201,7 @@ function createControls() {
         persistViewerSettings();
     });
     controlPanel.append(panelToggle, panelContent);
+    controlPanel.querySelectorAll('input[type="range"]').forEach(addRangeStepper);
     document.body.appendChild(controlPanel);
 
     // Input handlers update the application state first; bubbling then saves it.
@@ -1259,6 +1292,7 @@ function updateLoopTimingUI() {
         timelineSlider.max = String(Math.max(0, loopTiming.frameCount - 1));
         timelineSlider.value = String(timelineFrame);
         timelineSlider.disabled = loopTiming.frameCount <= 1;
+        syncRangeStepper(timelineSlider);
     }
     if (timelineFrameDisplay) {
         timelineFrameDisplay.textContent = `Frame ${timelineFrame + 1} / ${loopTiming.frameCount}`;

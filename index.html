@@ -39,7 +39,94 @@
         .skybox-card { border: 1px solid #414b5c; padding: 10px; display: grid; gap: 7px; }
         .skybox-card img { width: 100%; height: 130px; object-fit: cover; }
         .skybox-card small { color: #9cadc3; }
-        #controlPanel button:focus-visible, #skybox-library-dialog button:focus-visible { outline: 2px solid #80caff; }
+        #controlPanel button:focus-visible, #controlPanel select:focus-visible, #controlPanel input:focus-visible, #skybox-library-dialog button:focus-visible { outline: 2px solid #80caff; outline-offset: 2px; }
+        #controlPanel button, #controlPanel select {
+            appearance: none;
+            -webkit-appearance: none;
+            background-color: #1a2029;
+            color: #eef3f8;
+            border: 1px solid #657184;
+            border-radius: 0;
+        }
+        #controlPanel button:hover:not(:disabled) { background-color: #303b4b; border-color: #91b9e0; }
+        #controlPanel button:active:not(:disabled) { background-color: #43546a; }
+        #controlPanel button:disabled { opacity: .4; cursor: default; }
+        #controlPanel select {
+            padding: 5px 26px 5px 7px !important;
+            background-image:
+                linear-gradient(45deg, transparent 50%, #d9e2ec 50%),
+                linear-gradient(135deg, #d9e2ec 50%, transparent 50%);
+            background-position: calc(100% - 12px) 50%, calc(100% - 7px) 50%;
+            background-size: 5px 5px, 5px 5px;
+            background-repeat: no-repeat;
+        }
+        #controlPanel input[type="checkbox"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            margin: 0;
+            vertical-align: middle;
+            background: #151a22;
+            border: 1px solid #8190a4;
+        }
+        #controlPanel input[type="checkbox"]:checked {
+            background: #80caff;
+            box-shadow: inset 0 0 0 3px #151a22;
+        }
+        #controlPanel input[type="range"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 100%;
+            height: 20px;
+            min-width: 0;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+        }
+        #controlPanel input[type="range"]::-webkit-slider-runnable-track {
+            height: 5px;
+            background: #778398;
+            border: 1px solid #aab4c2;
+        }
+        #controlPanel input[type="range"]::-webkit-slider-thumb {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            margin-top: -6px;
+            background: #eef4fa;
+            border: 2px solid #17202b;
+            border-radius: 0;
+        }
+        #controlPanel input[type="range"]::-moz-range-track {
+            height: 3px;
+            background: #778398;
+            border: 1px solid #aab4c2;
+            border-radius: 0;
+        }
+        #controlPanel input[type="range"]::-moz-range-thumb {
+            width: 12px;
+            height: 12px;
+            background: #eef4fa;
+            border: 2px solid #17202b;
+            border-radius: 0;
+        }
+        #controlPanel input[type="range"]:disabled { opacity: .4; }
+        #controlPanel .range-stepper {
+            display: grid;
+            grid-template-columns: 24px minmax(0, 1fr) 24px;
+            align-items: center;
+            gap: 4px;
+            min-width: 0;
+        }
+        #controlPanel .range-stepper button {
+            width: 24px;
+            height: 24px;
+            padding: 0;
+            font: bold 16px/1 Arial, sans-serif;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
