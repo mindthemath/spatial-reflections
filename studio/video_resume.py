@@ -71,6 +71,7 @@ class VideoJobStore:
         self.active = {}
         self.leases = {}
         self.popen = subprocess.Popen
+        self.run = subprocess.run
         self.clock = time.monotonic
 
     def _job_lock(self, job_id):
@@ -447,4 +448,97 @@ class VideoJobStore:
             self._write_index(index)
 
     def finish(self, job_id):
-        raise NotImplementedError('Video finalization is implemented with the checkpoint encoder')
+        with self._job_lock(job_id):
+            with self.lock:
+                runtime = self.active.get(job_id)
+                if runtime:
+                    raise ValueError('Video export still has an active checkpoint')
+                self.leases.pop(job_id, None)
+            manifest, job = self._load(job_id)
+            self._verify_segments(manifest, job)
+            request = job['request']
+            if job['nextFrame'] != request['frames']:
+                raise ValueError(
+                    f"Video export has {job['nextFrame']:,} of {request['frames']:,} durable frames"
+                )
+            video_format = request.get('format', 'mp4')
+            if video_format not in ('mp4', 'mkv'):
+                raise ValueError('Unsupported video format')
+
+            label = re.sub(r'[^a-zA-Z0-9_-]+', '-', str(request.get('name', 'tesseract')))
+            label = label[:60].strip('-') or 'tesseract'
+            try:
+                created = datetime.fromisoformat(job['createdAt']).astimezone(timezone.utc)
+            except (ValueError, TypeError):
+                created = datetime.now(timezone.utc)
+            timestamp = created.strftime('%Y%m%dT%H%M%SZ')
+            filename = f"{label}-{timestamp}-{job_id[:8]}.{video_format}"
+            self.videos.mkdir(parents=True, exist_ok=True)
+            final_path = self.videos / filename
+            pending_path = self.videos / f'.{final_path.stem}.pending{final_path.suffix}'
+            concat_path = manifest.parent / '.concat.txt'
+            concat_lines = []
+            for segment in job['segments']:
+                path = (manifest.parent / segment['file']).resolve()
+                escaped = str(path).replace("'", "'\\''")
+                concat_lines.append(f"file '{escaped}'\n")
+            concat_path.write_text(''.join(concat_lines))
+
+            output_args = (['-movflags', '+faststart'] if video_format == 'mp4'
+                           else ['-f', 'matroska'])
+            command = [
+                self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+                '-f', 'concat', '-safe', '0', '-i', str(concat_path),
+                '-c', 'copy', *output_args, str(pending_path),
+            ]
+            job['state'] = 'finalizing'
+            job['error'] = None
+            self._save(manifest, job)
+            try:
+                completed = self.run(
+                    command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=3600,
+                )
+                if completed.returncode != 0 or not pending_path.is_file():
+                    raise ValueError('ffmpeg could not finalize checkpointed video')
+                with pending_path.open('rb') as stream:
+                    try:
+                        os.fsync(stream.fileno())
+                    except OSError:
+                        pass
+                pending_path.replace(final_path)
+                _fsync_directory(final_path.parent)
+                metadata = {
+                    **request,
+                    'schemaVersion': 2,
+                    'createdAt': job['createdAt'],
+                    'completedAt': utc_now(),
+                    'file': final_path.name,
+                    'bytes': final_path.stat().st_size,
+                    'checkpointSeconds': request['checkpointSeconds'],
+                    'resumeCount': job.get('resumeCount', 0),
+                    'segments': job['segments'],
+                }
+                atomic_write_json(final_path.with_suffix('.json'), metadata)
+            except (OSError, subprocess.SubprocessError, ValueError) as error:
+                pending_path.unlink(missing_ok=True)
+                job['state'] = 'ready'
+                job['error'] = str(error)
+                self._save(manifest, job)
+                if isinstance(error, ValueError):
+                    raise ValueError(f'Could not finalize video: {error}') from error
+                raise ValueError(f'Could not finalize video: {error}') from error
+            finally:
+                concat_path.unlink(missing_ok=True)
+
+            shutil.rmtree(manifest.parent, ignore_errors=True)
+            with self.lock:
+                index = self._read_index()
+                index['jobs'].pop(job_id, None)
+                self._write_index(index)
+                self.job_locks.pop(job_id, None)
+            return {
+                'url': '/' + final_path.relative_to(self.root).as_posix(),
+                'filename': final_path.name,
+                'bytes': final_path.stat().st_size,
+            }

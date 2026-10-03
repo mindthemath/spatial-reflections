@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -40,6 +41,29 @@ class VideoJobStoreTest(unittest.TestCase):
 
     def write_manifest(self, job, value):
         self.manifest(job).write_text(json.dumps(value))
+
+    def ready_job(self, video_format='mp4'):
+        job = self.store.create(request(
+            name=f'finished {video_format}', fps=1, frames=2,
+            checkpointSeconds=1, format=video_format,
+        ))
+        manifest_path = self.manifest(job)
+        manifest = json.loads(manifest_path.read_text())
+        segments = []
+        for index, content in enumerate((b'first', b'second')):
+            path = manifest_path.parent / f'segment-{index:06d}.mkv'
+            path.write_bytes(content)
+            segments.append({
+                'index': index,
+                'firstFrame': index,
+                'frames': 1,
+                'file': path.name,
+                'bytes': len(content),
+                'sha256': hashlib.sha256(content).hexdigest(),
+            })
+        manifest.update({'segments': segments, 'nextFrame': 2, 'state': 'ready', 'resumeCount': 3})
+        self.write_manifest(job, manifest)
+        return job
 
     def test_create_atomically_indexes_default_scratch_job(self):
         job = self.store.create(request())
@@ -220,6 +244,64 @@ class VideoJobStoreTest(unittest.TestCase):
         self.store.pause(job['id'], lease=active['lease'])
         replacement = self.store.resume(job['id'])
         self.assertNotEqual(replacement['lease'], active['lease'])
+
+    def test_finish_concats_segments_in_order_for_mp4_and_mkv(self):
+        for video_format in ('mp4', 'mkv'):
+            with self.subTest(video_format=video_format):
+                root = self.root / video_format
+                store = VideoJobStore(root, '/fake/ffmpeg')
+                self.store = store
+                job = self.ready_job(video_format)
+                commands = []
+                concat_inputs = []
+
+                def run(command, **_kwargs):
+                    commands.append(command)
+                    concat_path = Path(command[command.index('-i') + 1])
+                    concat_inputs.append(concat_path.read_text())
+                    self.assertTrue(self.manifest(job).parent.is_dir())
+                    Path(command[-1]).write_bytes(f'final-{video_format}'.encode())
+                    return types.SimpleNamespace(returncode=0)
+
+                store.run = run
+                completed = store.finish(job['id'])
+                self.assertTrue(completed['filename'].endswith(f'.{video_format}'))
+                self.assertIn('segment-000000.mkv', concat_inputs[0])
+                self.assertLess(concat_inputs[0].index('segment-000000.mkv'),
+                                concat_inputs[0].index('segment-000001.mkv'))
+                self.assertIn('-c', commands[0])
+                self.assertIn('copy', commands[0])
+                if video_format == 'mp4':
+                    self.assertIn('+faststart', commands[0])
+                else:
+                    self.assertEqual(commands[0][-3:-1], ['-f', 'matroska'])
+                output = root / completed['url'].lstrip('/')
+                metadata = json.loads(output.with_suffix('.json').read_text())
+                self.assertEqual(metadata['checkpointSeconds'], 1)
+                self.assertEqual(metadata['resumeCount'], 3)
+                self.assertEqual(len(metadata['segments']), 2)
+                self.assertFalse(self.manifest(job).parent.exists())
+                self.assertEqual(store.list_jobs(), [])
+
+    def test_failed_finalization_preserves_segments_for_retry(self):
+        job = self.ready_job('mp4')
+        attempts = [0]
+
+        def run(command, **_kwargs):
+            attempts[0] += 1
+            if attempts[0] == 1:
+                return types.SimpleNamespace(returncode=1)
+            Path(command[-1]).write_bytes(b'complete')
+            return types.SimpleNamespace(returncode=0)
+
+        self.store.run = run
+        with self.assertRaisesRegex(ValueError, 'finalize'):
+            self.store.finish(job['id'])
+        self.assertTrue(self.manifest(job).parent.is_dir())
+        self.assertEqual(len(list(self.manifest(job).parent.glob('segment-*.mkv'))), 2)
+        self.assertEqual(self.store.list_jobs()[0]['state'], 'ready')
+        completed = self.store.finish(job['id'])
+        self.assertTrue((self.root / completed['url'].lstrip('/')).is_file())
 
 
 if __name__ == '__main__':
