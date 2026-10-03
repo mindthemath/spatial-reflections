@@ -2,8 +2,9 @@
 skybox/
 # raw images
 raw/
-# generated studio exports
+# generated studio and video exports
 exports/
+videos/
 # Bun / Playwright local state
 node_modules/
 test-results/

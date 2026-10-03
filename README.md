@@ -10,6 +10,8 @@ Install the locked JavaScript tooling and Chromium once, and synchronize the ven
 make install
 ```
 
+Video export additionally requires an `ffmpeg` executable with H.264 (`libx264`) support on `PATH`. It is called as a subprocess; the Python server remains standard-library-only and does not install or import third-party Python packages.
+
 Then start the local application:
 
 ```sh
@@ -100,7 +102,11 @@ Large exports remain untouched on disk. If an image exceeds the viewer GPU's max
 
 The viewer drives animation from an integer frame index rather than repeatedly adding to a floating-point time value. For the current decimal 4D rotation coefficients, it finds a common full-rotation period, rounds the requested motion step to an integer loop length, and derives the exact time step needed to return seamlessly to frame zero.
 
-The collapsed **Video timing** section provides export FPS, loop frame count, duration, exact time step, a frame scrubber and single-frame controls. FPS controls preview cadence and reported movie duration; every frame remains deterministic for a future video encoder. Screenshots preserve the current frame and FPS while remaining backward-compatible with previously saved `time` metadata.
+The collapsed **Video timing** section provides export FPS, loop frame count, duration, exact time step, a frame scrubber and single-frame controls. FPS controls preview cadence and reported movie duration. Screenshots preserve the current frame and FPS while remaining backward-compatible with previously saved `time` metadata.
+
+**Export video…** opens a confirmation dialog for resolution, quality and range. The default is the entire perfect loop. A clip window can instead use a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a bitrate-based size estimate before any work begins.
+
+Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time, and the local server streams each frame directly into `ffmpeg` for H.264/MP4 encoding under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Keep the viewer open and prevent the machine from sleeping during an export. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
 
 ## Data and state
 

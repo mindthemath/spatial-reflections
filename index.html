@@ -31,14 +31,27 @@
         #skybox-status.error, #skybox-library-status.error { color: #ffaaa0; }
         .skybox-links { display: grid; gap: 5px; margin-top: 8px; font-size: 11px; }
         .skybox-links a, #skybox-library-dialog a { color: #80caff; }
-        #skybox-library-dialog, #publish-skybox-dialog { background: #191d25; color: #d9dee8; border: 1px solid #52637c; border-radius: 0; padding: 20px; width: min(900px, 90vw); max-height: 85vh; overflow: auto; font: 13px system-ui, sans-serif; }
+        #skybox-library-dialog, #publish-skybox-dialog, #video-export-dialog { background: #191d25; color: #d9dee8; border: 1px solid #52637c; border-radius: 0; padding: 20px; width: min(900px, 90vw); max-height: 85vh; overflow: auto; font: 13px system-ui, sans-serif; }
         #publish-skybox-dialog { width: min(480px, 90vw); }
-        #skybox-library-dialog::backdrop, #publish-skybox-dialog::backdrop { background: #000a; }
+        #video-export-dialog { width: min(560px, 90vw); }
+        #skybox-library-dialog::backdrop, #publish-skybox-dialog::backdrop, #video-export-dialog::backdrop { background: #000c; }
         #publish-skybox-dialog form, #publish-skybox-dialog label { display: grid; gap: 7px; }
         #publish-skybox-dialog form { gap: 14px; }
         #publish-skybox-dialog input, #publish-skybox-dialog textarea { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; font: inherit; }
         #publish-skybox-dialog textarea { min-height: 80px; resize: vertical; }
         #publish-result { overflow-wrap: anywhere; }
+        #video-export-dialog label { display: grid; gap: 5px; }
+        #video-export-dialog input, #video-export-dialog select { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; border-radius: 0; font: inherit; }
+        #video-export-dialog button { padding: 7px 10px; border-radius: 0; cursor: pointer; }
+        #video-export-dialog button:disabled { opacity: .45; cursor: default; }
+        .video-export-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .video-export-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 14px; }
+        #video-export-summary { border: 1px solid #414b5c; background: #10141b; padding: 10px; line-height: 1.55; margin-top: 12px; }
+        #video-export-progress { width: 100%; margin-top: 12px; accent-color: #80caff; }
+        #video-export-status { min-height: 1.5em; overflow-wrap: anywhere; color: #a8bacf; }
+        #video-export-status.error { color: #ffaaa0; }
+        #video-export-result a { color: #80caff; }
+        @media (max-width: 560px) { .video-export-grid { grid-template-columns: 1fr; } }
         .library-heading { display: flex; gap: 10px; align-items: center; }
         .library-heading strong { margin-right: auto; }
         #skybox-export-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }

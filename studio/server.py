@@ -6,6 +6,8 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
+import threading
 import uuid
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +20,11 @@ EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
 MAX_BODY = 100 * 1024 * 1024  # Legacy JSON export limit; Studio uses streamed PNG uploads.
 MAX_FACE_BYTES = 512 * 1024 * 1024
 PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+VIDEO_QUALITIES = {'draft': 0.035, 'standard': 0.07, 'high': 0.12}
+MAX_VIDEO_FRAME_BYTES = 100 * 1024 * 1024
+MAX_VIDEO_FRAMES = 10_000_000
+VIDEO_JOBS = {}
+VIDEO_JOBS_LOCK = threading.Lock()
 
 
 def hash_file(path):
@@ -175,6 +182,125 @@ def publish_work(request):
     return {'slug': slug, 'folder': destination.relative_to(ROOT).as_posix(), 'url': f'/site/work/{slug}/'}
 
 
+def video_capabilities():
+    ffmpeg = shutil.which('ffmpeg')
+    return {'available': bool(ffmpeg), 'encoder': 'H.264 / MP4' if ffmpeg else None,
+            'qualities': list(VIDEO_QUALITIES), 'freeBytes': shutil.disk_usage(ROOT).free,
+            'reason': None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'}
+
+
+def validate_video_request(request):
+    width = int(request.get('width', 0))
+    height = int(request.get('height', 0))
+    fps = int(request.get('fps', 0))
+    frames = int(request.get('frames', 0))
+    quality = request.get('quality', 'standard')
+    if width < 64 or height < 64 or width > 7680 or height > 4320 or width % 2 or height % 2:
+        raise ValueError('Video dimensions must be even and between 64×64 and 7680×4320')
+    if fps not in (24, 25, 30, 50, 60):
+        raise ValueError('Unsupported video frame rate')
+    if frames < 1 or frames > MAX_VIDEO_FRAMES:
+        raise ValueError(f'Video must contain between 1 and {MAX_VIDEO_FRAMES:,} frames')
+    if quality not in VIDEO_QUALITIES:
+        raise ValueError('Unsupported video quality')
+    bit_rate = round(width * height * fps * VIDEO_QUALITIES[quality])
+    estimate = round(bit_rate * (frames / fps) / 8 * 1.03)
+    return width, height, fps, frames, quality, bit_rate, estimate
+
+
+def start_video(request):
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise ValueError('Video export requires ffmpeg on the local server PATH')
+    width, height, fps, frames, quality, bit_rate, estimate = validate_video_request(request)
+    label = re.sub(r'[^a-zA-Z0-9_-]+', '-', str(request.get('name', 'tesseract')))[:60].strip('-') or 'tesseract'
+    timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    job_id = uuid.uuid4().hex
+    parent = ROOT / 'videos'
+    parent.mkdir(exist_ok=True)
+    free_bytes = shutil.disk_usage(parent).free
+    if estimate > free_bytes * 0.9:
+        raise ValueError(f'Estimated video size exceeds available disk space ({free_bytes:,} bytes free)')
+    filename = f'{label}-{timestamp}-{job_id[:8]}.mp4'
+    final_path = parent / filename
+    pending_path = parent / f'.{filename}.pending.mp4'
+    command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe',
+               '-framerate', str(fps), '-vcodec', 'png', '-i', 'pipe:0', '-an',
+               '-c:v', 'libx264', '-preset', 'medium', '-b:v', str(bit_rate),
+               '-maxrate', str(round(bit_rate * 1.5)), '-bufsize', str(bit_rate * 2),
+               '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(pending_path)]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    job = {'id': job_id, 'process': process, 'lock': threading.Lock(), 'width': width, 'height': height,
+           'fps': fps, 'frames': frames, 'received': 0, 'quality': quality, 'bitRate': bit_rate,
+           'estimatedBytes': estimate, 'pending': pending_path, 'final': final_path,
+           'request': request, 'createdAt': datetime.now(timezone.utc).isoformat()}
+    with VIDEO_JOBS_LOCK:
+        VIDEO_JOBS[job_id] = job
+    return {'id': job_id, 'filename': filename, 'estimatedBytes': estimate, 'bitRate': bit_rate}
+
+
+def video_job(job_id):
+    if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
+        raise ValueError('Invalid video export id')
+    with VIDEO_JOBS_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+    if not job:
+        raise ValueError('Video export is missing or already complete')
+    return job
+
+
+def remove_video_job(job_id):
+    with VIDEO_JOBS_LOCK:
+        return VIDEO_JOBS.pop(job_id, None)
+
+
+def cancel_video(job_id):
+    job = remove_video_job(job_id)
+    if not job:
+        return
+    with job['lock']:
+        process = job['process']
+        if process.poll() is None:
+            process.kill()
+        if process.stdin and not process.stdin.closed:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        job['pending'].unlink(missing_ok=True)
+
+
+def finish_video(job_id):
+    job = video_job(job_id)
+    with job['lock']:
+        if job['received'] != job['frames']:
+            raise ValueError(f"Expected {job['frames']:,} frames but received {job['received']:,}")
+        process = job['process']
+        process.stdin.close()
+        try:
+            return_code = process.wait(timeout=600)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise ValueError('ffmpeg did not finish within 10 minutes')
+        if return_code != 0 or not job['pending'].is_file():
+            job['pending'].unlink(missing_ok=True)
+            raise ValueError('ffmpeg could not encode the submitted frames')
+        job['pending'].replace(job['final'])
+        metadata = {key: value for key, value in job['request'].items() if key != 'viewerState'}
+        metadata.update({'schemaVersion': 1, 'createdAt': job['createdAt'], 'file': job['final'].name,
+                         'bytes': job['final'].stat().st_size, 'viewerState': job['request'].get('viewerState')})
+        job['final'].with_suffix('.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    remove_video_job(job_id)
+    return {'url': '/' + job['final'].relative_to(ROOT).as_posix(), 'filename': job['final'].name,
+            'bytes': job['final'].stat().st_size}
+
+
 def finish_export(folder, analysis):
     state = json.loads((folder / '.pending.json').read_text())
     verify_pipeline(state)  # Recheck after rendering, not just when the export started.
@@ -228,6 +354,8 @@ class Handler(SimpleHTTPRequestHandler):
             for header in ('If-Modified-Since', 'If-None-Match'):
                 if header in self.headers:
                     del self.headers[header]
+        if path == '/api/video/capabilities':
+            return self.send_json(200, video_capabilities())
         if path == '/api/exports':
             exports = []
             parent = ROOT / 'exports'
@@ -263,12 +391,43 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = urlparse(self.path)
-        if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish'):
+        if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish',
+                              '/api/video/start', '/api/video/frame', '/api/video/finish', '/api/video/cancel'):
             return self.send_json(404, {'error': 'Unknown endpoint'})
         origin = self.headers.get('Origin')
         if origin and urlparse(origin).netloc != self.headers.get('Host'):
             return self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
         try:
+            if route.path == '/api/video/frame':
+                query = parse_qs(route.query)
+                job = video_job(query.get('id', [''])[0])
+                frame = int(query.get('frame', ['-1'])[0])
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 24 <= length <= MAX_VIDEO_FRAME_BYTES:
+                    raise ValueError('PNG frame has an invalid size')
+                header = self.rfile.read(24)
+                if header[:8] != PNG_SIGNATURE or header[12:16] != b'IHDR':
+                    raise ValueError('Video frame must be a PNG image')
+                width = int.from_bytes(header[16:20], 'big')
+                height = int.from_bytes(header[20:24], 'big')
+                with job['lock']:
+                    if frame != job['received']:
+                        raise ValueError(f"Expected frame {job['received']}, received {frame}")
+                    if (width, height) != (job['width'], job['height']):
+                        raise ValueError(f"Frame must be {job['width']}×{job['height']} pixels")
+                    if job['process'].poll() is not None:
+                        raise ValueError('ffmpeg stopped before the export completed')
+                    job['process'].stdin.write(header)
+                    remaining = length - len(header)
+                    while remaining:
+                        chunk = self.rfile.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError('Incomplete PNG frame upload')
+                        job['process'].stdin.write(chunk)
+                        remaining -= len(chunk)
+                    job['process'].stdin.flush()
+                    job['received'] += 1
+                return self.send_json(201, {'frame': frame + 1, 'frames': job['frames']})
             if route.path == '/api/export/face':
                 query = parse_qs(route.query)
                 folder = pending_folder(query.get('folder', [''])[0])
@@ -294,6 +453,13 @@ class Handler(SimpleHTTPRequestHandler):
                         remaining -= len(chunk)
                 return self.send_json(201, {'face': face})
             request = self.read_json()
+            if route.path == '/api/video/start':
+                return self.send_json(201, start_video(request))
+            if route.path == '/api/video/finish':
+                return self.send_json(201, finish_video(request.get('id')))
+            if route.path == '/api/video/cancel':
+                cancel_video(request.get('id'))
+                return self.send_json(200, {'cancelled': True})
             if route.path == '/api/publish':
                 return self.send_json(201, publish_work(request))
             if route.path == '/api/export/start':

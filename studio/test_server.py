@@ -1,10 +1,12 @@
 import base64
 import hashlib
 import http.client
+import io
 import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 
@@ -43,6 +45,14 @@ class StudioAPITest(unittest.TestCase):
     def request(self, method, path, payload=None, headers=None):
         connection = http.client.HTTPConnection('localhost', self.http.server_port)
         connection.request(method, path, json.dumps(payload) if payload is not None else None, headers or {})
+        response = connection.getresponse()
+        status, data = response.status, json.loads(response.read())
+        connection.close()
+        return status, data
+
+    def raw_request(self, method, path, body, headers=None):
+        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection.request(method, path, body, headers or {})
         response = connection.getresponse()
         status, data = response.status, json.loads(response.read())
         connection.close()
@@ -133,6 +143,57 @@ class StudioAPITest(unittest.TestCase):
         # A completed folder can never receive another face or be finalized again.
         code, _ = self.request('POST', '/api/export/finish', {'folder': folder})
         self.assertEqual(code, 400)
+
+    def test_streamed_video_export(self):
+        class FakeFFmpeg:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.output.write_bytes(b'fake mp4')
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        request = {'name': '../mirror clip', 'width': 64, 'height': 64, 'fps': 24,
+                   'frames': 2, 'quality': 'standard', 'viewerState': {'shader': 'chrome'}}
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg):
+            code, started = self.request('POST', '/api/video/start', request)
+            self.assertEqual(code, 201)
+            frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+            for index in range(2):
+                code, progress = self.raw_request('POST', f"/api/video/frame?id={started['id']}&frame={index}", frame,
+                                                  {'Content-Type': 'image/png'})
+                self.assertEqual(code, 201)
+                self.assertEqual(progress['frame'], index + 1)
+            code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
+            self.assertEqual(code, 201)
+        video = server.ROOT / completed['url'].lstrip('/')
+        self.assertEqual(video.read_bytes(), b'fake mp4')
+        metadata = json.loads(video.with_suffix('.json').read_text())
+        self.assertEqual(metadata['frames'], 2)
+        self.assertEqual(metadata['viewerState']['shader'], 'chrome')
+        self.assertNotIn('..', completed['filename'])
+
+    def test_video_validation_and_capabilities(self):
+        with mock.patch.object(server.shutil, 'which', return_value=None):
+            code, capabilities = self.request('GET', '/api/video/capabilities')
+            self.assertEqual(code, 200)
+            self.assertFalse(capabilities['available'])
+            code, result = self.request('POST', '/api/video/start', {
+                'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60, 'quality': 'standard'})
+            self.assertEqual(code, 400)
+            self.assertIn('ffmpeg', result['error'])
+        with self.assertRaises(ValueError):
+            server.validate_video_request({'width': 1919, 'height': 1080, 'fps': 60, 'frames': 60, 'quality': 'standard'})
 
     def test_publish_creates_standalone_work_and_catalog(self):
         payload = self.payload()
