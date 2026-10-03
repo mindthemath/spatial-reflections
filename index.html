@@ -31,10 +31,12 @@
         #skybox-status.error, #skybox-library-status.error { color: #ffaaa0; }
         .skybox-links { display: grid; gap: 5px; margin-top: 8px; font-size: 11px; }
         .skybox-links a, #skybox-library-dialog a { color: #80caff; }
-        #skybox-library-dialog, #publish-skybox-dialog, #video-export-dialog { background: #191d25; color: #d9dee8; border: 1px solid #52637c; border-radius: 0; padding: 20px; width: min(900px, 90vw); max-height: 85vh; overflow: auto; font: 13px system-ui, sans-serif; }
+        #skybox-library-dialog, #publish-skybox-dialog, #video-export-dialog, #confirm-action-dialog { background: #191d25; color: #d9dee8; border: 1px solid #52637c; border-radius: 0; padding: 20px; width: min(900px, 90vw); max-height: 85vh; overflow: auto; font: 13px system-ui, sans-serif; }
         #publish-skybox-dialog { width: min(480px, 90vw); }
         #video-export-dialog { width: min(560px, 90vw); }
-        #skybox-library-dialog::backdrop, #publish-skybox-dialog::backdrop, #video-export-dialog::backdrop { background: #000c; }
+        #confirm-action-dialog { width: min(420px, 90vw); }
+        #confirm-action-dialog p { margin: 12px 0 0; line-height: 1.45; }
+        #skybox-library-dialog::backdrop, #publish-skybox-dialog::backdrop, #video-export-dialog::backdrop, #confirm-action-dialog::backdrop { background: #000c; }
         #publish-skybox-dialog form, #publish-skybox-dialog label { display: grid; gap: 7px; }
         #publish-skybox-dialog form { gap: 14px; }
         #publish-skybox-dialog input, #publish-skybox-dialog textarea { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; font: inherit; }
@@ -42,7 +44,7 @@
         #publish-result { overflow-wrap: anywhere; }
         #video-export-dialog label { display: grid; gap: 5px; }
         #video-export-dialog input, #video-export-dialog select { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; border-radius: 0; font: inherit; }
-        #video-export-dialog button { padding: 7px 10px; border-radius: 0; cursor: pointer; }
+        #video-export-dialog button, #confirm-action-dialog button { padding: 7px 10px; border-radius: 0; cursor: pointer; }
         #video-export-dialog button:disabled { opacity: .45; cursor: default; }
         .video-export-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
         .video-export-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 14px; }
@@ -58,7 +60,7 @@
         .skybox-card { border: 1px solid #414b5c; padding: 10px; display: grid; gap: 7px; }
         .skybox-card img { width: 100%; height: 130px; object-fit: cover; }
         .skybox-card small { color: #9cadc3; }
-        #controlPanel button:focus-visible, #controlPanel select:focus-visible, #controlPanel input:focus-visible, #skybox-library-dialog button:focus-visible { outline: 2px solid #80caff; outline-offset: 2px; }
+        #controlPanel button:focus-visible, #controlPanel select:focus-visible, #controlPanel input:focus-visible, #skybox-library-dialog button:focus-visible, #confirm-action-dialog button:focus-visible { outline: 2px solid #80caff; outline-offset: 2px; }
         #controlPanel button, #controlPanel select {
             appearance: none;
             -webkit-appearance: none;

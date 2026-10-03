@@ -89,7 +89,7 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   await viewer.locator('#close-video-export').click();
   const cameraBefore=await viewer.locator('#viewer-camera-info').innerText();
   await viewer.locator('#viewer-shader').selectOption('rough');assert(await viewer.locator('#switch-to-chrome').isVisible());
-  await viewer.locator('#default-skybox').click();await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='Default skybox');
+  await viewer.locator('#default-skybox').click();await viewer.locator('#confirm-action-accept').click();await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='Default skybox');
   assert.equal(await viewer.locator('#viewer-camera-info').innerText(),cameraBefore);assert.equal(await viewer.locator('#viewer-shader').inputValue(),'rough');
   await viewer.locator('#browse-skyboxes').click();await viewer.waitForSelector('.skybox-card');
   await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'untitled'})}).getByRole('button',{name:'Load skybox'}).click();

@@ -36,7 +36,7 @@ function slugify(value) {
     return value.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,60);
 }
 
-export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitchChrome,getViewerState,publication}) {
+export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitchChrome,getViewerState,publication,confirmAction}) {
     if(publication?.schemaVersion===1){
         const section=document.createElement('section');section.className='viewer-skybox';
         section.innerHTML='<div class="skybox-heading">WORK</div><div id="active-skybox"></div><p id="skybox-status" role="status">Loading published environment…</p>';
@@ -126,7 +126,10 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
     }
     $('browse-skyboxes').onclick=()=>{dialog.showModal();refreshLibrary();};
     $('close-skyboxes').onclick=()=>dialog.close();$('refresh-skyboxes').onclick=refreshLibrary;
-    $('default-skybox').onclick=()=>loadSelection('default');
+    $('default-skybox').onclick=async()=>{
+        if(!await confirmAction({title:'DEFAULT SKYBOX',message:'Replace the current environment with the default skybox?',confirmLabel:'Load default'}))return;
+        loadSelection('default');
+    };
     $('switch-to-chrome').onclick=()=>{onSwitchChrome();refreshShaderHint();};
     $('publish-skybox').onclick=()=>{
         $('publish-title').value=activeName||'';$('publish-slug').value=slugify(activeName||'');$('publish-slug').dataset.edited='';

@@ -221,8 +221,9 @@ function init() {
     // Setup drag and drop handlers
     setupDragAndDropHandlers();
     
-    // Start animation loop
-    animate();
+    // Start on a real frame timestamp. A direct call has none, and the first
+    // delta would otherwise become NaN and freeze playback until a manual seek.
+    requestAnimationFrame(animate);
     
     console.log("Initialization complete");
 }
@@ -241,6 +242,7 @@ function createEnvironmentMap() {
             updateMaterialsWithEnvMap();
             previous?.dispose();
         },
+        confirmAction,
         onSwitchChrome: () => {
             const select = document.getElementById('viewer-shader');
             select.value = 'chrome';
@@ -1086,8 +1088,8 @@ function createControls() {
     timelineSlider.style.width = '100%';
     timelineSlider.style.marginTop = '7px';
     timelineSlider.addEventListener('input', function() {
+        pauseAnimation();
         setTimelineFrame(parseInt(this.value, 10));
-        frameAccumulator = 0;
     });
     videoTimingContent.appendChild(timelineSlider);
 
@@ -1107,7 +1109,7 @@ function createControls() {
         button.style.flex = '1';
         button.style.padding = '4px';
         button.addEventListener('click', () => {
-            animationPaused = true;
+            pauseAnimation();
             setTimelineFrame(timelineFrame + direction);
             persistViewerSettings();
         });
@@ -1188,8 +1190,12 @@ function createControls() {
     resetPositionButton.style.flex = '1';
     resetPositionButton.style.marginRight = '5px';
     resetPositionButton.style.padding = '5px';
-    resetPositionButton.addEventListener('click', function() {
-        // Reset camera to initial position
+    resetPositionButton.addEventListener('click', async function() {
+        if (!await confirmAction({
+            title: 'RESET CAMERA',
+            message: 'Reset the camera to its starting position? The current view will be lost.',
+            confirmLabel: 'Reset camera'
+        })) return;
         camera.position.set(3, 3, 3);
         updateCameraInfo();
         controls.update();
@@ -1201,8 +1207,12 @@ function createControls() {
     resetTargetButton.textContent = 'Reset Target';
     resetTargetButton.style.flex = '1';
     resetTargetButton.style.padding = '5px';
-    resetTargetButton.addEventListener('click', function() {
-        // Reset target to origin (0, 0, 0)
+    resetTargetButton.addEventListener('click', async function() {
+        if (!await confirmAction({
+            title: 'RESET TARGET',
+            message: 'Reset the orbit target to the origin? The current target will be lost.',
+            confirmLabel: 'Reset target'
+        })) return;
         controls.target.set(0, 0, 0);
         updateCameraInfo();
         controls.update();
@@ -1348,6 +1358,41 @@ function setTimelineTime(requestedTime) {
         return;
     }
     updateLoopTimingUI();
+}
+
+function pauseAnimation() {
+    animationPaused = true;
+    lastAnimationTimestamp = null;
+    frameAccumulator = 0;
+}
+
+function confirmAction({ title, message, confirmLabel }) {
+    let dialog = document.getElementById('confirm-action-dialog');
+    if (!dialog) {
+        dialog = document.createElement('dialog');
+        dialog.id = 'confirm-action-dialog';
+        dialog.innerHTML = `
+            <form method="dialog">
+                <div class="library-heading"><strong id="confirm-action-title"></strong></div>
+                <p id="confirm-action-message"></p>
+                <div class="video-export-actions">
+                    <button type="submit" value="cancel">Cancel</button>
+                    <button type="submit" value="confirm" id="confirm-action-accept"></button>
+                </div>
+            </form>`;
+        document.body.appendChild(dialog);
+    }
+    dialog.querySelector('#confirm-action-title').textContent = title;
+    dialog.querySelector('#confirm-action-message').textContent = message;
+    dialog.querySelector('#confirm-action-accept').textContent = confirmLabel;
+    return new Promise(resolve => {
+        dialog.addEventListener('close', function onClose() {
+            dialog.removeEventListener('close', onClose);
+            resolve(dialog.returnValue === 'confirm');
+        });
+        dialog.showModal();
+        dialog.querySelector('button[value="cancel"]').focus();
+    });
 }
 
 function setTimelineFrame(requestedFrame) {
@@ -2590,15 +2635,19 @@ function animate(timestamp) {
     controls.update();
     
     if (!animationPaused && loopTiming.frameCount > 1) {
-        if (lastAnimationTimestamp !== null) {
-            frameAccumulator += (timestamp - lastAnimationTimestamp) * exportFps / 1000;
-            const framesToAdvance = Math.floor(frameAccumulator);
-            if (framesToAdvance > 0) {
-                setTimelineFrame(timelineFrame + framesToAdvance);
-                frameAccumulator -= framesToAdvance;
+        if (Number.isFinite(timestamp)) {
+            if (Number.isFinite(lastAnimationTimestamp)) {
+                const delta = timestamp - lastAnimationTimestamp;
+                if (delta > 0) {
+                    frameAccumulator += delta * exportFps / 1000;
+                    const framesToAdvance = Math.floor(frameAccumulator);
+                    if (framesToAdvance > 0) {
+                        setTimelineFrame(timelineFrame + framesToAdvance);
+                        frameAccumulator -= framesToAdvance;
+                    }
+                }
             }
         }
-        lastAnimationTimestamp = timestamp;
     } else {
         lastAnimationTimestamp = null;
         frameAccumulator = 0;
@@ -2611,6 +2660,7 @@ function animate(timestamp) {
     updateTesseractProjection();
     
     // Render the scene
+            lastAnimationTimestamp = timestamp;
     renderer.render(scene, camera);
 }
 
