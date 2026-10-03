@@ -106,7 +106,27 @@ The collapsed **Video timing** section provides export FPS, loop frame count, du
 
 **Export video…** opens a confirmation dialog for MP4 or MKV container, resolution, quality and range. The default is a 30-second MP4 clip starting at the current frame, shortened to fit when the loop is shorter than 30 seconds. Whole-loop export remains available. A clip window uses a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a bitrate-based size estimate before any work begins. If that file name already labels a clip in `videos/`, the viewer asks before adding another.
 
-Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time, and the local server streams each frame directly into `ffmpeg` for H.264 encoding in an MP4 or MKV container under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. The viewer page has to stay loaded, and the machine should not sleep, but the window can sit in the background. Leaving the page cancels the job and removes its partial file. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+
+### Long-running video recovery
+
+Every video export is resumable. The default checkpoint interval is 60 seconds and can be changed from 1 to 3,600 seconds. A browser navigation, server shutdown, encoder failure, or five minutes without a frame pauses the job and preserves completed checkpoints. Reopen the same viewer URL with the same camera and render settings, open **Export video…**, and use **Resume**. The active incomplete checkpoint is rerendered, so an interruption loses at most one checkpoint interval—not the preceding hours. **Pause export** is recoverable; **Discard** permanently removes the checkpoints and requires confirmation.
+
+Checkpoint segments ordinarily live under `videos/.checkpoints/`. The export dialog can instead use an absolute scratch folder on another local disk or a mounted SMB share. Plan scratch capacity for roughly the final encoded video size plus one active segment and the final output; free-space checks for the final output still apply to `videos/`. For network storage:
+
+- mount the share before starting or resuming and keep the mount path stable;
+- prefer a reliable wired connection and prevent the workstation and storage from sleeping;
+- do not let two machines write the same scratch job;
+- expect a disconnected share to show the job as unavailable until the same path is mounted again.
+
+The job index is `videos/.video-job-index.json`; each scratch job contains an atomic manifest and SHA-256 hashes for completed segments. Resume verifies those hashes before encoding further. If final MP4/MKV assembly fails, the checkpoints remain and **Resume** retries finalization. Restart recovery is therefore:
+
+```sh
+make serve
+# Open the original viewer URL → Export video… → Resume
+```
+
+The viewer page and machine must remain active while new frames are being rendered, but it is safe to pause, navigate away, restart the local server, and resume later. The final output currently remains under `videos/` even when scratch storage is elsewhere.
 
 ## Data and state
 

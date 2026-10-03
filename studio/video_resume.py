@@ -288,6 +288,8 @@ class VideoJobStore:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+        if process and process.stdin:
+            process.stdin.close()
         runtime['pending'].unlink(missing_ok=True)
 
     def pause(self, job_id, reason=None, lease=None):
@@ -350,6 +352,8 @@ class VideoJobStore:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+        if process.stdin:
+            process.stdin.close()
         runtime['pending'].unlink(missing_ok=True)
         with self.lock:
             self.active.pop(job_id, None)
