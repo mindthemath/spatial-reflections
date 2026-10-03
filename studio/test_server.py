@@ -21,6 +21,9 @@ class StudioAPITest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.original_root = server.ROOT
+        self.original_video_store = getattr(server, 'VIDEO_STORE', None)
+        if hasattr(server, 'VIDEO_STORE'):
+            server.VIDEO_STORE = None
         server.ROOT = Path(self.temp.name)
         (server.ROOT / 'raw').mkdir()
         (server.ROOT / 'raw' / 'photo.png').write_bytes(PNG)
@@ -40,6 +43,12 @@ class StudioAPITest(unittest.TestCase):
         self.http.shutdown()
         self.http.server_close()
         self.thread.join()
+        if hasattr(server, 'VIDEO_STORE'):
+            try:
+                server.video_store().pause_all()
+            except (OSError, ValueError):
+                pass
+            server.VIDEO_STORE = self.original_video_store
         server.ROOT = self.original_root
         self.temp.cleanup()
 
@@ -181,13 +190,18 @@ class StudioAPITest(unittest.TestCase):
 
         request = {'name': '../mirror clip', 'width': 64, 'height': 64, 'fps': 24,
                    'frames': 2, 'quality': 'standard', 'viewerState': {'shader': 'chrome'}}
+        def fake_run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b'fake mp4')
+            return mock.Mock(returncode=0)
+
         with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
-             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg):
+             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg), \
+             mock.patch.object(server.subprocess, 'run', fake_run):
             code, started = self.request('POST', '/api/video/start', request)
             self.assertEqual(code, 201)
             frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
             for index in range(2):
-                code, progress = self.raw_request('POST', f"/api/video/frame?id={started['id']}&frame={index}", frame,
+                code, progress = self.raw_request('POST', f"/api/video/frame?id={started['id']}&frame={index}&lease={started['lease']}", frame,
                                                   {'Content-Type': 'image/png'})
                 self.assertEqual(code, 201)
                 self.assertEqual(progress['frame'], index + 1)
@@ -225,23 +239,110 @@ class StudioAPITest(unittest.TestCase):
         request = {'name': 'matroska clip', 'width': 64, 'height': 64, 'fps': 24,
                    'frames': 1, 'quality': 'standard', 'format': 'mkv'}
         frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+        def fake_run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b'fake mkv')
+            return mock.Mock(returncode=0)
+
         with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
-             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg):
+             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg), \
+             mock.patch.object(server.subprocess, 'run', fake_run):
             code, started = self.request('POST', '/api/video/start', request)
             self.assertEqual(code, 201)
             self.assertTrue(started['filename'].endswith('.mkv'))
+            self.assertEqual(self.raw_request(
+                'POST', f"/api/video/frame?id={started['id']}&frame=0&lease={started['lease']}", frame,
+                {'Content-Type': 'image/png'})[0], 201)
             self.assertNotIn('-movflags', commands[0])
             self.assertEqual(commands[0][-3:-1], ['-f', 'matroska'])
             self.assertTrue(str(commands[0][-1]).endswith('.pending.mkv'))
-            self.assertEqual(self.raw_request(
-                'POST', f"/api/video/frame?id={started['id']}&frame=0", frame,
-                {'Content-Type': 'image/png'})[0], 201)
             code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
             self.assertEqual(code, 201)
         self.assertTrue(completed['filename'].endswith('.mkv'))
         metadata = json.loads((server.ROOT / completed['url'].lstrip('/')).with_suffix('.json').read_text())
         self.assertEqual(metadata['format'], 'mkv')
         self.assertIn('matroska-clip', server.video_clip_labels())
+
+    def test_resumable_video_api_survives_store_recreation(self):
+        class FakeFFmpeg:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.output.write_bytes(b'checkpoint')
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        def fake_run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b'final video')
+            return mock.Mock(returncode=0)
+
+        request = {
+            'name': 'overnight', 'width': 64, 'height': 64, 'fps': 24,
+            'frames': 25, 'quality': 'draft', 'format': 'mkv',
+            'checkpointSeconds': 1, 'sourceUrl': '/?skybox=exports%2Ftest',
+            'renderSignature': 'same-render',
+        }
+        frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg), \
+             mock.patch.object(server.subprocess, 'run', fake_run):
+            code, started = self.request('POST', '/api/video/start', request)
+            self.assertEqual(code, 201)
+            self.assertIn('lease', started)
+            for index in range(24):
+                code, progress = self.raw_request(
+                    'POST',
+                    f"/api/video/frame?id={started['id']}&frame={index}&lease={started['lease']}",
+                    frame, {'Content-Type': 'image/png'})
+                self.assertEqual(code, 201)
+            self.assertEqual(progress['durableFrame'], 24)
+            self.assertEqual(self.request('POST', '/api/video/pause', {
+                'id': started['id'], 'lease': started['lease']})[0], 200)
+
+            server.VIDEO_STORE = None
+            code, jobs = self.request('GET', '/api/video/jobs')
+            self.assertEqual(code, 200)
+            self.assertEqual(jobs['jobs'][0]['nextFrame'], 24)
+            code, resumed = self.request('POST', '/api/video/resume', {'id': started['id']})
+            self.assertEqual(code, 200)
+            self.assertNotEqual(resumed['lease'], started['lease'])
+            code, progress = self.raw_request(
+                'POST',
+                f"/api/video/frame?id={started['id']}&frame=24&lease={resumed['lease']}",
+                frame, {'Content-Type': 'image/png'})
+            self.assertEqual(code, 201)
+            self.assertEqual(progress['durableFrame'], 25)
+            code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
+            self.assertEqual(code, 201)
+            self.assertTrue(completed['filename'].endswith('.mkv'))
+            self.assertTrue((server.ROOT / completed['url'].lstrip('/')).is_file())
+            self.assertEqual(self.request('GET', '/api/video/jobs')[1]['jobs'], [])
+
+    def test_video_cancel_discards_resumable_job(self):
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
+            code, started = self.request('POST', '/api/video/start', {
+                'name': 'discard', 'width': 64, 'height': 64, 'fps': 24,
+                'frames': 24, 'quality': 'draft', 'format': 'mp4',
+                'checkpointSeconds': 60,
+            })
+            self.assertEqual(code, 201)
+            self.assertEqual(self.request('POST', '/api/video/cancel', {'id': started['id']})[0], 200)
+            self.assertEqual(self.request('GET', '/api/video/jobs')[1]['jobs'], [])
+            code, result = self.request('POST', '/api/video/start', {
+                'name': 'bad-scratch', 'width': 64, 'height': 64, 'fps': 24,
+                'frames': 24, 'quality': 'draft', 'format': 'mp4',
+                'checkpointSeconds': 60, 'scratchPath': ['not', 'a', 'path'],
+            })
+            self.assertEqual(code, 400)
+            self.assertIn('scratch', result['error'].lower())
 
     def test_video_cancel_does_not_wait_for_frame_lock(self):
         class FakeProcess:

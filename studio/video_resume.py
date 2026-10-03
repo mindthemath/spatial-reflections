@@ -149,7 +149,10 @@ class VideoJobStore:
 
         with self.lock:
             job_id = uuid.uuid4().hex
-            configured = str(request.get('scratchPath') or '').strip()
+            configured_value = request.get('scratchPath')
+            if configured_value is not None and not isinstance(configured_value, str):
+                raise ValueError('Video scratch path must be text')
+            configured = str(configured_value or '').strip()
             scratch_base = (Path(configured).expanduser() if configured
                             else self.videos / '.checkpoints').resolve()
             job_dir = scratch_base / job_id
@@ -203,6 +206,23 @@ class VideoJobStore:
                         'manifestPath': str(manifest),
                     })
             return sorted(result, key=lambda item: item.get('createdAt', ''))
+
+    def get(self, job_id):
+        with self._job_lock(job_id):
+            manifest, job = self._load(job_id)
+            return self._public(manifest, job)
+
+    def output_filename(self, job_id):
+        manifest, job = self._load(job_id)
+        request = job['request']
+        label = re.sub(r'[^a-zA-Z0-9_-]+', '-', str(request.get('name', 'tesseract')))
+        label = label[:60].strip('-') or 'tesseract'
+        try:
+            created = datetime.fromisoformat(job['createdAt']).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            created = datetime.now(timezone.utc)
+        timestamp = created.strftime('%Y%m%dT%H%M%SZ')
+        return f"{label}-{timestamp}-{job_id[:8]}.{request.get('format', 'mp4')}"
 
     def _verify_segments(self, manifest, job):
         job_dir = manifest.parent.resolve()
@@ -438,6 +458,15 @@ class VideoJobStore:
                 pass
         return stale
 
+    def pause_all(self):
+        with self.lock:
+            job_ids = list(self.leases)
+        for job_id in job_ids:
+            try:
+                self.pause(job_id, 'Local video server stopped')
+            except (OSError, ValueError):
+                pass
+
     def discard(self, job_id):
         self._interrupt_active_segment(job_id)
         with self._job_lock(job_id), self.lock:
@@ -465,14 +494,7 @@ class VideoJobStore:
             if video_format not in ('mp4', 'mkv'):
                 raise ValueError('Unsupported video format')
 
-            label = re.sub(r'[^a-zA-Z0-9_-]+', '-', str(request.get('name', 'tesseract')))
-            label = label[:60].strip('-') or 'tesseract'
-            try:
-                created = datetime.fromisoformat(job['createdAt']).astimezone(timezone.utc)
-            except (ValueError, TypeError):
-                created = datetime.now(timezone.utc)
-            timestamp = created.strftime('%Y%m%dT%H%M%SZ')
-            filename = f"{label}-{timestamp}-{job_id[:8]}.{video_format}"
+            filename = self.output_filename(job_id)
             self.videos.mkdir(parents=True, exist_ok=True)
             final_path = self.videos / filename
             pending_path = self.videos / f'.{final_path.stem}.pending{final_path.suffix}'

@@ -15,6 +15,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from video_resume import VideoJobStore
+
 ROOT = Path(__file__).resolve().parent.parent
 FACES = ('px', 'nx', 'py', 'ny', 'pz', 'nz')
 EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
@@ -28,6 +30,7 @@ MAX_VIDEO_FRAMES = 10_000_000
 VIDEO_FRAME_READ_TIMEOUT = 30
 VIDEO_JOBS = {}
 VIDEO_JOBS_LOCK = threading.Lock()
+VIDEO_STORE = None
 
 
 def hash_file(path):
@@ -209,6 +212,20 @@ def video_capabilities():
             'reason': None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'}
 
 
+def video_store():
+    global VIDEO_STORE
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise ValueError('Video export requires ffmpeg on the local server PATH')
+    root = ROOT.resolve()
+    if VIDEO_STORE is None or VIDEO_STORE.root != root or VIDEO_STORE.ffmpeg != str(ffmpeg):
+        VIDEO_STORE = VideoJobStore(root, ffmpeg)
+    # Keep dependency injection and unittest patches applied to subprocess.
+    VIDEO_STORE.popen = subprocess.Popen
+    VIDEO_STORE.run = subprocess.run
+    return VIDEO_STORE
+
+
 def validate_video_request(request):
     width = int(request.get('width', 0))
     height = int(request.get('height', 0))
@@ -236,32 +253,31 @@ def start_video(request):
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
     width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
-    request = {**request, 'format': video_format}
-    label = re.sub(r'[^a-zA-Z0-9_-]+', '-', str(request.get('name', 'tesseract')))[:60].strip('-') or 'tesseract'
-    timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    job_id = uuid.uuid4().hex
+    checkpoint_seconds = int(request.get('checkpointSeconds', 60))
+    request = {
+        **request, 'width': width, 'height': height, 'fps': fps,
+        'frames': frames, 'quality': quality, 'format': video_format,
+        'bitRate': bit_rate, 'estimatedBytes': estimate,
+        'checkpointSeconds': checkpoint_seconds,
+    }
     parent = ROOT / 'videos'
     parent.mkdir(exist_ok=True)
     free_bytes = shutil.disk_usage(parent).free
     if estimate > free_bytes * 0.9:
         raise ValueError(f'Estimated video size exceeds available disk space ({free_bytes:,} bytes free)')
-    filename = f'{label}-{timestamp}-{job_id[:8]}.{video_format}'
-    final_path = parent / filename
-    pending_path = parent / f'.{final_path.stem}.pending{final_path.suffix}'
-    container_args = ['-movflags', '+faststart'] if video_format == 'mp4' else ['-f', 'matroska']
-    command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe',
-               '-framerate', str(fps), '-vcodec', 'png', '-i', 'pipe:0', '-an',
-               '-c:v', 'libx264', '-preset', 'medium', '-b:v', str(bit_rate),
-               '-maxrate', str(round(bit_rate * 1.5)), '-bufsize', str(bit_rate * 2),
-               '-pix_fmt', 'yuv420p', *container_args, str(pending_path)]
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    job = {'id': job_id, 'process': process, 'lock': threading.Lock(), 'width': width, 'height': height,
-           'fps': fps, 'frames': frames, 'received': 0, 'quality': quality, 'bitRate': bit_rate,
-           'estimatedBytes': estimate, 'pending': pending_path, 'final': final_path,
-           'request': request, 'createdAt': datetime.now(timezone.utc).isoformat()}
-    with VIDEO_JOBS_LOCK:
-        VIDEO_JOBS[job_id] = job
-    return {'id': job_id, 'filename': filename, 'estimatedBytes': estimate, 'bitRate': bit_rate}
+    store = video_store()
+    created = store.create(request)
+    try:
+        active = store.resume(created['id'])
+    except Exception:
+        store.discard(created['id'])
+        raise
+    active.update({
+        'filename': store.output_filename(created['id']),
+        'estimatedBytes': estimate,
+        'bitRate': bit_rate,
+    })
+    return active
 
 
 def video_job(job_id):
@@ -307,35 +323,15 @@ def cancel_all_videos():
             cancel_video(job_id)
         except (OSError, subprocess.SubprocessError):
             pass
+    if VIDEO_STORE is not None:
+        VIDEO_STORE.pause_all()
 
 
 atexit.register(cancel_all_videos)
 
 
 def finish_video(job_id):
-    job = video_job(job_id)
-    with job['lock']:
-        if job['received'] != job['frames']:
-            raise ValueError(f"Expected {job['frames']:,} frames but received {job['received']:,}")
-        process = job['process']
-        process.stdin.close()
-        try:
-            return_code = process.wait(timeout=600)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-            raise ValueError('ffmpeg did not finish within 10 minutes')
-        if return_code != 0 or not job['pending'].is_file():
-            job['pending'].unlink(missing_ok=True)
-            raise ValueError('ffmpeg could not encode the submitted frames')
-        job['pending'].replace(job['final'])
-        metadata = {key: value for key, value in job['request'].items() if key != 'viewerState'}
-        metadata.update({'schemaVersion': 1, 'createdAt': job['createdAt'], 'file': job['final'].name,
-                         'bytes': job['final'].stat().st_size, 'viewerState': job['request'].get('viewerState')})
-        job['final'].with_suffix('.json').write_text(json.dumps(metadata, indent=2) + '\n')
-    remove_video_job(job_id)
-    return {'url': '/' + job['final'].relative_to(ROOT).as_posix(), 'filename': job['final'].name,
-            'bytes': job['final'].stat().st_size}
+    return video_store().finish(job_id)
 
 
 def finish_export(folder, analysis):
@@ -400,6 +396,8 @@ class Handler(SimpleHTTPRequestHandler):
                     del self.headers[header]
         if path == '/api/video/capabilities':
             return self.send_json(200, video_capabilities())
+        if path == '/api/video/jobs':
+            return self.send_json(200, {'jobs': video_store().list_jobs()})
         if path == '/api/exports':
             exports = []
             parent = ROOT / 'exports'
@@ -436,7 +434,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         route = urlparse(self.path)
         if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish',
-                              '/api/video/start', '/api/video/frame', '/api/video/finish', '/api/video/cancel'):
+                              '/api/video/start', '/api/video/frame', '/api/video/finish', '/api/video/cancel',
+                              '/api/video/pause', '/api/video/resume'):
             self.close_connection = True
             return self.send_json(404, {'error': 'Unknown endpoint'})
         origin = self.headers.get('Origin')
@@ -446,7 +445,10 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if route.path == '/api/video/frame':
                 query = parse_qs(route.query)
-                job = video_job(query.get('id', [''])[0])
+                job_id = query.get('id', [''])[0]
+                lease = query.get('lease', [''])[0]
+                store = video_store()
+                job = store.get(job_id)
                 frame = int(query.get('frame', ['-1'])[0])
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 24 <= length <= MAX_VIDEO_FRAME_BYTES:
@@ -459,6 +461,10 @@ class Handler(SimpleHTTPRequestHandler):
                 try:
                     data = self.rfile.read(length)
                 except TimeoutError:
+                    try:
+                        store.pause(job_id, 'Frame upload was interrupted', lease)
+                    except (OSError, ValueError):
+                        pass
                     raise ValueError('Frame upload was interrupted')
                 finally:
                     try:
@@ -466,32 +472,20 @@ class Handler(SimpleHTTPRequestHandler):
                     except OSError:
                         pass
                 if len(data) != length:
+                    try:
+                        store.pause(job_id, 'Incomplete PNG frame upload', lease)
+                    except (OSError, ValueError):
+                        pass
                     raise ValueError('Incomplete PNG frame upload')
                 header = data[:24]
                 if header[:8] != PNG_SIGNATURE or header[12:16] != b'IHDR':
                     raise ValueError('Video frame must be a PNG image')
                 width = int.from_bytes(header[16:20], 'big')
                 height = int.from_bytes(header[20:24], 'big')
-                with job['lock']:
-                    if frame != job['received']:
-                        raise ValueError(f"Expected frame {job['received']}, received {frame}")
-                    if (width, height) != (job['width'], job['height']):
-                        raise ValueError(f"Frame must be {job['width']}×{job['height']} pixels")
-                    if job['process'].poll() is not None:
-                        raise ValueError('ffmpeg stopped before the export completed')
-                    job['received'] += 1
-                try:
-                    job['process'].stdin.write(data)
-                    job['process'].stdin.flush()
-                except BrokenPipeError:
-                    with job['lock']:
-                        job['received'] -= 1
-                    raise ValueError('ffmpeg stopped before the export completed')
-                except OSError:
-                    with job['lock']:
-                        job['received'] -= 1
-                    raise
-                return self.send_json(201, {'frame': frame + 1, 'frames': job['frames']})
+                request = job['request']
+                if (width, height) != (request['width'], request['height']):
+                    raise ValueError(f"Frame must be {request['width']}×{request['height']} pixels")
+                return self.send_json(201, store.write_frame(job_id, frame, data, lease))
             if route.path == '/api/export/face':
                 query = parse_qs(route.query)
                 folder = pending_folder(query.get('folder', [''])[0])
@@ -522,8 +516,14 @@ class Handler(SimpleHTTPRequestHandler):
             if route.path == '/api/video/finish':
                 return self.send_json(201, finish_video(request.get('id')))
             if route.path == '/api/video/cancel':
-                cancel_video(request.get('id'))
+                video_store().discard(request.get('id'))
                 return self.send_json(200, {'cancelled': True})
+            if route.path == '/api/video/pause':
+                paused = video_store().pause(
+                    request.get('id'), 'Browser paused the export', request.get('lease'))
+                return self.send_json(200, paused)
+            if route.path == '/api/video/resume':
+                return self.send_json(200, video_store().resume(request.get('id')))
             if route.path == '/api/publish':
                 return self.send_json(201, publish_work(request))
             if route.path == '/api/export/start':
@@ -560,9 +560,19 @@ class Handler(SimpleHTTPRequestHandler):
                 return
 
 
+class StudioHTTPServer(ThreadingHTTPServer):
+    def service_actions(self):
+        super().service_actions()
+        try:
+            if VIDEO_STORE is not None:
+                VIDEO_STORE.pause_stale_jobs()
+        except (OSError, ValueError):
+            pass
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=1313)
     args = parser.parse_args()
     print(f'Viewer: http://localhost:{args.port}/\nStudio: http://localhost:{args.port}/studio/')
-    ThreadingHTTPServer(('localhost', args.port), Handler).serve_forever()
+    StudioHTTPServer(('localhost', args.port), Handler).serve_forever()
