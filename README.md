@@ -106,7 +106,7 @@ The collapsed **Video timing** section provides export FPS, loop frame count, du
 
 **Export video…** opens a confirmation dialog for resolution, quality and range. The default is the entire perfect loop. A clip window can instead use a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a bitrate-based size estimate before any work begins.
 
-Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time, and the local server streams each frame directly into `ffmpeg` for H.264/MP4 encoding under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Keep the viewer open and prevent the machine from sleeping during an export. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time, and the local server streams each frame directly into `ffmpeg` for H.264/MP4 encoding under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Keep the viewer page open and prevent the machine from sleeping during an export; navigating away cancels the job and removes its partial file. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
 
 ## Data and state
 

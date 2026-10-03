@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Serve the viewer and Studio, and write collision-free local exports."""
 import argparse
+import atexit
 import base64
 import hashlib
 import json
@@ -258,21 +259,36 @@ def cancel_video(job_id):
     job = remove_video_job(job_id)
     if not job:
         return
-    with job['lock']:
-        process = job['process']
-        if process.poll() is None:
-            process.kill()
-        if process.stdin and not process.stdin.closed:
-            try:
-                process.stdin.close()
-            except BrokenPipeError:
-                pass
+    # Never wait for the frame-write lock here. A disconnected browser can leave
+    # its request thread blocked in a pipe write; killing ffmpeg must remain able
+    # to interrupt that write immediately.
+    process = job['process']
+    if process.poll() is None:
+        process.kill()
+    if process.stdin and not process.stdin.closed:
         try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        job['pending'].unlink(missing_ok=True)
+            process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    job['pending'].unlink(missing_ok=True)
+
+
+def cancel_all_videos():
+    with VIDEO_JOBS_LOCK:
+        job_ids = list(VIDEO_JOBS)
+    for job_id in job_ids:
+        try:
+            cancel_video(job_id)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+atexit.register(cancel_all_videos)
 
 
 def finish_video(job_id):
@@ -405,7 +421,13 @@ class Handler(SimpleHTTPRequestHandler):
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 24 <= length <= MAX_VIDEO_FRAME_BYTES:
                     raise ValueError('PNG frame has an invalid size')
-                header = self.rfile.read(24)
+                # Read the complete HTTP body before taking the frame-write lock.
+                # If a browser navigates away mid-upload, cancellation can still
+                # acquire the job and terminate ffmpeg instead of deadlocking.
+                data = self.rfile.read(length)
+                if len(data) != length:
+                    raise ValueError('Incomplete PNG frame upload')
+                header = data[:24]
                 if header[:8] != PNG_SIGNATURE or header[12:16] != b'IHDR':
                     raise ValueError('Video frame must be a PNG image')
                 width = int.from_bytes(header[16:20], 'big')
@@ -417,15 +439,11 @@ class Handler(SimpleHTTPRequestHandler):
                         raise ValueError(f"Frame must be {job['width']}×{job['height']} pixels")
                     if job['process'].poll() is not None:
                         raise ValueError('ffmpeg stopped before the export completed')
-                    job['process'].stdin.write(header)
-                    remaining = length - len(header)
-                    while remaining:
-                        chunk = self.rfile.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            raise ValueError('Incomplete PNG frame upload')
-                        job['process'].stdin.write(chunk)
-                        remaining -= len(chunk)
-                    job['process'].stdin.flush()
+                    try:
+                        job['process'].stdin.write(data)
+                        job['process'].stdin.flush()
+                    except BrokenPipeError:
+                        raise ValueError('ffmpeg stopped before the export completed')
                     job['received'] += 1
                 return self.send_json(201, {'frame': frame + 1, 'frames': job['frames']})
             if route.path == '/api/export/face':

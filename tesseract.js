@@ -52,6 +52,14 @@ let videoTimingExpanded = false;
 let savedCameraPosition = { x: 3, y: 3, z: 3 };
 let savedCameraTarget = { x: 0, y: 0, z: 0 };
 const VIEWER_SETTINGS_KEY = 'tesseract.viewer-settings.v1';
+const VIDEO_EXPORT_INTERRUPTED_KEY = 'tesseract.video-export-interrupted';
+let videoExportWasInterrupted = false;
+try {
+    videoExportWasInterrupted = sessionStorage.getItem(VIDEO_EXPORT_INTERRUPTED_KEY) === 'yes';
+    sessionStorage.removeItem(VIDEO_EXPORT_INTERRUPTED_KEY);
+} catch {
+    // Session storage is optional; navigation protection still works without it.
+}
 let publication = null;
 try {
     const text = document.getElementById('piece-config')?.textContent.trim();
@@ -140,12 +148,23 @@ function persistViewerSettings() {
 }
 
 loadViewerSettings();
+window.addEventListener('beforeunload', event => {
+    if (!videoExportRunning) return;
+    event.preventDefault();
+    event.returnValue = '';
+});
 window.addEventListener('pagehide', () => {
     persistViewerSettings();
     if (activeVideoExportJob) {
+        try { sessionStorage.setItem(VIDEO_EXPORT_INTERRUPTED_KEY, 'yes'); } catch { /* Optional. */ }
         const body = new Blob([JSON.stringify({ id: activeVideoExportJob.id })], { type: 'application/json' });
         navigator.sendBeacon('/api/video/cancel', body);
     }
+});
+window.addEventListener('pageshow', event => {
+    // A back/forward-cache restore would otherwise revive a frozen progress UI
+    // whose server job was deliberately cancelled during pagehide.
+    if (event.persisted && videoExportRunning) location.reload();
 });
 document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') persistViewerSettings();
@@ -1107,7 +1126,9 @@ function createControls() {
     videoTimingContent.appendChild(videoExportButton);
 
     const videoTimingHint = document.createElement('div');
-    videoTimingHint.textContent = 'Frames are rendered here and streamed to the local server for MP4 encoding.';
+    videoTimingHint.textContent = videoExportWasInterrupted
+        ? 'The previous video export was cancelled because this page was left. Start it again when ready to keep this page open.'
+        : 'Frames are rendered here and streamed to the local server for MP4 encoding. Keep this page open during export.';
     videoTimingHint.style.marginTop = '7px';
     videoTimingHint.style.fontSize = '10px';
     videoTimingHint.style.color = '#9cadc3';
