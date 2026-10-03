@@ -1,4 +1,4 @@
-.PHONY: serve static install sync update test test-browser
+.PHONY: serve static install sync update test test-python test-browser
 
 serve:
 	python3 studio/server.py --port 1313
@@ -27,6 +27,9 @@ update:
 
 test:
 	bun run test
+
+test-python:
+	python3 -m unittest discover -s studio -p 'test_*.py'
 
 test-browser:
 	bun run test:browser

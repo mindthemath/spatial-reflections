@@ -6,7 +6,7 @@
     "test": "bun run test:vendor && bun run test:syntax && bun run test:unit && bun run test:browser",
     "test:vendor": "node scripts/sync-vendor.mjs --check",
     "test:syntax": "node --check tesseract.js && node --check viewer-skyboxes.js && node --check studio/studio.js && node --check studio/pipeline.js",
-    "test:unit": "node studio/test_resolution.cjs && python3 -m unittest discover -s studio -p 'test_*.py'",
+    "test:unit": "node studio/test_resolution.cjs && make test-python",
     "test:browser": "node studio/test_browser.cjs",
     "sync:vendor": "node scripts/sync-vendor.mjs"
   },
