@@ -24,6 +24,7 @@ PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
 VIDEO_QUALITIES = {'draft': 0.035, 'standard': 0.07, 'high': 0.12}
 MAX_VIDEO_FRAME_BYTES = 100 * 1024 * 1024
 MAX_VIDEO_FRAMES = 10_000_000
+VIDEO_FRAME_READ_TIMEOUT = 30
 VIDEO_JOBS = {}
 VIDEO_JOBS_LOCK = threading.Lock()
 
@@ -183,10 +184,26 @@ def publish_work(request):
     return {'slug': slug, 'folder': destination.relative_to(ROOT).as_posix(), 'url': f'/site/work/{slug}/'}
 
 
+def video_clip_labels():
+    parent = ROOT / 'videos'
+    labels = []
+    if not parent.is_dir():
+        return labels
+    pattern = re.compile(r'^(.+)-\d{8}T\d{6}Z-[a-f0-9]{8}\.mp4$')
+    for path in sorted(parent.glob('*.mp4')):
+        if not path.is_file() or path.name.startswith('.') or not path.resolve().is_relative_to(parent.resolve()):
+            continue
+        match = pattern.fullmatch(path.name)
+        if match:
+            labels.append(match.group(1))
+    return labels
+
+
 def video_capabilities():
     ffmpeg = shutil.which('ffmpeg')
     return {'available': bool(ffmpeg), 'encoder': 'H.264 / MP4' if ffmpeg else None,
             'qualities': list(VIDEO_QUALITIES), 'freeBytes': shutil.disk_usage(ROOT).free,
+            'clips': video_clip_labels(),
             'reason': None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'}
 
 
@@ -263,18 +280,15 @@ def cancel_video(job_id):
     # its request thread blocked in a pipe write; killing ffmpeg must remain able
     # to interrupt that write immediately.
     process = job['process']
+    # Kill only. Closing stdin here deadlocks when the frame thread is blocked
+    # inside that same buffered write; the broken pipe wakes the writer instead.
     if process.poll() is None:
         process.kill()
-    if process.stdin and not process.stdin.closed:
-        try:
-            process.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass
     try:
-        process.wait(timeout=10)
+        process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait()
+        process.wait(timeout=5)
     job['pending'].unlink(missing_ok=True)
 
 
@@ -342,6 +356,11 @@ def finish_export(folder, analysis):
 
 
 class Handler(SimpleHTTPRequestHandler):
+    # Frame uploads are sequential, so keep their HTTP/1.1 connection alive.
+    # HTTP/1.0 forced Safari to create hundreds of short-lived TCP connections
+    # during one export, eventually making localhost intermittently unreachable.
+    protocol_version = 'HTTP/1.1'
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
@@ -355,6 +374,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))
+        if self.close_connection:
+            self.send_header('Connection', 'close')
         self.end_headers()
         self.wfile.write(data)
 
@@ -409,9 +430,11 @@ class Handler(SimpleHTTPRequestHandler):
         route = urlparse(self.path)
         if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish',
                               '/api/video/start', '/api/video/frame', '/api/video/finish', '/api/video/cancel'):
+            self.close_connection = True
             return self.send_json(404, {'error': 'Unknown endpoint'})
         origin = self.headers.get('Origin')
         if origin and urlparse(origin).netloc != self.headers.get('Host'):
+            self.close_connection = True
             return self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
         try:
             if route.path == '/api/video/frame':
@@ -421,10 +444,20 @@ class Handler(SimpleHTTPRequestHandler):
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 24 <= length <= MAX_VIDEO_FRAME_BYTES:
                     raise ValueError('PNG frame has an invalid size')
-                # Read the complete HTTP body before taking the frame-write lock.
-                # If a browser navigates away mid-upload, cancellation can still
-                # acquire the job and terminate ffmpeg instead of deadlocking.
-                data = self.rfile.read(length)
+                # Read the body before taking the frame lock, and don't wait forever.
+                # A browser that leaves mid-upload otherwise pins this thread in read(),
+                # and a pipe write must not hold the lock or finish/cancel can stall.
+                previous_timeout = self.connection.gettimeout()
+                self.connection.settimeout(VIDEO_FRAME_READ_TIMEOUT)
+                try:
+                    data = self.rfile.read(length)
+                except TimeoutError:
+                    raise ValueError('Frame upload was interrupted')
+                finally:
+                    try:
+                        self.connection.settimeout(previous_timeout)
+                    except OSError:
+                        pass
                 if len(data) != length:
                     raise ValueError('Incomplete PNG frame upload')
                 header = data[:24]
@@ -439,12 +472,18 @@ class Handler(SimpleHTTPRequestHandler):
                         raise ValueError(f"Frame must be {job['width']}×{job['height']} pixels")
                     if job['process'].poll() is not None:
                         raise ValueError('ffmpeg stopped before the export completed')
-                    try:
-                        job['process'].stdin.write(data)
-                        job['process'].stdin.flush()
-                    except BrokenPipeError:
-                        raise ValueError('ffmpeg stopped before the export completed')
                     job['received'] += 1
+                try:
+                    job['process'].stdin.write(data)
+                    job['process'].stdin.flush()
+                except BrokenPipeError:
+                    with job['lock']:
+                        job['received'] -= 1
+                    raise ValueError('ffmpeg stopped before the export completed')
+                except OSError:
+                    with job['lock']:
+                        job['received'] -= 1
+                    raise
                 return self.send_json(201, {'frame': frame + 1, 'frames': job['frames']})
             if route.path == '/api/export/face':
                 query = parse_qs(route.query)
@@ -500,10 +539,18 @@ class Handler(SimpleHTTPRequestHandler):
                     stream.write(data)
             finish_export(folder, request.get('analysis', {}))
             self.send_json(201, {'folder': folder.relative_to(ROOT).as_posix()})
+        except (ConnectionError, BrokenPipeError):
+            return
         except (ValueError, KeyError, TypeError, StopIteration) as error:
-            self.send_json(400, {'error': str(error)})
+            try:
+                self.send_json(400, {'error': str(error)})
+            except (ConnectionError, BrokenPipeError, OSError):
+                return
         except OSError as error:
-            self.send_json(500, {'error': str(error)})
+            try:
+                self.send_json(500, {'error': str(error)})
+            except (ConnectionError, BrokenPipeError, OSError):
+                return
 
 
 if __name__ == '__main__':

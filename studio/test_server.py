@@ -3,6 +3,7 @@ import hashlib
 import http.client
 import io
 import json
+import socket
 import tempfile
 import threading
 import unittest
@@ -57,6 +58,22 @@ class StudioAPITest(unittest.TestCase):
         status, data = response.status, json.loads(response.read())
         connection.close()
         return status, data
+
+    def test_http_connection_is_reused_between_requests(self):
+        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection.request('GET', '/api/video/capabilities')
+        first = connection.getresponse()
+        self.assertEqual(first.status, 200)
+        first.read()
+        first_socket = connection.sock
+        self.assertIsNotNone(first_socket)
+
+        connection.request('GET', '/api/video/capabilities')
+        second = connection.getresponse()
+        self.assertEqual(second.status, 200)
+        second.read()
+        self.assertIs(connection.sock, first_socket)
+        connection.close()
 
     def payload(self):
         source = {'path': 'raw/photo.png', 'sha256': hashlib.sha256(PNG).hexdigest()}
@@ -182,6 +199,7 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(metadata['frames'], 2)
         self.assertEqual(metadata['viewerState']['shader'], 'chrome')
         self.assertNotIn('..', completed['filename'])
+        self.assertIn('mirror-clip', server.video_clip_labels())
 
     def test_video_cancel_does_not_wait_for_frame_lock(self):
         class FakeProcess:
@@ -215,6 +233,59 @@ class StudioAPITest(unittest.TestCase):
         self.assertFalse(cancelled.is_alive(), 'Cancellation waited for the blocked frame lock')
         self.assertTrue(process.killed)
         self.assertFalse(pending.exists())
+
+    def test_stalled_video_frame_upload_unblocks(self):
+        class FakeFFmpeg:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        previous = server.VIDEO_FRAME_READ_TIMEOUT
+        server.VIDEO_FRAME_READ_TIMEOUT = 0.3
+        started = None
+        try:
+            with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+                 mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg):
+                code, started = self.request('POST', '/api/video/start', {
+                    'name': 'stall', 'width': 64, 'height': 64, 'fps': 24, 'frames': 2, 'quality': 'draft'})
+            self.assertEqual(code, 201)
+            sock = socket.create_connection(('localhost', self.http.server_port))
+            sock.settimeout(2)
+            header = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+            request = (
+                f"POST /api/video/frame?id={started['id']}&frame=0 HTTP/1.1\r\n"
+                f"Host: localhost\r\nContent-Length: 5000000\r\nConnection: close\r\n\r\n"
+            ).encode() + header
+            sock.sendall(request)
+            chunks = []
+            while True:
+                part = sock.recv(4096)
+                if not part:
+                    break
+                chunks.append(part)
+                response = b''.join(chunks)
+                if b'\r\n\r\n' in response and len(response.split(b'\r\n\r\n', 1)[1]) >= 41:
+                    break
+            sock.close()
+            response = b''.join(chunks)
+            self.assertIn(b'400', response.split(b'\r\n', 1)[0])
+            self.assertTrue(b'interrupted' in response or b'Incomplete' in response)
+            code, _ = self.request('GET', '/api/video/capabilities')
+            self.assertEqual(code, 200)
+        finally:
+            server.VIDEO_FRAME_READ_TIMEOUT = previous
+            if started:
+                self.request('POST', '/api/video/cancel', {'id': started['id']})
 
     def test_video_validation_and_capabilities(self):
         with mock.patch.object(server.shutil, 'which', return_value=None):
@@ -284,6 +355,14 @@ class StudioAPITest(unittest.TestCase):
 
     def test_cross_origin_rejected(self):
         self.assertEqual(self.request('POST', '/api/export', self.payload(), {'Origin': 'https://example.com'})[0], 403)
+
+    def test_rejected_request_with_unread_body_closes_connection(self):
+        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection.request('POST', '/api/export', json.dumps(self.payload()), {'Origin': 'https://example.com'})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 403)
+        response.read()
+        self.assertIsNone(connection.sock)
 
 
 if __name__ == '__main__':

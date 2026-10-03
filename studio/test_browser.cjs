@@ -76,15 +76,16 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
-  // Video export defaults to the exact full loop and validates optional clip windows before encoding.
+  // Video export defaults to a 30s clip inside the loop, and still rejects an empty window before encoding.
   await viewer.locator('#rotation-xw').fill('10');await viewer.locator('details').filter({hasText:'Video timing'}).locator('summary').click();
   await viewer.locator('#open-video-export').click();await viewer.waitForSelector('#video-export-dialog[open]');await viewer.waitForFunction(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes'||document.querySelector('#video-export-status').classList.contains('error'));
-  assert.equal(await viewer.locator('#video-export-range').inputValue(),'full');assert.match(await viewer.locator('#video-export-summary').innerText(),/Perfect loop/);assert.match(await viewer.locator('#video-export-summary').innerText(),/estimated MP4 size/);
+  assert.equal(await viewer.locator('#video-export-range').inputValue(),'clip');assert.match(await viewer.locator('#video-export-summary').innerText(),/Clip/);assert.match(await viewer.locator('#video-export-summary').innerText(),/30\.00 s/);assert.match(await viewer.locator('#video-export-summary').innerText(),/estimated MP4 size/);
+  await viewer.locator('#video-export-duration').fill('5');assert.match(await viewer.locator('#video-export-status').innerText(),/5\.00 s clip is selected/);
   await viewer.locator('#video-export-range').selectOption('clip');await viewer.locator('#video-export-duration').fill('0');assert.match(await viewer.locator('#video-export-summary').innerText(),/at least one frame/);
   // Exercise the complete browser → streamed PNG → ffmpeg path when ffmpeg is available on the test host.
   if(await viewer.evaluate(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes')){
    await viewer.locator('#video-export-duration').fill('0.02');await viewer.locator('#video-export-resolution').selectOption('1280x720');await viewer.locator('#video-export-quality').selectOption('draft');
-   await viewer.locator('#confirm-video-export').click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.endsWith('.mp4')));
+   await viewer.locator('#confirm-video-export').click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});assert.match(await viewer.locator('#video-export-status').innerText(),/^Export complete/);assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.endsWith('.mp4')));
   }
   await viewer.locator('#close-video-export').click();
   const cameraBefore=await viewer.locator('#viewer-camera-info').innerText();

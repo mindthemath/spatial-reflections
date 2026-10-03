@@ -16,6 +16,7 @@ let videoExportQuality = 'standard';
 let videoExportRunning = false;
 let activeVideoExportJob = null;
 let cancelVideoExportRequested = false;
+let videoExportAbort = null;
 let loopTiming = { period: 0, frameCount: 1, timeStep: 0, exact: true };
 let lastAnimationTimestamp = null;
 let frameAccumulator = 0;
@@ -149,7 +150,9 @@ function persistViewerSettings() {
 
 loadViewerSettings();
 window.addEventListener('beforeunload', event => {
-    if (!videoExportRunning) return;
+    // Once cancel is requested, don't trap the tab. The in-flight upload is
+    // aborted and pagehide tells the server to drop the job.
+    if (!videoExportRunning || cancelVideoExportRequested) return;
     event.preventDefault();
     event.returnValue = '';
 });
@@ -1129,8 +1132,8 @@ function createControls() {
 
     const videoTimingHint = document.createElement('div');
     videoTimingHint.textContent = videoExportWasInterrupted
-        ? 'The previous video export was cancelled because this page was left. Start it again when ready to keep this page open.'
-        : 'Frames are rendered here and streamed to the local server for MP4 encoding. Keep this page open during export.';
+        ? 'The previous video export was cancelled because this page was left. Start it again when you can leave this page loaded.'
+        : 'Frames render here and stream to the local server. This window can sit in the background. Leaving the page cancels the export.';
     videoTimingHint.style.marginTop = '7px';
     videoTimingHint.style.fontSize = '10px';
     videoTimingHint.style.color = '#9cadc3';
@@ -1536,10 +1539,21 @@ function createVideoExportDialog() {
         else videoExportDialog.close();
     });
     document.getElementById('cancel-video-export').addEventListener('click', requestVideoExportCancellation);
-    document.getElementById('video-export-form').addEventListener('submit', event => {
+    document.getElementById('video-export-form').addEventListener('submit', async event => {
         event.preventDefault();
         const plan = videoExportPlan();
-        if (plan) runVideoExport(plan);
+        if (!plan || plan.error) return;
+        const label = videoExportLabel(document.getElementById('video-export-name').value);
+        const existing = JSON.parse(videoExportDialog.dataset.clips || '[]');
+        if (existing.includes(label)) {
+            const confirmed = await confirmAction({
+                title: 'CLIP NAME EXISTS',
+                message: `A clip named “${label}” is already in videos/. This export adds another file and does not replace the existing one.`,
+                confirmLabel: 'Export another'
+            });
+            if (!confirmed) return;
+        }
+        runVideoExport(plan);
     });
     videoExportDialog.addEventListener('cancel', event => {
         if (videoExportRunning) {
@@ -1551,13 +1565,16 @@ function createVideoExportDialog() {
 
 async function openVideoExportDialog() {
     const fullDuration = loopTiming.frameCount / exportFps;
-    document.getElementById('video-export-range').value = 'full';
-    document.getElementById('video-export-start').value = formatTimeInput(timelineFrame / exportFps);
-    document.getElementById('video-export-duration').value = formatTimeInput(Math.max(1 / exportFps, Math.min(30, fullDuration - timelineFrame / exportFps)));
+    const startSeconds = timelineFrame / exportFps;
+    const clipSeconds = Math.min(30, Math.max(1 / exportFps, fullDuration - startSeconds));
+    document.getElementById('video-export-range').value = 'clip';
+    document.getElementById('video-export-start').value = formatTimeInput(startSeconds);
+    document.getElementById('video-export-duration').value = formatTimeInput(clipSeconds);
     document.getElementById('video-export-result').replaceChildren();
     const status = document.getElementById('video-export-status');
     status.textContent = 'Checking the local video encoder…';
     status.classList.remove('error');
+    videoExportDialog.dataset.statusMode = 'checking';
     videoExportDialog.dataset.serverAvailable = '';
     videoExportDialog.dataset.freeBytes = '';
     videoExportDialog.showModal();
@@ -1568,10 +1585,13 @@ async function openVideoExportDialog() {
         if (!response.ok || !value.available) throw new Error(value.reason || 'Video service is unavailable');
         videoExportDialog.dataset.serverAvailable = 'yes';
         videoExportDialog.dataset.freeBytes = String(value.freeBytes);
-        status.textContent = `${value.encoder} encoder ready. Keep this page open while frames render.`;
+        videoExportDialog.dataset.clips = JSON.stringify(value.clips || []);
+        videoExportDialog.dataset.encoder = value.encoder;
+        videoExportDialog.dataset.statusMode = 'ready';
     } catch (error) {
         status.textContent = `Video export requires the local application server and ffmpeg. ${error.message}`;
         status.classList.add('error');
+        videoExportDialog.dataset.statusMode = 'error';
     }
     updateVideoExportSummary();
 }
@@ -1630,14 +1650,34 @@ function updateVideoExportSummary() {
         summary.classList.remove('error');
     }
     confirm.disabled = videoExportRunning || videoExportDialog.dataset.serverAvailable !== 'yes' || !plan || Boolean(plan.error) || spaceError;
+    if (!videoExportRunning && videoExportDialog.dataset.serverAvailable === 'yes' && videoExportDialog.dataset.statusMode === 'ready') {
+        const selection = plan && !plan.error
+            ? `${formatDuration(plan.duration)} ${plan.range === 'full' ? 'perfect loop' : 'clip'} is selected. `
+            : '';
+        document.getElementById('video-export-status').textContent =
+            `${videoExportDialog.dataset.encoder} encoder ready. ${selection}This window can sit in the background; leaving the page cancels the export.`;
+    }
+}
+
+function videoExportLabel(name) {
+    const label = String(name || '').trim().replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    return label || 'tesseract';
 }
 
 function requestVideoExportCancellation() {
     if (!videoExportRunning) return;
     cancelVideoExportRequested = true;
+    videoExportAbort?.abort();
+    const jobId = activeVideoExportJob?.id;
+    if (jobId) {
+        fetch('/api/video/cancel', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: jobId })
+        }).catch(() => { /* The export loop reports the outcome. */ });
+    }
     const button = document.getElementById('cancel-video-export');
     button.disabled = true;
-    document.getElementById('video-export-status').textContent = 'Cancelling after the current frame…';
+    document.getElementById('video-export-status').textContent = 'Cancelling…';
 }
 
 async function videoApi(path, options = {}) {
@@ -1649,15 +1689,22 @@ async function videoApi(path, options = {}) {
 }
 
 function canvasPNG(canvas) {
-    return new Promise((resolve, reject) => {
-        canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not capture the WebGL frame')), 'image/png');
-    });
+    // Synchronous read. toBlob's callback is deferred, and dropped, while the
+    // document is hidden — that left the export and the encoder waiting on each other.
+    const url = canvas.toDataURL('image/png');
+    const comma = url.indexOf(',');
+    if (comma < 0) throw new Error('Could not capture the WebGL frame');
+    const binary = atob(url.slice(comma + 1));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: 'image/png' });
 }
 
 async function runVideoExport(plan) {
     if (videoExportRunning) return;
     videoExportRunning = true;
     cancelVideoExportRequested = false;
+    videoExportAbort = new AbortController();
     videoExportWidth = plan.width;
     videoExportHeight = plan.height;
     videoExportQuality = plan.quality;
@@ -1676,12 +1723,12 @@ async function runVideoExport(plan) {
     progress.value = 0;
     result.replaceChildren();
     status.classList.remove('error');
+    videoExportDialog.dataset.statusMode = 'running';
     status.textContent = 'Starting encoder…';
 
     const originalFrame = timelineFrame;
     const originalPaused = animationPaused;
-    const originalSize = renderer.getSize(new THREE.Vector2());
-    const originalAspect = camera.aspect;
+    const originalPixelRatio = renderer.getPixelRatio();
     let lastProgressUpdate = 0;
     let exportStartedAt = 0;
 
@@ -1699,18 +1746,23 @@ async function runVideoExport(plan) {
 
         animationPaused = true;
         exportStartedAt = performance.now();
+        renderer.setPixelRatio(1);
         renderer.setSize(plan.width, plan.height, false);
         camera.aspect = plan.width / plan.height;
         camera.updateProjectionMatrix();
 
         for (let frame = 0; frame < plan.frames; frame++) {
+            await new Promise(resolve => setTimeout(resolve, 0));
             if (cancelVideoExportRequested) throw new DOMException('Video export cancelled', 'AbortError');
+            if (renderer.getContext().isContextLost()) throw new Error('WebGL context was lost before this frame could be captured');
             setTimelineFrame(plan.startFrame + frame);
             updateTesseractProjection();
             renderer.render(scene, camera);
-            const png = await canvasPNG(renderer.domElement);
+            const png = canvasPNG(renderer.domElement);
+            await new Promise(resolve => setTimeout(resolve, 0));
+            if (cancelVideoExportRequested) throw new DOMException('Video export cancelled', 'AbortError');
             await videoApi(`/api/video/frame?id=${activeVideoExportJob.id}&frame=${frame}`, {
-                method: 'POST', headers: { 'Content-Type': 'image/png' }, body: png
+                method: 'POST', headers: { 'Content-Type': 'image/png' }, body: png, signal: videoExportAbort.signal
             });
             progress.value = frame + 1;
             const now = performance.now();
@@ -1729,6 +1781,7 @@ async function runVideoExport(plan) {
             body: JSON.stringify({ id: activeVideoExportJob.id })
         });
         activeVideoExportJob = null;
+        videoExportDialog.dataset.statusMode = 'complete';
         status.textContent = `Export complete · ${formatBytes(completed.bytes)}`;
         const link = document.createElement('a');
         link.href = completed.url;
@@ -1737,19 +1790,24 @@ async function runVideoExport(plan) {
         result.replaceChildren(link);
     } catch (error) {
         if (activeVideoExportJob) {
-            try {
-                await videoApi('/api/video/cancel', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: activeVideoExportJob.id })
-                });
-            } catch { /* The original error is more useful. */ }
+            // Cancel already told the server. Waiting here again is what froze the page.
+            if (!cancelVideoExportRequested) {
+                try {
+                    await videoApi('/api/video/cancel', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: activeVideoExportJob.id })
+                    });
+                } catch { /* The original error is more useful. */ }
+            }
             activeVideoExportJob = null;
         }
+        videoExportDialog.dataset.statusMode = error.name === 'AbortError' ? 'cancelled' : 'error';
         status.textContent = error.name === 'AbortError' ? 'Video export cancelled.' : error.message;
         status.classList.toggle('error', error.name !== 'AbortError');
     } finally {
-        renderer.setSize(originalSize.x, originalSize.y, false);
-        camera.aspect = originalAspect;
+        renderer.setPixelRatio(originalPixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         setTimelineFrame(originalFrame);
         updateTesseractProjection();
@@ -1757,6 +1815,7 @@ async function runVideoExport(plan) {
         animationPaused = originalPaused;
         videoExportRunning = false;
         cancelVideoExportRequested = false;
+        videoExportAbort = null;
         fields.forEach(field => { field.disabled = false; });
         cancel.hidden = true;
         persistViewerSettings();
@@ -2621,6 +2680,7 @@ function rotate4D(point4D, angleXW, angleYW, angleZW) {
 
 // Function to handle window resize
 function onWindowResize() {
+    if (videoExportRunning) return;
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -2630,7 +2690,10 @@ function onWindowResize() {
 // final frame exactly, without accumulating floating-point additions.
 function animate(timestamp) {
     requestAnimationFrame(animate);
-    
+    // The export loop owns the canvas. A live present here fights the frame
+    // readback and can block once this window is no longer visible.
+    if (videoExportRunning) return;
+
     // Update controls
     controls.update();
     
@@ -2647,6 +2710,7 @@ function animate(timestamp) {
                     }
                 }
             }
+            lastAnimationTimestamp = timestamp;
         }
     } else {
         lastAnimationTimestamp = null;
@@ -2660,7 +2724,6 @@ function animate(timestamp) {
     updateTesseractProjection();
     
     // Render the scene
-            lastAnimationTimestamp = timestamp;
     renderer.render(scene, camera);
 }
 
