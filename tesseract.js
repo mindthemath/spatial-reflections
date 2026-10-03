@@ -44,58 +44,78 @@ let videoTimingExpanded = false;
 let savedCameraPosition = { x: 3, y: 3, z: 3 };
 let savedCameraTarget = { x: 0, y: 0, z: 0 };
 const VIEWER_SETTINGS_KEY = 'tesseract.viewer-settings.v1';
+let publication = null;
+try {
+    const text = document.getElementById('piece-config')?.textContent.trim();
+    if (text) publication = JSON.parse(text);
+} catch (error) {
+    console.error('Invalid published piece configuration', error);
+}
+if (publication?.schemaVersion === 1 && publication.title) document.title = publication.title;
+
+function viewerSettings() {
+    return {
+        rotationSpeed,
+        rotationCoefficients: { ...rotationCoefficients },
+        shader: currentShader,
+        lighting: currentLighting,
+        lightDistance,
+        showVertices,
+        animationPaused,
+        exportFps,
+        timelineFrame,
+        panelExpanded,
+        videoTimingExpanded,
+        camera: {
+            position: camera ? { x: camera.position.x, y: camera.position.y, z: camera.position.z } : { ...savedCameraPosition },
+            target: controls ? { x: controls.target.x, y: controls.target.y, z: controls.target.z } : { ...savedCameraTarget }
+        }
+    };
+}
+
+function applyViewerSettings(saved) {
+    if (!saved || typeof saved !== 'object') return;
+    const clamp = (value, min, max, fallback) => {
+        const number = Number(value);
+        return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+    };
+    rotationSpeed = clamp(saved.rotationSpeed, 0, 0.01, rotationSpeed);
+    lightDistance = clamp(saved.lightDistance, 0.1, 20, lightDistance);
+    for (const axis of ['xw', 'yw', 'zw']) {
+        rotationCoefficients[axis] = clamp(saved.rotationCoefficients?.[axis], -1, 1, rotationCoefficients[axis]);
+    }
+    if (['rough', 'iridescent', 'chrome'].includes(saved.shader)) currentShader = saved.shader;
+    if (['diagonal', 'topdown', 'quad'].includes(saved.lighting)) currentLighting = saved.lighting;
+    if ([24, 25, 30, 50, 60].includes(Number(saved.exportFps))) exportFps = Number(saved.exportFps);
+    if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
+    if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
+    if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
+    if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
+    const vector = (value, fallback) => {
+        if (!value || !['x', 'y', 'z'].every(axis => Number.isFinite(Number(value[axis])))) return fallback;
+        return { x: Number(value.x), y: Number(value.y), z: Number(value.z) };
+    };
+    savedCameraPosition = vector(saved.camera?.position, savedCameraPosition);
+    savedCameraTarget = vector(saved.camera?.target, savedCameraTarget);
+    timelineFrame = Math.max(0, Math.trunc(Number(saved.timelineFrame) || 0));
+}
 
 function loadViewerSettings() {
+    if (publication?.schemaVersion === 1) {
+        applyViewerSettings(publication.viewer);
+        return;
+    }
     try {
-        const saved = JSON.parse(localStorage.getItem(VIEWER_SETTINGS_KEY));
-        if (!saved || typeof saved !== 'object') return;
-        const clamp = (value, min, max, fallback) => {
-            const number = Number(value);
-            return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
-        };
-        rotationSpeed = clamp(saved.rotationSpeed, 0, 0.01, rotationSpeed);
-        lightDistance = clamp(saved.lightDistance, 0.1, 20, lightDistance);
-        for (const axis of ['xw', 'yw', 'zw']) {
-            rotationCoefficients[axis] = clamp(saved.rotationCoefficients?.[axis], -1, 1, rotationCoefficients[axis]);
-        }
-        if (['rough', 'iridescent', 'chrome'].includes(saved.shader)) currentShader = saved.shader;
-        if (['diagonal', 'topdown', 'quad'].includes(saved.lighting)) currentLighting = saved.lighting;
-        if ([24, 25, 30, 50, 60].includes(Number(saved.exportFps))) exportFps = Number(saved.exportFps);
-        if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
-        if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
-        if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
-        if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
-        const vector = (value, fallback) => {
-            if (!value || !['x', 'y', 'z'].every(axis => Number.isFinite(Number(value[axis])))) return fallback;
-            return { x: Number(value.x), y: Number(value.y), z: Number(value.z) };
-        };
-        savedCameraPosition = vector(saved.camera?.position, savedCameraPosition);
-        savedCameraTarget = vector(saved.camera?.target, savedCameraTarget);
-        timelineFrame = Math.max(0, Math.trunc(Number(saved.timelineFrame) || 0));
+        applyViewerSettings(JSON.parse(localStorage.getItem(VIEWER_SETTINGS_KEY)));
     } catch {
         // Keep defaults when local storage is unavailable or contains invalid data.
     }
 }
 
 function persistViewerSettings() {
+    if (publication?.schemaVersion === 1) return;
     try {
-        localStorage.setItem(VIEWER_SETTINGS_KEY, JSON.stringify({
-            rotationSpeed,
-            rotationCoefficients,
-            shader: currentShader,
-            lighting: currentLighting,
-            lightDistance,
-            showVertices,
-            animationPaused,
-            exportFps,
-            timelineFrame,
-            panelExpanded,
-            videoTimingExpanded,
-            camera: {
-                position: camera ? { x: camera.position.x, y: camera.position.y, z: camera.position.z } : savedCameraPosition,
-                target: controls ? { x: controls.target.x, y: controls.target.y, z: controls.target.z } : savedCameraTarget
-            }
-        }));
+        localStorage.setItem(VIEWER_SETTINGS_KEY, JSON.stringify(viewerSettings()));
     } catch {
         // The viewer remains usable when local storage is blocked or full.
     }
@@ -169,6 +189,8 @@ function createEnvironmentMap() {
     skyboxLibrary = installSkyboxLibrary({
         mount: document.getElementById('controlPanelContent'),
         renderer,
+        publication,
+        getViewerState: viewerSettings,
         getShader: () => currentShader,
         onTexture: texture => {
             const previous = envMap;
@@ -1583,8 +1605,10 @@ function saveScreenshot() {
     img.src = imageData;
 }
 
-// Handle keyboard input
+// Handle keyboard input without stealing keystrokes from dialogs or focused controls.
 function onKeyDown(event) {
+    const target = event.target;
+    if (document.querySelector('dialog[open]') || (target instanceof Element && target.closest('input, textarea, select, button, a, [contenteditable="true"]'))) return;
     switch (event.code) {
         case 'Space':
             // Toggle animation pause

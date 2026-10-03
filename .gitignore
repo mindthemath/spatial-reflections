@@ -4,3 +4,7 @@ skybox/
 raw/
 # generated studio exports
 exports/
+# Bun / Playwright local state
+node_modules/
+test-results/
+playwright-report/

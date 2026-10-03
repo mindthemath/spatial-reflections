@@ -1,20 +1,24 @@
-// Optional integration test. Requires Playwright; never touches the real raw/ or exports/.
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+// Browser integration test. Uses the Bun-managed Playwright dependency and never touches real raw/ or exports/.
+const {chromium}=require('playwright');
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict'),{spawn}=require('child_process');
 (async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'studio-integration-'));
  fs.cpSync(__dirname,path.join(root,'studio'),{recursive:true});fs.mkdirSync(path.join(root,'raw'));
  for(const file of ['index.html','tesseract.js','viewer-skyboxes.js','skybox-paths.js'])fs.copyFileSync(path.join(__dirname,'..',file),path.join(root,file));
+ fs.cpSync(path.join(__dirname,'..','vendor'),path.join(root,'vendor'),{recursive:true});
  const server=spawn('python3',['-c',`import sys;sys.path.insert(0,${JSON.stringify(__dirname)});import server;from pathlib import Path;server.ROOT=Path(${JSON.stringify(root)});http=server.ThreadingHTTPServer(('localhost',0),server.Handler);print(http.server_port,flush=True);http.serve_forever()`]);
  let browser;
  try{
   const port=await new Promise((resolve,reject)=>{server.stdout.once('data',data=>resolve(Number(data.toString().trim())));server.once('error',reject);});
   browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),args:['--use-gl=angle','--use-angle=swiftshader']});
   const context=await browser.newContext({viewport:{width:1700,height:1100}});
-  const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const page=await context.newPage(),errors=[];let starting=true,failStartup;
+  const startupFailure=new Promise((_,reject)=>{failStartup=reject;});
+  page.on('pageerror',error=>{errors.push(error.message);if(starting)failStartup(new Error(`Studio startup page error: ${error.message}`));});
+  page.on('response',response=>{if(starting&&response.status()>=400&&['script','stylesheet','image'].includes(response.request().resourceType()))failStartup(new Error(`Studio startup resource failed: ${response.status()} ${response.url()}`));});
   const image=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=1536;c.height=1024;const ctx=c.getContext('2d'),g=ctx.createLinearGradient(0,0,1536,1024);g.addColorStop(0,'#203030');g.addColorStop(1,'#ffc080');ctx.fillStyle=g;ctx.fillRect(0,0,1536,1024);return c.toDataURL().split(',')[1];});
   fs.writeFileSync(path.join(root,'raw','a.png'),Buffer.from(image,'base64'));fs.writeFileSync(path.join(root,'raw','b.png'),Buffer.from(image,'base64'));
-  await page.goto(`http://localhost:${port}/studio/`);await page.waitForSelector('.photo');
+  await page.goto(`http://localhost:${port}/studio/`);await Promise.race([page.waitForSelector('.photo'),startupFailure]);starting=false;
   const center=async locator=>{const b=await locator.boundingBox();assert(b,'Element has bounds');return {x:b.x+b.width/2,y:b.y+b.height/2};};
   const drag=async(from,to)=>{const a=await center(from),b=await center(to);await page.mouse.move(a.x,a.y);await page.mouse.down();await page.mouse.move(b.x,b.y,{steps:12});await page.mouse.up();};
   const capture=async()=>{const download=page.waitForEvent('download');await page.locator('#save').click();const d=await download;return JSON.parse(fs.readFileSync(await d.path(),'utf8'));};
@@ -80,6 +84,9 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'untitled'})}).getByRole('button',{name:'Load skybox'}).click();
   await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'rough');
   await viewer.locator('#switch-to-chrome').click();assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');assert(!(await viewer.locator('#switch-to-chrome').isVisible()));
+  let viewerDownloads=0;viewer.on('download',()=>viewerDownloads++);await viewer.locator('#publish-skybox').click();
+  await viewer.locator('#publish-title').fill('');await viewer.locator('#publish-title').pressSequentially('save video');await viewer.waitForTimeout(100);
+  assert.equal(await viewer.locator('#publish-title').inputValue(),'save video');assert.equal(viewerDownloads,0);await viewer.locator('#close-publish').click();
   const validURL=viewer.url();await viewer.locator('#browse-skyboxes').click();await viewer.waitForSelector('.skybox-card');
   await viewer.screenshot({path:path.join(os.tmpdir(),'tesseract-library.png')});
   await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'Broken fixture'})}).getByRole('button',{name:'Load skybox'}).click();
@@ -133,6 +140,6 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   assert.equal(await page.locator('.node').count(),1);assert.equal(await page.locator('.node.skybox').count(),1);assert.equal((await capture()).edges.length,0);assert(await page.locator('#undo').isDisabled());
   assert(fs.existsSync(path.join(root,'exports',folder,'pipeline.json')));assert(fs.existsSync(path.join(root,'raw','a.png')));
   await Promise.all([page.waitForEvent('load'),page.locator('#reload-app').click()]);await page.waitForSelector('.photo');assert.equal(await page.locator('.node').count(),1);assert.equal((await capture()).edges.length,0);
-  assert.deepEqual(errors,[]);console.log('PASS: Studio graph, native export, lineage, refresh/reset, viewer handoff/gallery, Chrome prompt, camera preservation, load failure retention, remembered skybox and Studio reopen.');
+  assert.deepEqual(errors,[]);console.log('PASS: Studio graph/export, viewer gallery, publish-dialog keyboard isolation, offline vendored runtime, failure retention, persistence and Studio reopen.');
  }finally{if(browser)await browser.close();server.kill();fs.rmSync(root,{recursive:true,force:true});}
 })().catch(error=>{console.error(error);process.exitCode=1;});

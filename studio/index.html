@@ -4,7 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Skybox Studio</title>
 <link rel="stylesheet" href="studio.css">
-<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.155.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.155.0/examples/jsm/"}}</script>
+<script type="importmap">{"imports":{"three":"../vendor/three.module.js","three/addons/":"../vendor/"}}</script>
 </head>
 <body>
 <header><strong>SKYBOX / STUDIO</strong><input id="name" aria-label="Artwork name" value="untitled"><label>Output <select id="size"><option value="max">Max native</option></select></label><small id="resolution-limit" role="status">no upscaling</small><button id="save">Save JSON</button><button id="restore">Load JSON</button><input id="snapshot" type="file" accept=".json" hidden><button id="export">Export folder</button><span id="autosave-status" title="Workspace is automatically saved in this browser">Autosave</span><a id="view-export" hidden target="_blank" rel="noopener">View in Tesseract ↗</a><a href="/" target="_blank" rel="noopener">Viewer ↗</a></header>

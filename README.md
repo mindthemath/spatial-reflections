@@ -4,14 +4,23 @@ A reflective tesseract viewer and a photographic node-editor sidecar for constru
 
 ## Run locally
 
+Install the locked JavaScript tooling and Chromium once, and synchronize the vendored offline runtime:
+
 ```sh
-python3 studio/server.py --port 1313
+make install
+```
+
+Then start the local application:
+
+```sh
+make serve
+# equivalent: python3 studio/server.py --port 1313
 ```
 
 - Viewer: **http://localhost:1313/**
 - Studio: **http://localhost:1313/studio/**
 
-Put original photographs in `raw/`. The server has no Python dependencies; browser modules load Three.js from unpkg. This is a trusted local workstation app, not a public production service.
+Put original photographs in `raw/`. The server has no Python dependencies. Both the viewer and Studio use the pinned Three.js runtime under `vendor/`, so the complete local design, image export and viewer workflow requires no internet connection. This is a trusted local workstation app, not a public production service.
 
 ## Studio → viewer workflow
 
@@ -32,6 +41,58 @@ The viewer remembers the last successful skybox in this browser. An explicit `sk
 **Reflective Chrome** is the artistic viewing mode. Rough and Iridescent remain debug/orientation tools. When a debug shader is active, the menu offers **Switch to Chrome**; loading a skybox does not silently switch it.
 
 Failed or incomplete loads retain the current environment and display an error. With no image environment yet, the viewer uses a simple diagnostic gradient cube—not an unrelated remote park scene. Only completed exports appear in the gallery.
+
+## Publish static work
+
+Publishing is the final step after Studio export. Open a completed export in the viewer, settle the camera, shader, lighting, motion and presentation settings, then click **Publish…** in the Skybox section. Enter a title, URL slug and optional description. The local server creates an immutable snapshot at:
+
+```text
+site/work/<slug>/
+  index.html
+  piece.json
+  preview.png
+  tesseract.js
+  viewer-skyboxes.js
+  skybox-paths.js
+  vendor/                 # pinned Three.js + OrbitControls + license
+  skybox/                 # six PNG faces
+```
+
+A slug is never silently replaced; choose another slug if that directory already exists. The publish operation also rebuilds `site/catalog.json`, which the gallery at `site/index.html` reads. Published viewer settings come from embedded configuration rather than browser storage, so one work cannot inherit another work's camera or shader.
+
+All resources used by an individual work are relative to its own directory. You can copy `site/work/<slug>/` wholesale to an S3 bucket or any other static web server without changing a base URL. It contains no Studio/API dependency and makes no network requests for runtime libraries. Serve the directory over HTTP rather than opening `index.html` as a `file://` URL; ES modules are commonly blocked or restricted from local files. This layout is intended to support a future BrightSign packaging workflow with little or no transformation, though device-specific browser/WebGL validation is still required.
+
+Preview the gallery locally with:
+
+```sh
+make static
+# http://localhost:1315/
+```
+
+The GitHub Pages workflow deploys `site/` directly when it changes. Its temporary Pages artifact has an explicit one-day retention period. The checked-in `site/` files remain the durable publication source; Actions artifacts are only deployment transport.
+
+## Dependencies and vendored runtime
+
+Bun owns JavaScript dependencies through `package.json` and `bun.lock`. Playwright is a development dependency; Three.js is locked as the source for the checked-in browser runtime. The application never serves files from `node_modules/`.
+
+```sh
+make sync      # copy Three.js entry points, relative imports and license into vendor/
+make update    # update packages/Chromium, sync vendor/, then run the full suite
+make test      # vendor integrity, syntax, unit/API and Playwright browser tests
+```
+
+`make update` deliberately moves Three.js and Playwright to their current releases. Vendor synchronization recursively follows relative module imports because newer Three.js releases may split the runtime across additional files. The update target fails unless vendor integrity and the complete browser suite pass. Still review visual output before committing `package.json`, `bun.lock`, and `vendor/`. Existing published work remains unchanged because each `site/work/<slug>/` contains its own runtime snapshot.
+
+A normal release workflow is:
+
+```sh
+make serve
+# publish in the viewer, then inspect http://localhost:1313/site/work/<slug>/
+git diff -- site/
+git add site/
+git commit -m "Publish <title>"
+git push
+```
 
 Large exports remain untouched on disk. If an image exceeds the viewer GPU's maximum cube-map texture size, it is reduced for display only and the menu reports that fact. The original custom Chrome shader/color convention is preserved.
 

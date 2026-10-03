@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -69,6 +70,109 @@ def pending_folder(name):
     if folder.parent != parent or not (folder / '.pending.json').is_file():
         raise ValueError('Export is missing or already complete')
     return folder
+
+
+def completed_export(folder_name):
+    if not isinstance(folder_name, str):
+        raise ValueError('Invalid export folder')
+    match = re.fullmatch(r'/?exports/([a-zA-Z0-9_-]+)/?', folder_name)
+    if not match:
+        raise ValueError('Publish a completed folder inside exports/')
+    parent = (ROOT / 'exports').resolve()
+    folder = (parent / match.group(1)).resolve()
+    if folder.parent != parent or (folder / '.pending.json').exists() or not (folder / 'manifest.json').is_file():
+        raise ValueError('Export is missing or incomplete')
+    manifest = json.loads((folder / 'manifest.json').read_text())
+    if set(manifest.get('outputs', {})) != set(FACES):
+        raise ValueError('Export manifest does not contain all six faces')
+    for face in FACES:
+        path = folder / f'{face}.png'
+        output = manifest['outputs'][face]
+        if output.get('file') != path.name or not path.is_file():
+            raise ValueError(f'Export face is missing: {face}')
+        if output.get('sha256') != hash_file(path):
+            raise ValueError(f'Export face changed after completion: {face}')
+    return folder, manifest
+
+
+def rebuild_catalog():
+    site = ROOT / 'site'
+    work = site / 'work'
+    entries = []
+    if work.exists():
+        for metadata in work.glob('*/piece.json'):
+            try:
+                piece = json.loads(metadata.read_text())
+                slug = metadata.parent.name
+                if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', slug) or piece.get('slug') != slug:
+                    continue
+                entries.append({'slug': slug, 'title': piece['title'], 'description': piece.get('description', ''),
+                                'publishedAt': piece['publishedAt'], 'url': f'work/{slug}/',
+                                'thumbnail': f'work/{slug}/preview.png'})
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+    entries.sort(key=lambda item: item['publishedAt'], reverse=True)
+    site.mkdir(exist_ok=True)
+    temporary = site / f'.catalog-{uuid.uuid4().hex}.json'
+    temporary.write_text(json.dumps({'schemaVersion': 1, 'work': entries}, indent=2) + '\n')
+    temporary.replace(site / 'catalog.json')
+
+
+def publish_work(request):
+    title = str(request.get('title', '')).strip()
+    description = str(request.get('description', '')).strip()
+    slug = str(request.get('slug', '')).strip()
+    state = request.get('viewerState')
+    if not title or len(title) > 100:
+        raise ValueError('Title must be between 1 and 100 characters')
+    if len(description) > 1000:
+        raise ValueError('Description must be at most 1000 characters')
+    if len(slug) > 60 or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', slug):
+        raise ValueError('Slug must use lowercase letters and numbers separated by single hyphens')
+    if not isinstance(state, dict):
+        raise ValueError('Viewer state is required')
+    folder, manifest = completed_export(request.get('exportFolder'))
+    required = [ROOT / name for name in ('index.html', 'tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js')]
+    vendor = ROOT / 'vendor'
+    vendor_files = (vendor / 'three.module.js', vendor / 'controls' / 'OrbitControls.js', vendor / 'THREE-LICENSE.txt')
+    if any(not path.is_file() for path in (*required, *vendor_files)):
+        raise ValueError('Viewer runtime files are missing')
+
+    work = ROOT / 'site' / 'work'
+    work.mkdir(parents=True, exist_ok=True)
+    destination = work / slug
+    if destination.exists():
+        raise ValueError(f'site/work/{slug}/ already exists; choose another slug')
+    temporary = work / f'.{slug}-{uuid.uuid4().hex}.pending'
+    temporary.mkdir()
+    try:
+        (temporary / 'skybox').mkdir()
+        for face in FACES:
+            shutil.copy2(folder / f'{face}.png', temporary / 'skybox' / f'{face}.png')
+        preview = folder / 'preview.png'
+        shutil.copy2(preview if preview.is_file() else folder / 'px.png', temporary / 'preview.png')
+        for source in required[1:]:
+            shutil.copy2(source, temporary / source.name)
+        shutil.copytree(vendor, temporary / 'vendor')
+        published_at = datetime.now(timezone.utc).isoformat()
+        piece = {'schemaVersion': 1, 'slug': slug, 'title': title, 'description': description,
+                 'publishedAt': published_at, 'size': manifest.get('pipeline', {}).get('size'),
+                 'skybox': {face: f'skybox/{face}.png' for face in FACES}, 'viewer': state,
+                 'source': {'export': folder.relative_to(ROOT.resolve()).as_posix(),
+                            'manifestSha256': hash_file(folder / 'manifest.json')}}
+        html = required[0].read_text()
+        marker = '<script id="piece-config" type="application/json"></script>'
+        if html.count(marker) != 1:
+            raise ValueError('Viewer index is missing its publication configuration slot')
+        embedded = json.dumps(piece, separators=(',', ':')).replace('<', '\\u003c')
+        (temporary / 'index.html').write_text(html.replace(marker, f'<script id="piece-config" type="application/json">{embedded}</script>'))
+        (temporary / 'piece.json').write_text(json.dumps(piece, indent=2) + '\n')
+        temporary.replace(destination)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    rebuild_catalog()
+    return {'slug': slug, 'folder': destination.relative_to(ROOT).as_posix(), 'url': f'/site/work/{slug}/'}
 
 
 def finish_export(folder, analysis):
@@ -159,7 +263,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = urlparse(self.path)
-        if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish'):
+        if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish'):
             return self.send_json(404, {'error': 'Unknown endpoint'})
         origin = self.headers.get('Origin')
         if origin and urlparse(origin).netloc != self.headers.get('Host'):
@@ -190,6 +294,8 @@ class Handler(SimpleHTTPRequestHandler):
                         remaining -= len(chunk)
                 return self.send_json(201, {'face': face})
             request = self.read_json()
+            if route.path == '/api/publish':
+                return self.send_json(201, publish_work(request))
             if route.path == '/api/export/start':
                 folder = start_export(request.get('name', 'skybox'), request['state'])
                 return self.send_json(201, {'folder': folder.name})

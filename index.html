@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reflections of Synthetic Shadow Boxes</title>
+    <title>Reflective Rotating Tesseract</title>
     <style>
         body { 
             margin: 0;
@@ -31,8 +31,14 @@
         #skybox-status.error, #skybox-library-status.error { color: #ffaaa0; }
         .skybox-links { display: grid; gap: 5px; margin-top: 8px; font-size: 11px; }
         .skybox-links a, #skybox-library-dialog a { color: #80caff; }
-        #skybox-library-dialog { background: #191d25; color: #d9dee8; border: 1px solid #52637c; border-radius: 0; padding: 20px; width: min(900px, 90vw); max-height: 85vh; overflow: auto; font: 13px system-ui, sans-serif; }
-        #skybox-library-dialog::backdrop { background: #000a; }
+        #skybox-library-dialog, #publish-skybox-dialog { background: #191d25; color: #d9dee8; border: 1px solid #52637c; border-radius: 0; padding: 20px; width: min(900px, 90vw); max-height: 85vh; overflow: auto; font: 13px system-ui, sans-serif; }
+        #publish-skybox-dialog { width: min(480px, 90vw); }
+        #skybox-library-dialog::backdrop, #publish-skybox-dialog::backdrop { background: #000a; }
+        #publish-skybox-dialog form, #publish-skybox-dialog label { display: grid; gap: 7px; }
+        #publish-skybox-dialog form { gap: 14px; }
+        #publish-skybox-dialog input, #publish-skybox-dialog textarea { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; font: inherit; }
+        #publish-skybox-dialog textarea { min-height: 80px; resize: vertical; }
+        #publish-result { overflow-wrap: anywhere; }
         .library-heading { display: flex; gap: 10px; align-items: center; }
         .library-heading strong { margin-right: auto; }
         #skybox-export-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
@@ -133,11 +139,12 @@
     <script type="importmap">
         {
             "imports": {
-                "three": "https://unpkg.com/three@0.155.0/build/three.module.js",
-                "three/addons/": "https://unpkg.com/three@0.155.0/examples/jsm/"
+                "three": "./vendor/three.module.js",
+                "three/addons/": "./vendor/"
             }
         }
     </script>
+    <script id="piece-config" type="application/json"></script>
     <script type="module" src="tesseract.js"></script>
 </body>
 </html> 

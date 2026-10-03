@@ -21,6 +21,14 @@ class StudioAPITest(unittest.TestCase):
         server.ROOT = Path(self.temp.name)
         (server.ROOT / 'raw').mkdir()
         (server.ROOT / 'raw' / 'photo.png').write_bytes(PNG)
+        (server.ROOT / 'index.html').write_text('<script id="piece-config" type="application/json"></script>')
+        for filename in ('tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js'):
+            (server.ROOT / filename).write_text(f'// {filename}\n')
+        (server.ROOT / 'vendor' / 'controls').mkdir(parents=True)
+        (server.ROOT / 'vendor' / 'three.module.js').write_text("import './three.core.js';\n")
+        (server.ROOT / 'vendor' / 'three.core.js').write_text('// core\n')
+        (server.ROOT / 'vendor' / 'controls' / 'OrbitControls.js').write_text('// controls\n')
+        (server.ROOT / 'vendor' / 'THREE-LICENSE.txt').write_text('MIT\n')
         self.http = ThreadingHTTPServer(('localhost', 0), server.Handler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
@@ -125,6 +133,30 @@ class StudioAPITest(unittest.TestCase):
         # A completed folder can never receive another face or be finalized again.
         code, _ = self.request('POST', '/api/export/finish', {'folder': folder})
         self.assertEqual(code, 400)
+
+    def test_publish_creates_standalone_work_and_catalog(self):
+        payload = self.payload()
+        payload['state']['name'] = 'Mirror Study'
+        payload['state']['size'] = 1024
+        code, exported = self.request('POST', '/api/export', payload)
+        self.assertEqual(code, 201)
+        publish = {'slug': 'mirror-study', 'title': 'Mirror <Study>', 'description': 'A finished work.',
+                   'exportFolder': exported['folder'], 'viewerState': {'shader': 'chrome', 'camera': {}}}
+        code, result = self.request('POST', '/api/publish', publish)
+        self.assertEqual(code, 201)
+        self.assertEqual(result['url'], '/site/work/mirror-study/')
+        folder = server.ROOT / result['folder']
+        self.assertTrue(all((folder / 'skybox' / f'{face}.png').is_file() for face in server.FACES))
+        self.assertTrue((folder / 'tesseract.js').is_file())
+        self.assertTrue((folder / 'vendor' / 'three.module.js').is_file())
+        self.assertTrue((folder / 'vendor' / 'three.core.js').is_file())
+        self.assertTrue((folder / 'vendor' / 'controls' / 'OrbitControls.js').is_file())
+        self.assertNotIn('<Study>', (folder / 'index.html').read_text())
+        piece = json.loads((folder / 'piece.json').read_text())
+        self.assertEqual(piece['viewer']['shader'], 'chrome')
+        catalog = json.loads((server.ROOT / 'site' / 'catalog.json').read_text())
+        self.assertEqual(catalog['work'][0]['url'], 'work/mirror-study/')
+        self.assertEqual(self.request('POST', '/api/publish', publish)[0], 400)
 
     def test_studio_code_bypasses_cache(self):
         (server.ROOT / 'studio').mkdir()

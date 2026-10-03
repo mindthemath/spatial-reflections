@@ -4,15 +4,16 @@ A photographic artwork sandbox: a node-based image pipeline, six face previews, 
 
 ## Start
 
-Stop any existing server on port 1313, then run from the project root:
+Install the locked Bun dependencies and local Chromium once, then run from the project root:
 
 ```sh
-python3 studio/server.py --port 1313
+make install
+make serve
 ```
 
 Open **http://localhost:1313/studio/**. The original viewer remains at `/`.
 
-The server uses Python 3.9+ and the standard library. Three.js loads from unpkg, so the browser needs internet access. This is a trusted, local workstation tool, not a public production server.
+The server uses Python 3.9+ and the standard library. Three.js and OrbitControls load from the pinned runtime under `../vendor/`, so Studio requires no internet connection. This is a trusted, local workstation tool, not a public production server.
 
 ## Build an arrangement
 
@@ -157,10 +158,12 @@ node studio/test_resolution.cjs
 python3 -m unittest discover -s studio -p 'test_*.py'
 ```
 
-Optional browser integration test (requires Playwright and its Chromium installation):
+Browser integration test (using the Bun-managed Playwright and Chromium installation):
 
 ```sh
-node studio/test_browser.cjs
+make test-browser
 ```
 
-Use `PLAYWRIGHT_MODULE` to point to an external Playwright installation, and optionally `CHROMIUM_EXECUTABLE` to select a browser executable. The test uses a temporary project/library/export folder and synthetic photos; it never changes your real artwork. It covers graph gestures, endpoint rewiring, undo/redo, shortcuts, resizing, lighting calculations, statistics, schema migration, JSON round-trip, PNG export, the viewer gallery/handoff, Chrome switching, camera preservation, load failure retention and refresh after reopening an export in Studio.
+Run the complete syntax, unit/API and browser suite with `make test`. You may set `CHROMIUM_EXECUTABLE` to select a different browser executable. The browser test uses a temporary project/library/export folder and synthetic photos; it never changes your real artwork. It covers graph gestures, endpoint rewiring, undo/redo, shortcuts, resizing, lighting calculations, statistics, schema migration, JSON round-trip, PNG export, publishing, the viewer gallery/handoff, Chrome switching, camera preservation, load failure retention and refresh after reopening an export in Studio.
+
+Use `make sync` to recursively copy the locked Three.js entry points, their relative imports and the license from `node_modules/` into `vendor/`. Use `make update` to update Bun packages and Chromium, synchronize the vendored runtime, and run the complete suite. The update fails on a missing/stale vendor module or browser regression. Review visual output after Three.js updates; previously published work retains its snapshotted runtime.
