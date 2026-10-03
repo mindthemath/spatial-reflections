@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -108,6 +109,117 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(resumed['nextFrame'], 0)
         self.assertFalse((job_dir / 'segment-000000.mkv').exists())
         self.assertFalse((job_dir / '.segment-000000.pending.mkv').exists())
+
+    def test_checkpoint_closes_at_boundary_and_next_starts_lazily(self):
+        processes = []
+
+        class FakeProcess:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+                processes.append(self)
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.output.write_bytes(b'segment-' + str(len(processes)).encode())
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        self.store.popen = FakeProcess
+        job = self.store.create(request(fps=2, frames=6, checkpointSeconds=2))
+        lease = self.store.resume(job['id'])['lease']
+        for frame in range(3):
+            progress = self.store.write_frame(job['id'], frame, b'png', lease)
+            self.assertEqual(progress['durableFrame'], 0)
+        progress = self.store.write_frame(job['id'], 3, b'png', lease)
+        self.assertEqual(progress['durableFrame'], 4)
+        self.assertTrue(progress['checkpointed'])
+        self.assertEqual(len(processes), 1)
+        persisted = json.loads(self.manifest(job).read_text())
+        self.assertEqual(persisted['nextFrame'], 4)
+        self.assertEqual(persisted['segments'][0]['frames'], 4)
+        self.assertEqual(persisted['segments'][0]['firstFrame'], 0)
+        self.store.write_frame(job['id'], 4, b'png', lease)
+        self.assertEqual(len(processes), 2)
+
+    def test_encoder_failure_pauses_at_last_durable_frame(self):
+        class FailingProcess:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = 1
+                return 1
+
+            def kill(self):
+                self.returncode = -9
+
+        self.store.popen = FailingProcess
+        job = self.store.create(request(fps=1, frames=2, checkpointSeconds=1))
+        lease = self.store.resume(job['id'])['lease']
+        with self.assertRaisesRegex(ValueError, 'encoder'):
+            self.store.write_frame(job['id'], 0, b'png', lease)
+        persisted = json.loads(self.manifest(job).read_text())
+        self.assertEqual(persisted['state'], 'paused')
+        self.assertEqual(persisted['nextFrame'], 0)
+        self.assertEqual(persisted['segments'], [])
+
+    def test_pause_discards_only_active_segment(self):
+        class WaitingProcess:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.output.write_bytes(b'partial')
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        self.store.popen = WaitingProcess
+        job = self.store.create(request(fps=2, frames=8, checkpointSeconds=2))
+        lease = self.store.resume(job['id'])['lease']
+        self.store.write_frame(job['id'], 0, b'png', lease)
+        self.store.write_frame(job['id'], 1, b'png', lease)
+        paused = self.store.pause(job['id'], 'browser left', lease)
+        self.assertEqual(paused['nextFrame'], 0)
+        self.assertEqual(paused['state'], 'paused')
+        self.assertEqual(list(self.manifest(job).parent.glob('*.pending.mkv')), [])
+
+    def test_idle_job_is_paused_and_can_be_resumed(self):
+        now = [10.0]
+        self.store.clock = lambda: now[0]
+        self.store.idle_timeout = 5
+        job = self.store.create(request())
+        self.store.resume(job['id'])
+        now[0] = 16.0
+        self.assertEqual(self.store.pause_stale_jobs(), [job['id']])
+        self.assertEqual(self.store.resume(job['id'])['nextFrame'], 0)
+
+    def test_second_resume_is_rejected_until_first_lease_pauses(self):
+        job = self.store.create(request())
+        active = self.store.resume(job['id'])
+        with self.assertRaisesRegex(ValueError, 'already active'):
+            self.store.resume(job['id'])
+        self.store.pause(job['id'], lease=active['lease'])
+        replacement = self.store.resume(job['id'])
+        self.assertNotEqual(replacement['lease'], active['lease'])
 
 
 if __name__ == '__main__':
