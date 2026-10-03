@@ -1,14 +1,18 @@
 // Versioned image processing and provenance. No graph UI or Three.js dependencies.
+import {analyzeResolution,planResolution,MAX_CANVAS_SIDE} from './resolution.js';
 export const FACES = ['px','nx','py','ny','pz','nz'];
 export const LABELS = {px:'Right +X',nx:'Left −X',py:'Top +Y',ny:'Bottom −Y',pz:'Front +Z',nz:'Back −Z'};
-export const RENDERER = 'canvas-linear-grade-v2';
+export const RENDERER = 'canvas-linear-grade-v3';
 export const cropDefaults = () => ({zoom:1,panX:0,panY:0,rotation:0,flipX:false,flipY:false});
 export const lightDefaults = () => ({exposure:0,contrast:0,highlights:0,shadows:0,whites:0,blacks:0,temperature:0,tint:0,vibrance:0,saturation:0});
 export const CROP_FIELDS = [['zoom','Zoom',1,5,0.01],['panX','Pan X',-1,1,0.01],['panY','Pan Y',-1,1,0.01],['rotation','Rotation °',-180,180,1]];
 export const LIGHT_FIELDS = [['exposure','Exposure EV',-5,5,0.05],['contrast','Contrast',-100,100,1],['highlights','Highlights',-100,100,1],['shadows','Shadows',-100,100,1],['whites','Whites',-100,100,1],['blacks','Blacks',-100,100,1],['temperature','Warmth',-100,100,1],['tint','Tint · green ↔ magenta',-100,100,1],['vibrance','Vibrance',-100,100,1],['saturation','Saturation',-100,100,1]];
 export const clone = value => JSON.parse(JSON.stringify(value));
 export const url = path => '/' + path.split('/').map(encodeURIComponent).join('/');
-export function canvas(width,height=width){const c=document.createElement('canvas');c.width=width;c.height=height;return c;}
+export function canvas(width,height=width){
+    if(!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||width>MAX_CANVAS_SIDE||height>MAX_CANVAS_SIDE)throw new Error('Requested canvas dimensions exceed the supported range');
+    const c=document.createElement('canvas');c.width=width;c.height=height;return c;
+}
 export function dimensions(image){return {width:image.naturalWidth||image.width,height:image.naturalHeight||image.height};}
 const clamp = (v,min=0,max=1) => Math.min(max,Math.max(min,v));
 const linear = v => v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4;
@@ -88,7 +92,11 @@ export async function loadImage(source){
         const img=new Image();img.onload=()=>resolve(img);img.onerror=()=>reject(new Error(`Cannot load ${source.path}`));img.src=url(source.path)+'?v='+source.sha256;
     }));return cache.get(key);
 }
-export async function evaluate(snapshot,size){
+export async function inspectResolution(snapshot){return analyzeResolution(snapshot,async source=>dimensions(await loadImage(source)));}
+export async function evaluate(snapshot,size,{noUpscale=false,onFace=null}={}){
+    const resolution=noUpscale?await inspectResolution(snapshot):null;
+    if(noUpscale&&(!resolution.complete||size>resolution.maxSide))throw new Error(`No-upscale export limit is ${resolution.maxSide}px. Complete the cube or lower the output size.`);
+    const required=noUpscale?planResolution(snapshot,size,resolution):new Map();
     const memo=new Map(),analysis=new Map();
     async function run(id){
         if(memo.has(id))return memo.get(id);
@@ -97,19 +105,28 @@ export async function evaluate(snapshot,size){
             if(node.type==='source')return loadImage(node.source);
             const edge=snapshot.edges.find(e=>e.to===id);if(!edge)throw new Error(`${node.type.toUpperCase()} has no image input`);
             const input=await run(edge.from);
-            if(node.type==='crop')return crop(input,node.settings,size);
-            if(node.type==='light')return node.legacy?legacyGrade(input,node.legacy,size):light(input,node.settings,size);
+            const target=noUpscale?required.get(id)||size:size;
+            const inputSize=dimensions(input);
+            if(noUpscale&&Math.min(inputSize.width,inputSize.height)+1e-8<target*(node.type==='crop'?node.settings.zoom:1))throw new Error(`${node.type.toUpperCase()} would upscale its input`);
+            if(node.type==='crop')return crop(input,node.settings,target);
+            if(node.type==='light'){
+                const maxDimension=noUpscale?Math.ceil(target*Math.max(inputSize.width,inputSize.height)/Math.min(inputSize.width,inputSize.height)):size;
+                return node.legacy?legacyGrade(input,node.legacy,target):light(input,node.settings,maxDimension);
+            }
             if(node.type==='info'){analysis.set(id,statistics(input));return input;}
             throw new Error(`Cannot evaluate ${node.type} as an image node`);
         })();memo.set(id,promise);return promise;
     }
     const outputs=new Map(),skybox=snapshot.nodes.find(n=>n.type==='skybox');
     for(const face of FACES){
-        try{const edge=snapshot.edges.find(e=>e.to===skybox.id&&e.input===face);if(!edge)throw new Error(`${face.toUpperCase()} has no image input`);outputs.set(face,crop(await run(edge.from),cropDefaults(),size));}
-        catch(e){outputs.set(face,{error:e.message});}
+        try{
+            const edge=snapshot.edges.find(e=>e.to===skybox.id&&e.input===face);if(!edge)throw new Error(`${face.toUpperCase()} has no image input`);
+            const output=crop(await run(edge.from),cropDefaults(),size);
+            if(onFace){await onFace(face,output);outputs.set(face,{exported:true});}else outputs.set(face,output);
+        }catch(e){if(onFace)throw e;outputs.set(face,{error:e.message});}
     }
     for(const node of snapshot.nodes.filter(n=>n.type==='info')){try{await run(node.id);}catch(e){analysis.set(node.id,{error:e.message});}}
-    return {outputs,analysis};
+    return {outputs,analysis,resolution,renderPlan:Object.fromEntries(required)};
 }
 export function migrate(value){
     let next=clone(value);
@@ -129,11 +146,15 @@ export function migrate(value){
         const cube={id,type:'skybox',x:faces.length?Math.max(...faces.map(n=>n.x)):920,y:faces.length?Math.min(...faces.map(n=>n.y)):30},faceById=new Map(faces.map(n=>[n.id,n.face]));
         next.edges=next.edges.map(e=>faceById.has(e.to)?{from:e.from,to:id,input:faceById.get(e.to)}:e);next.nodes=next.nodes.filter(n=>n.type!=='face');next.nodes.push(cube);next.schemaVersion=3;
     }
+    if(next.schemaVersion===3&&next.renderer==='canvas-linear-grade-v2')next.renderer=RENDERER;
+    if(next.resolutionMode===undefined){next.resolutionMode='manual';next.requestedSize=next.size;}
     return next;
 }
 export function validate(value){
     if(!value||value.schemaVersion!==3||value.renderer!==RENDERER||!Array.isArray(value.nodes)||!Array.isArray(value.edges)||value.nodes.length>300)throw new Error('Invalid or unsupported pipeline JSON');
-    if(![512,1024,2048].includes(value.size))throw new Error('Invalid output size');
+    if(!Number.isInteger(value.size)||value.size<1||value.size>MAX_CANVAS_SIDE)throw new Error('Invalid output size');
+    if(value.resolutionMode!==undefined&&!['max','manual'].includes(value.resolutionMode))throw new Error('Invalid resolution mode');
+    if(value.requestedSize!==undefined&&(!Number.isInteger(value.requestedSize)||value.requestedSize<1||value.requestedSize>MAX_CANVAS_SIDE))throw new Error('Invalid requested size');
     const ids=new Set();
     for(const n of value.nodes){
         if(!n||typeof n.id!=='string'||ids.has(n.id)||!['source','crop','light','info','skybox'].includes(n.type)||!Number.isFinite(n.x)||!Number.isFinite(n.y))throw new Error('Invalid node');ids.add(n.id);

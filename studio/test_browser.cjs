@@ -10,7 +10,7 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   const port=await new Promise((resolve,reject)=>{server.stdout.once('data',data=>resolve(Number(data.toString().trim())));server.once('error',reject);});
   browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),args:['--use-gl=angle','--use-angle=swiftshader']});
   const page=await browser.newPage({viewport:{width:1700,height:1100}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
-  const image=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=320;c.height=180;const ctx=c.getContext('2d'),g=ctx.createLinearGradient(0,0,320,180);g.addColorStop(0,'#203030');g.addColorStop(1,'#ffc080');ctx.fillStyle=g;ctx.fillRect(0,0,320,180);return c.toDataURL().split(',')[1];});
+  const image=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=1536;c.height=1024;const ctx=c.getContext('2d'),g=ctx.createLinearGradient(0,0,1536,1024);g.addColorStop(0,'#203030');g.addColorStop(1,'#ffc080');ctx.fillStyle=g;ctx.fillRect(0,0,1536,1024);return c.toDataURL().split(',')[1];});
   fs.writeFileSync(path.join(root,'raw','a.png'),Buffer.from(image,'base64'));fs.writeFileSync(path.join(root,'raw','b.png'),Buffer.from(image,'base64'));
   await page.goto(`http://localhost:${port}/studio/`);await page.waitForSelector('.photo');
   const center=async locator=>{const b=await locator.boundingBox();assert(b,'Element has bounds');return {x:b.x+b.width/2,y:b.y+b.height/2};};
@@ -56,10 +56,12 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   await page.mouse.move(divider.x,divider.y);await page.mouse.down();await page.mouse.move(divider.x-100,divider.y,{steps:8});await page.mouse.up();assert((await page.locator('#preview').evaluate(e=>e.clientWidth))>width+80);
   const height=await page.locator('#three').evaluate(e=>e.clientHeight),heightDivider=await center(page.locator('#preview-height-resizer'));
   await page.mouse.move(heightDivider.x,heightDivider.y);await page.mouse.down();await page.mouse.move(heightDivider.x,heightDivider.y+80,{steps:8});await page.mouse.up();assert((await page.locator('#three').evaluate(e=>e.clientHeight))>height+60);
+  await page.waitForFunction(()=>document.querySelector('#resolution-limit').textContent==='≤ 1024px');
+  assert.equal(await page.locator('#size option[value="2048"]').count(),0);
   await page.locator('#size').selectOption('512');await page.locator('#export').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Saved '),{timeout:30000});
   const folder=fs.readdirSync(path.join(root,'exports'))[0],manifest=JSON.parse(fs.readFileSync(path.join(root,'exports',folder,'manifest.json')));
   assert.equal(Object.keys(manifest.outputs).length,6);assert.equal(Object.keys(manifest.analysis).length,1);assert(fs.existsSync(path.join(root,'exports',folder,'analysis.json')));
-  assert.equal(manifest.pipeline.schemaVersion,3);assert.equal(manifest.pipeline.nodes.filter(n=>n.type==='skybox').length,1);assert.equal(manifest.pipeline.nodes.find(n=>n.type==='light').settings.exposure,1.25);
+  assert.equal(manifest.pipeline.schemaVersion,3);assert.equal(manifest.pipeline.resolutionReport.maxSide,1024);assert.equal(manifest.pipeline.nodes.filter(n=>n.type==='skybox').length,1);assert.equal(manifest.pipeline.nodes.find(n=>n.type==='light').settings.exposure,1.25);
   // Processing tests run directly in-browser (Canvas API required).
   const processing=await page.evaluate(async()=>{
    const p=await import('./pipeline.js');const image=p.canvas(100,50),ctx=image.getContext('2d');ctx.fillStyle='rgb(128,128,128)';ctx.fillRect(0,0,100,50);

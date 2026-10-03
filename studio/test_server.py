@@ -88,6 +88,27 @@ class StudioAPITest(unittest.TestCase):
             self.assertEqual(manifest['outputs'][face]['terminalNode'], 'cube')
             self.assertEqual(manifest['outputs'][face]['input'], face)
 
+    def test_streamed_export(self):
+        payload = self.payload()
+        code, started = self.request('POST', '/api/export/start', {'name': 'large-art', 'state': payload['state']})
+        self.assertEqual(code, 201)
+        folder = started['folder']
+        for face in server.FACES:
+            connection = http.client.HTTPConnection('localhost', self.http.server_port)
+            connection.request('POST', f'/api/export/face?folder={folder}&face={face}', PNG, {'Content-Type': 'image/png'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 201)
+            response.read()
+            connection.close()
+        code, finished = self.request('POST', '/api/export/finish', {'folder': folder, 'analysis': {}})
+        self.assertEqual(code, 201)
+        destination = server.ROOT / finished['folder']
+        self.assertTrue((destination / 'pipeline.json').is_file())
+        self.assertFalse((destination / '.pending.json').exists())
+        # A completed folder can never receive another face or be finalized again.
+        code, _ = self.request('POST', '/api/export/finish', {'folder': folder})
+        self.assertEqual(code, 400)
+
     def test_studio_code_bypasses_cache(self):
         (server.ROOT / 'studio').mkdir()
         (server.ROOT / 'studio' / 'app.js').write_text('const version = 3;')

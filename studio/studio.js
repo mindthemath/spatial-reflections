@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { FACES,LABELS,RENDERER,cropDefaults,lightDefaults,CROP_FIELDS,LIGHT_FIELDS,clone,url,canvas,evaluate,validate,migrate,clearImageCache } from './pipeline.js';
+import { FACES,LABELS,RENDERER,cropDefaults,lightDefaults,CROP_FIELDS,LIGHT_FIELDS,clone,url,canvas,evaluate,validate,migrate,clearImageCache,inspectResolution } from './pipeline.js';
+import {RESOLUTION_PRESETS,planResolution} from './resolution.js';
 
 const $=id=>document.getElementById(id),uid=()=>crypto.randomUUID();
 function createWorkspace() {
     return {
-        schemaVersion:3, name:'untitled', size:1024, renderer:RENDERER,
+        schemaVersion:3, name:'untitled', size:1024, resolutionMode:'max', requestedSize:1024, renderer:RENDERER,
         nodes:[{id:'skybox-output',type:'skybox',x:920,y:30}], edges:[],
         view:{x:20,y:20,scale:0.8}, layout:{previewWidth:380,previewHeight:250}
     };
@@ -14,7 +15,7 @@ let state=createWorkspace();
 const STORAGE_KEY='skybox-studio.workspace.v2';
 let recovered=null,recoveryError=null,draftTimer;
 try{const text=localStorage.getItem(STORAGE_KEY);if(text){recovered=JSON.parse(text);state=validate(migrate(recovered.pipeline));}}catch(error){recoveryError=error.message;recovered=null;}
-let library=[],selected=null,selectedEdge=null,pending=null,wireDrag=null,generation=0,analysis=new Map(),timer,exporting=false;
+let library=[],selected=null,selectedEdge=null,pending=null,wireDrag=null,generation=0,analysis=new Map(),timer,exporting=false,resolutionProfile=null;
 let selectedNodes=new Set((Array.isArray(recovered?.selection)?recovered.selection:[]).filter(id=>state.nodes.some(n=>n.id===id))),history=[clone(state)],historyIndex=0;
 selected=selectedNodes.has(recovered?.selectedId)?recovered.selectedId:[...selectedNodes].at(-1)||null;
 function saveDraft(){
@@ -25,7 +26,7 @@ function saveDraft(){
 function queueDraftSave(){clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,250);}
 window.addEventListener('pagehide',saveDraft);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveDraft();});
 function checkpoint(){
-    saveDraft();const next=snapshot();const comparable=s=>JSON.stringify({nodes:s.nodes,edges:s.edges,name:s.name,size:s.size});
+    saveDraft();const next=snapshot();const comparable=s=>JSON.stringify({nodes:s.nodes,edges:s.edges,name:s.name,resolutionMode:s.resolutionMode,requestedSize:s.requestedSize});
     if(comparable(next)===comparable(history[historyIndex]))return;
     history=history.slice(0,historyIndex+1);history.push(next);if(history.length>100)history.shift();historyIndex=history.length-1;updateHistoryButtons();
 }
@@ -34,7 +35,7 @@ function undoRedo(direction){
     checkpoint();const next=historyIndex+direction;if(next<0||next>=history.length)return;
     const view=state.view,layout=state.layout;historyIndex=next;state=clone(history[next]);state.view=view;state.layout=layout;
     selectedNodes=new Set([...selectedNodes].filter(id=>state.nodes.some(n=>n.id===id)));if(!selectedNodes.has(selected))selected=[...selectedNodes].at(-1)||null;
-    selectedEdge=null;pending=null;analysis.clear();$('name').value=state.name;$('size').value=state.size;drawGraph();inspect();schedule();updateHistoryButtons();
+    selectedEdge=null;pending=null;analysis.clear();$('name').value=state.name;resolutionProfile=null;updateResolutionControls();drawGraph();inspect();schedule();updateHistoryButtons();
 }
 function deleteSelection(){
     if(selectedEdge){state.edges=state.edges.filter(e=>edgeKey(e)!==selectedEdge);changed();return;}
@@ -296,6 +297,7 @@ function inspect(){
         const stats=document.createElement('div');stats.id='info-detail';root.append(stats);renderInfo();
     }else if(node.type==='skybox'){
         const p=document.createElement('p');p.textContent='The permanent terminal node: six named image inputs become one cube environment. It can be moved and selected, but never deleted or duplicated.';root.append(p);
+        const detail=document.createElement('p');detail.id='resolution-detail';root.append(detail);renderResolutionDetail();
         const list=document.createElement('div');list.className='cube-inspector';
         for(const face of FACES){const row=document.createElement('div'),edge=incoming(node.id,face),label=document.createElement('span');label.textContent=`${face.toUpperCase()} · ${LABELS[face]} — ${edge?'connected':'empty'}`;row.append(label);if(edge)row.append(action('Disconnect',()=>{state.edges=state.edges.filter(e=>e!==edge);changed();}));list.append(row);}root.append(list);
     }
@@ -329,12 +331,14 @@ const tiles=new Map();for(const face of FACES){
     const button=document.createElement('button'),c=canvas(256);button.append(c,document.createTextNode(`${face} · ${LABELS[face]}`));button.onclick=()=>selectNode(state.nodes.find(n=>n.type==='skybox').id);$('faces').append(button);tiles.set(face,{canvas:c,button});
 }
 async function renderPreview(){
-    const version=generation,{outputs,analysis:nextAnalysis}=await evaluate(clone(state),256);if(version!==generation)return;
-    analysis=nextAnalysis;let missing=0;
+    const version=generation,snapshot=clone(state);
+    const [{outputs,analysis:nextAnalysis},profile]=await Promise.all([evaluate(snapshot,256),inspectResolution(snapshot)]);
+    if(version!==generation)return;
+    resolutionProfile=profile;updateResolutionControls();analysis=nextAnalysis;let missing=0;
     for(const face of FACES){const result=outputs.get(face),tile=tiles.get(face),ctx=tile.canvas.getContext('2d');ctx.fillStyle='#151922';ctx.fillRect(0,0,256,256);
         if(result.error){missing++;tile.button.title=result.error;ctx.fillStyle='#8491a6';ctx.font='16px sans-serif';ctx.fillText('No input',85,132);}else{ctx.drawImage(result,0,0);tile.button.title=LABELS[face];}}
     for(const node of state.nodes.filter(n=>n.type==='info')){const body=document.querySelector(`[data-id="${CSS.escape(node.id)}"] .info-summary`);if(body)body.textContent=infoSummary(node.id);}
-    renderInfo();updateEnvironment();if(!exporting)status(missing?`${missing} cube inputs incomplete · Photo → Frame → Light → Skybox · tap any stage with Info.`:'Preview ready · full-resolution rendering on export.');
+    renderInfo();renderResolutionDetail();updateEnvironment();if(!exporting)status(missing?`${missing} cube inputs incomplete · Photo → Frame → Light → Skybox · tap any stage with Info.`:`Preview ready · native ceiling ${profile.maxSide}px · no-upscale export.`);
 }
 const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(65,1,0.01,100);camera.position.set(3,2,4);
 const renderer=new THREE.WebGLRenderer({antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));$('three').append(renderer.domElement);
@@ -372,25 +376,78 @@ function resizeHandle(id,axis){
 }
 resizeHandle('preview-resizer','width');resizeHandle('preview-height-resizer','height');window.addEventListener('resize',applyLayout);
 
-function snapshot(){state.name=$('name').value;state.size=Number($('size').value);return clone(state);}
+function updateResolutionControls() {
+    const select=$('size'),profile=resolutionProfile;
+    select.replaceChildren();
+    const maxOption=document.createElement('option');maxOption.value='max';
+    maxOption.textContent=profile?.complete?`Max native · ${profile.maxSide} px`:'Max native · connect all faces';select.append(maxOption);
+    select.disabled=!profile?.complete;
+    $('export').disabled=exporting||!profile?.complete;
+    if(profile?.complete){
+        const requested=state.requestedSize||state.size,effective=state.resolutionMode==='max'?profile.maxSide:Math.min(requested,profile.maxSide);
+        const sizes=new Set(RESOLUTION_PRESETS.filter(size=>size<=profile.maxSide));
+        if(state.resolutionMode!=='max')sizes.add(effective);
+        for(const size of [...sizes].sort((a,b)=>a-b)){const option=document.createElement('option');option.value=String(size);option.textContent=`${size} px`;select.append(option);}
+        state.size=effective;select.value=state.resolutionMode==='max'?'max':String(effective);
+        $('resolution-limit').textContent=`≤ ${profile.maxSide}px`;
+        $('resolution-limit').title=`Limited by ${profile.limitingFaces.map(face=>`${face.toUpperCase()}: ${profile.faces[face].sourcePath}`).join(', ')}. Zoom/crop pixel budgets included.`;
+        queueDraftSave();
+    }else{$('resolution-limit').textContent='no upscaling';$('resolution-limit').title='Complete all six faces to calculate the common native resolution.';}
+    renderResolutionDetail();
+}
+function renderResolutionDetail(){
+    const root=$('resolution-detail');if(!root)return;
+    const profile=resolutionProfile;if(!profile){root.textContent='Calculating native pixel budgets…';return;}
+    root.textContent=(profile.complete?`Common export ceiling: ${profile.maxSide} × ${profile.maxSide} px. `:'Connect all faces to determine the common export ceiling. ')+FACES.map(face=>{
+        const info=profile.faces[face];return `${face.toUpperCase()}: ${info.error||`${info.maxSide}px from ${info.nativeWidth}×${info.nativeHeight}, zoom ${info.crops.map(c=>c.zoom).join(' × ')||'1'}`}`;
+    }).join(' · ');
+}
+function snapshot(){state.name=$('name').value;return clone(state);}
 function downloadJSON(value,filename){const blob=new Blob([JSON.stringify(value,null,2)],{type:'application/json'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);}
 $('save').onclick=()=>downloadJSON(snapshot(),`${state.name.replace(/[^a-z0-9_-]/gi,'-')||'skybox'}.pipeline.json`);$('restore').onclick=()=>$('snapshot').click();
 $('snapshot').onchange=async event=>{
     try{const file=event.target.files[0];if(!file)return;const next=validate(migrate(JSON.parse(await file.text())));
         const warnings=next.nodes.filter(n=>n.type==='source'&&!library.some(s=>s.path===n.source.path&&s.sha256===n.source.sha256));
         if(warnings.length&&!confirm(`${warnings.length} sources are missing or changed. Load anyway? Export requires matching originals.`))return;
-        state=next;selected=null;selectedNodes.clear();selectedEdge=null;pending=null;analysis.clear();clearImageCache();$('name').value=state.name||'untitled';$('size').value=state.size;checkpoint();applyLayout();applyPreviewMode();drawGraph();inspect();schedule();
+        state=next;selected=null;selectedNodes.clear();selectedEdge=null;pending=null;analysis.clear();clearImageCache();$('name').value=state.name||'untitled';resolutionProfile=null;updateResolutionControls();checkpoint();applyLayout();applyPreviewMode();drawGraph();inspect();schedule();
     }catch(error){status(error.message,true);}finally{event.target.value='';}
 };
+async function exportRequest(path, body, contentType='application/json') {
+    const response=await fetch(path,{method:'POST',headers:{'Content-Type':contentType},body:contentType==='application/json'?JSON.stringify(body):body});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result.error||'Export failed');
+    return result;
+}
+function encodePNG(image) {
+    return new Promise((resolve,reject)=>image.toBlob(blob=>blob?resolve(blob):reject(new Error('Browser could not encode this resolution. Select a smaller output size.')),'image/png'));
+}
 $('export').onclick=async()=>{
-    const button=$('export');button.disabled=true;exporting=true;
-    try{const pipeline=validate(snapshot());status('Rendering full-resolution faces and image statistics…');const {outputs,analysis:stats}=await evaluate(pipeline,pipeline.size),images={};
-        for(const face of FACES){const c=outputs.get(face);if(c.error)throw new Error(`${face}: ${c.error}`);images[face]=c.toDataURL('image/png').split(',')[1];}
-        status('Writing unique export folder…');const response=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:pipeline.name,state:pipeline,images,analysis:Object.fromEntries(stats)})});
-        const result=await response.json();if(!response.ok)throw new Error(result.error||'Export failed');status(`Saved ${result.folder}/ — six PNGs + pipeline.json + manifest.json${stats.size?' + analysis.json':''}.`);
-    }catch(error){status(error.message,true);}finally{button.disabled=false;exporting=false;}
+    $('export').disabled=true;exporting=true;
+    let folder=null;
+    try {
+        const pipeline=validate(snapshot()),profile=await inspectResolution(pipeline);
+        if(!profile.complete)throw new Error('Complete all six cube inputs before exporting.');
+        pipeline.size=pipeline.resolutionMode==='max'?profile.maxSide:Math.min(pipeline.requestedSize||pipeline.size,profile.maxSide);
+        state.size=pipeline.size;
+        pipeline.resolutionReport=profile;
+        pipeline.renderPlan=Object.fromEntries(planResolution(pipeline,pipeline.size,profile));
+        status(`Preparing ${pipeline.size} × ${pipeline.size} no-upscale export…`);
+        ({folder}=await exportRequest('/api/export/start',{name:pipeline.name,state:pipeline}));
+        const {analysis:stats}=await evaluate(pipeline,pipeline.size,{
+            noUpscale:true,
+            onFace:async(face,image)=>{
+                status(`Rendering / saving ${face.toUpperCase()} · ${pipeline.size} × ${pipeline.size}px…`);
+                const png=await encodePNG(image);
+                await exportRequest(`/api/export/face?folder=${encodeURIComponent(folder)}&face=${face}`,png,'image/png');
+            }
+        });
+        const result=await exportRequest('/api/export/finish',{folder,analysis:Object.fromEntries(stats)});
+        status(`Saved ${result.folder}/ — six PNGs + pipeline.json + manifest.json${stats.size?' + analysis.json':''}.`);
+    } catch(error) {
+        status(error.message+(folder?` · Incomplete export: exports/${folder}/ (marked .pending.json)` : ''),true);
+    } finally { exporting=false;updateResolutionControls(); }
 };
-$('crop').onclick=()=>addNode('crop');$('light').onclick=()=>addNode('light');$('info').onclick=()=>addNode('info');$('refresh').onclick=()=>refreshLibrary().catch(e=>status(e.message,true));$('size').onchange=()=>{state.size=Number($('size').value);checkpoint();};$('name').onchange=()=>{state.name=$('name').value;checkpoint();};
+$('crop').onclick=()=>addNode('crop');$('light').onclick=()=>addNode('light');$('info').onclick=()=>addNode('info');$('refresh').onclick=()=>refreshLibrary().catch(e=>status(e.message,true));$('size').onchange=()=>{state.resolutionMode=$('size').value==='max'?'max':'manual';if(state.resolutionMode==='manual')state.requestedSize=Number($('size').value);updateResolutionControls();checkpoint();};$('name').onchange=()=>{state.name=$('name').value;checkpoint();};
 function resetWorkspace() {
     if (!confirm('Reset the workspace? This clears the browser draft and undo history. Save JSON first if you want to keep this arrangement. Photos and exported folders are not deleted.')) return;
     clearTimeout(draftTimer);
@@ -403,11 +460,12 @@ function resetWorkspace() {
     selectedEdge=null;
     pending=null;
     analysis.clear();
+    resolutionProfile=null;
     clearImageCache();
     history=[clone(state)];
     historyIndex=0;
     $('name').value=state.name;
-    $('size').value=state.size;
+    updateResolutionControls();
     applyLayout();
     applyPreviewMode();
     drawGraph();
@@ -418,7 +476,7 @@ function resetWorkspace() {
 }
 $('reset-workspace').onclick=resetWorkspace;
 $('reload-app').onclick=()=>{saveDraft();location.reload();};
-$('name').value=state.name||'untitled';$('size').value=state.size;
+$('name').value=state.name||'untitled';updateResolutionControls();
 applyLayout();applyPreviewMode();drawGraph();inspect();updateHistoryButtons();schedule();refreshLibrary().catch(e=>status(e.message,true));
 if(recovered){$('autosave-status').textContent='Restored · autosaved';$('autosave-status').title='Workspace restored from this browser. Undo history starts fresh after reload.';}
 if(recoveryError){$('autosave-status').textContent='Recovery failed';$('autosave-status').classList.add('error');$('autosave-status').title=recoveryError;}

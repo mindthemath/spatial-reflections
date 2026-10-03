@@ -21,7 +21,7 @@ The server uses Python 3.9+ and the standard library. Three.js loads from unpkg,
 3. Add **Frame** and **Light** nodes. Connect **Photo → Frame → Light → Skybox input**. Any stage may branch to multiple inputs; direct Source → Skybox is also valid.
 4. Select a node to edit its settings. **Frame** owns crop/zoom/pan/rotation/flips; **Light** owns exposure and color. Chain nodes in the order you want. Light before Frame can be useful when inspecting the uncropped photograph.
 5. Add **Info** and connect it to any image stage to inspect that stage's statistics. Info passes the image through unchanged, so it may live inline or on its own branch.
-6. Complete all six faces and click **Export folder**.
+6. Complete all six faces. **Max native** automatically chooses the largest common square resolution that needs no upscaling; smaller presets are also available. Click **Export folder**.
 
 There is no automatic stitching or seamlessness constraint. Rotation / pan may expose black regions intentionally. These are arbitrary photographic arrangements, not necessarily traditional skyboxes.
 
@@ -68,7 +68,7 @@ Adjustments have sliders and editable numeric values. Double-click a slider labe
 
 ## Frame / Light processing
 
-Snapshots identify the renderer as `canvas-linear-grade-v2` with schema version 3. Version 3 models the terminal result as one Skybox node with six named inputs rather than six unrelated terminal nodes.
+Snapshots identify the renderer as `canvas-linear-grade-v3` with schema version 3. Version 3 models the terminal result as one Skybox node with six named inputs rather than six unrelated terminal nodes.
 
 **Frame**:
 
@@ -87,7 +87,13 @@ Snapshots identify the renderer as `canvas-linear-grade-v2` with schema version 
 
 This cannot recover information already clipped in the original JPEG / PNG. Node order matters; each crop resamples and each light node quantizes at its output.
 
-Live image previews render at 256 px; export evaluates the graph again at 512, 1024, or 2048 px. Lighting retains aspect ratio before any crop. Resampling and statistics can differ slightly between preview and export.
+Live previews render at 256 px. Export resolution is dynamic, with no upscaling: each source starts with its native width/height; a Frame node's square pixel budget is `floor(min(inputWidth,inputHeight) / zoom)`. Chained crops reduce the budget cumulatively. Lighting and Info do not reduce native capacity. The common limit is the minimum across the six connected faces; unused photos do not affect it. Pan/rotation change framing but not sampling scale (exposed black areas are still allowed).
+
+**Max native** uses the exact common limit, not a rounded power of two. Smaller presets are offered up to that limit, including 4096/8192 when supported by the actual images. Existing manual size choices are clamped to the current budget. The Skybox inspector reports each face's source dimensions, crop chain and limit.
+
+The export renderer plans resolution backwards through the DAG: earlier nodes preserve enough pixels for downstream zooms, and shared branches use the largest downstream requirement. This prevents premature resizing, including Light → Frame workflows. Exports record both the source-resolution report and intermediate render plan in `pipeline.json` and the manifest.
+
+There is a 32,767-pixel canvas-dimension guard; actual browser canvas-area, memory, encoding and intermediate-image limits may be lower. Resource failures are reported instead of silently upscaling or reducing the requested resolution. Equal dimensions / no upscaling do not imply equal optical sharpness: focus, lens detail, compression and noise still differ. Resampling and statistics can differ slightly between preview and export.
 
 ### Old snapshots
 
@@ -133,7 +139,9 @@ exports/untitled-20261002T180000Z-a1b2c3d4e5f6/
 
 Every exported folder includes `pipeline.json` alongside the images. It never overwrites existing exports or `skybox/`. `manifest.json` also embeds the complete pipeline and adds per-output hashes, the terminal Skybox node ID, and the named cube input for upstream lineage, plus Info statistics from the export-resolution pipeline. Info branches without image inputs record an error rather than blocking otherwise-complete faces.
 
-The server rechecks every source hash, including unused source nodes. The browser renders PNGs; the server checks their signatures, verifies sources and writes the files. This is not an independent rendering engine or a sandbox for untrusted clients. Color management / image decoding may vary across browsers; hashes identify exact inputs and outputs but do not guarantee bit-identical cross-browser rendering.
+PNGs are encoded and uploaded one face at a time as binary data, avoiding a giant six-image base64 JSON payload. The server streams each face to disk with exclusive writes (up to 512 MB per PNG), then finalizes the JSON lineage after all six succeed. Failed or interrupted exports retain `.pending.json` and are reported as incomplete; they never overwrite completed artwork.
+
+The server rechecks every source hash before starting and again before finalizing, including unused source nodes. The browser renders PNGs; the server checks their signatures, verifies sources and writes the files. This is not an independent rendering engine or a sandbox for untrusted clients. Color management / image decoding may vary across browsers; hashes identify exact inputs and outputs but do not guarantee bit-identical cross-browser rendering.
 
 Copy exported PNGs into `skybox/`, or point the viewer's `cdnPath` at the new export folder. Studio does not mutate the viewer's assets.
 
@@ -142,6 +150,7 @@ Copy exported PNGs into `skybox/`, or point the viewer's `cdnPath` at the new ex
 ```sh
 node --check studio/studio.js
 node --check studio/pipeline.js
+node studio/test_resolution.cjs
 python3 -m unittest discover -s studio -p 'test_*.py'
 ```
 
