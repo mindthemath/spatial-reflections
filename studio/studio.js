@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FACES,LABELS,RENDERER,cropDefaults,lightDefaults,CROP_FIELDS,LIGHT_FIELDS,clone,url,canvas,evaluate,validate,migrate,clearImageCache,inspectResolution } from './pipeline.js';
 import {RESOLUTION_PRESETS,planResolution} from './resolution.js';
+import {normalizeExportFolder,exportFileURL,viewerURL} from '../skybox-paths.js';
 
 const $=id=>document.getElementById(id),uid=()=>crypto.randomUUID();
 function createWorkspace() {
@@ -16,11 +17,12 @@ const STORAGE_KEY='skybox-studio.workspace.v2';
 let recovered=null,recoveryError=null,draftTimer;
 try{const text=localStorage.getItem(STORAGE_KEY);if(text){recovered=JSON.parse(text);state=validate(migrate(recovered.pipeline));}}catch(error){recoveryError=error.message;recovered=null;}
 let library=[],selected=null,selectedEdge=null,pending=null,wireDrag=null,generation=0,analysis=new Map(),timer,exporting=false,resolutionProfile=null;
+let latestExport=recovered?.latestExport||null;
 let selectedNodes=new Set((Array.isArray(recovered?.selection)?recovered.selection:[]).filter(id=>state.nodes.some(n=>n.id===id))),history=[clone(state)],historyIndex=0;
 selected=selectedNodes.has(recovered?.selectedId)?recovered.selectedId:[...selectedNodes].at(-1)||null;
 function saveDraft(){
     clearTimeout(draftTimer);
-    try{const savedAt=new Date().toISOString();localStorage.setItem(STORAGE_KEY,JSON.stringify({pipeline:snapshot(),selection:[...selectedNodes],selectedId:selected,savedAt}));$('autosave-status').textContent=recovered?'Restored · autosaved':'Autosaved';$('autosave-status').classList.remove('error');$('autosave-status').title=`Saved in this browser at ${new Date(savedAt).toLocaleTimeString()}. Save JSON for a portable backup.`;}
+    try{const savedAt=new Date().toISOString();localStorage.setItem(STORAGE_KEY,JSON.stringify({pipeline:snapshot(),selection:[...selectedNodes],selectedId:selected,latestExport,savedAt}));$('autosave-status').textContent=recovered?'Restored · autosaved':'Autosaved';$('autosave-status').classList.remove('error');$('autosave-status').title=`Saved in this browser at ${new Date(savedAt).toLocaleTimeString()}. Save JSON for a portable backup.`;}
     catch(error){$('autosave-status').textContent='Autosave unavailable';$('autosave-status').classList.add('error');$('autosave-status').title=error.message+' — use Save JSON.';}
 }
 function queueDraftSave(){clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,250);}
@@ -405,13 +407,38 @@ function renderResolutionDetail(){
 function snapshot(){state.name=$('name').value;return clone(state);}
 function downloadJSON(value,filename){const blob=new Blob([JSON.stringify(value,null,2)],{type:'application/json'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);}
 $('save').onclick=()=>downloadJSON(snapshot(),`${state.name.replace(/[^a-z0-9_-]/gi,'-')||'skybox'}.pipeline.json`);$('restore').onclick=()=>$('snapshot').click();
+function restorePipeline(value) {
+    const next=validate(migrate(value));
+    const warnings=next.nodes.filter(n=>n.type==='source'&&!library.some(s=>s.path===n.source.path&&s.sha256===n.source.sha256));
+    if(warnings.length&&!confirm(`${warnings.length} sources are missing or changed. Load anyway? Export requires matching originals.`))return false;
+    state=next;selected=null;selectedNodes.clear();selectedEdge=null;pending=null;analysis.clear();clearImageCache();$('name').value=state.name||'untitled';resolutionProfile=null;updateResolutionControls();checkpoint();applyLayout();applyPreviewMode();drawGraph();inspect();schedule();
+    return true;
+}
 $('snapshot').onchange=async event=>{
-    try{const file=event.target.files[0];if(!file)return;const next=validate(migrate(JSON.parse(await file.text())));
-        const warnings=next.nodes.filter(n=>n.type==='source'&&!library.some(s=>s.path===n.source.path&&s.sha256===n.source.sha256));
-        if(warnings.length&&!confirm(`${warnings.length} sources are missing or changed. Load anyway? Export requires matching originals.`))return;
-        state=next;selected=null;selectedNodes.clear();selectedEdge=null;pending=null;analysis.clear();clearImageCache();$('name').value=state.name||'untitled';resolutionProfile=null;updateResolutionControls();checkpoint();applyLayout();applyPreviewMode();drawGraph();inspect();schedule();
-    }catch(error){status(error.message,true);}finally{event.target.value='';}
+    try{const file=event.target.files[0];if(file)restorePipeline(JSON.parse(await file.text()));}
+    catch(error){status(error.message,true);}finally{event.target.value='';}
 };
+function updateExportLink() {
+    const link=$('view-export');link.hidden=true;
+    if(!latestExport)return;
+    try{link.href=viewerURL(latestExport);link.title=`Last completed export: ${latestExport}. This does not show unexported draft edits.`;link.hidden=false;}catch{latestExport=null;}
+}
+async function initializeLibrary() {
+    try{
+        await refreshLibrary();
+        const requested=new URL(location.href).searchParams.get('pipeline');if(!requested)return;
+        const match=/^(\/?exports\/[a-zA-Z0-9_-]+)\/pipeline\.json$/.exec(requested);if(!match)throw new Error('Invalid exported pipeline path');
+        const folder=normalizeExportFolder(match[1]),response=await fetch(exportFileURL(folder,'pipeline.json'),{cache:'no-store'});
+        if(!response.ok)throw new Error('Exported pipeline is missing');
+        const pipeline=await response.json();
+        const consumeImportURL=()=>{const url=new URL(location.href);url.searchParams.delete('pipeline');window.history.replaceState(null,'',url);};
+        const different=JSON.stringify({nodes:state.nodes,edges:state.edges})!==JSON.stringify({nodes:pipeline.nodes,edges:pipeline.edges});
+        if(different&&state.nodes.length>1&&!confirm('Open this exported pipeline in Studio? It replaces the current browser draft; save JSON first if needed. You can undo the import during this session.')){consumeImportURL();return;}
+        if(restorePipeline(pipeline)){latestExport=folder;updateExportLink();saveDraft();}
+        // The deep link is a one-time import. Refresh must restore subsequent draft edits.
+        consumeImportURL();
+    }catch(error){status(error.message,true);}
+}
 async function exportRequest(path, body, contentType='application/json') {
     const response=await fetch(path,{method:'POST',headers:{'Content-Type':contentType},body:contentType==='application/json'?JSON.stringify(body):body});
     const result=await response.json();
@@ -439,10 +466,15 @@ $('export').onclick=async()=>{
                 status(`Rendering / saving ${face.toUpperCase()} · ${pipeline.size} × ${pipeline.size}px…`);
                 const png=await encodePNG(image);
                 await exportRequest(`/api/export/face?folder=${encodeURIComponent(folder)}&face=${face}`,png,'image/png');
+                if(face==='px'){
+                    const preview=canvas(Math.min(256,image.width));preview.getContext('2d').drawImage(image,0,0,preview.width,preview.height);
+                    await exportRequest(`/api/export/face?folder=${encodeURIComponent(folder)}&face=preview`,await encodePNG(preview),'image/png');
+                }
             }
         });
         const result=await exportRequest('/api/export/finish',{folder,analysis:Object.fromEntries(stats)});
-        status(`Saved ${result.folder}/ — six PNGs + pipeline.json + manifest.json${stats.size?' + analysis.json':''}.`);
+        latestExport=result.folder;updateExportLink();saveDraft();
+        status(`Saved ${result.folder}/ — six PNGs + pipeline.json + manifest.json${stats.size?' + analysis.json':''}. View in Tesseract is ready.`);
     } catch(error) {
         status(error.message+(folder?` · Incomplete export: exports/${folder}/ (marked .pending.json)` : ''),true);
     } finally { exporting=false;updateResolutionControls(); }
@@ -453,6 +485,8 @@ function resetWorkspace() {
     clearTimeout(draftTimer);
     try { localStorage.removeItem(STORAGE_KEY); } catch { /* Reset still works if browser storage is disabled. */ }
     recovered=null;
+    latestExport=null;
+    updateExportLink();
     recoveryError=null;
     state=createWorkspace();
     selected=null;
@@ -477,6 +511,6 @@ function resetWorkspace() {
 $('reset-workspace').onclick=resetWorkspace;
 $('reload-app').onclick=()=>{saveDraft();location.reload();};
 $('name').value=state.name||'untitled';updateResolutionControls();
-applyLayout();applyPreviewMode();drawGraph();inspect();updateHistoryButtons();schedule();refreshLibrary().catch(e=>status(e.message,true));
+applyLayout();applyPreviewMode();drawGraph();inspect();updateHistoryButtons();updateExportLink();schedule();initializeLibrary();
 if(recovered){$('autosave-status').textContent='Restored · autosaved';$('autosave-status').title='Workspace restored from this browser. Undo history starts fresh after reload.';}
 if(recoveryError){$('autosave-status').textContent='Recovery failed';$('autosave-status').classList.add('error');$('autosave-status').title=recoveryError;}

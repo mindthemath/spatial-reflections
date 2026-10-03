@@ -22,6 +22,24 @@
             color: #111;
             border: 1px solid #888;
         }
+        .viewer-skybox { border-bottom: 1px solid #555; padding-bottom: 10px; margin-bottom: 12px; }
+        .skybox-heading { font-weight: bold; letter-spacing: 1px; margin-bottom: 6px; }
+        #active-skybox { overflow-wrap: anywhere; font-size: 13px; }
+        .skybox-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+        .skybox-actions button, #switch-to-chrome { padding: 5px; cursor: pointer; }
+        #skybox-status { font-size: 11px; line-height: 1.4; color: #a8bacf; margin: 8px 0; }
+        #skybox-status.error, #skybox-library-status.error { color: #ffaaa0; }
+        .skybox-links { display: grid; gap: 5px; margin-top: 8px; font-size: 11px; }
+        .skybox-links a, #skybox-library-dialog a { color: #80caff; }
+        #skybox-library-dialog { background: #191d25; color: #d9dee8; border: 1px solid #52637c; border-radius: 0; padding: 20px; width: min(900px, 90vw); max-height: 85vh; overflow: auto; font: 13px system-ui, sans-serif; }
+        #skybox-library-dialog::backdrop { background: #000a; }
+        .library-heading { display: flex; gap: 10px; align-items: center; }
+        .library-heading strong { margin-right: auto; }
+        #skybox-export-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+        .skybox-card { border: 1px solid #414b5c; padding: 10px; display: grid; gap: 7px; }
+        .skybox-card img { width: 100%; height: 130px; object-fit: cover; }
+        .skybox-card small { color: #9cadc3; }
+        #controlPanel button:focus-visible, #skybox-library-dialog button:focus-visible { outline: 2px solid #80caff; }
     </style>
 </head>
 <body>

@@ -84,6 +84,8 @@ def finish_export(folder, analysis):
         outputs[face] = {'file': path.name, 'sha256': hash_file(path), 'terminalNode': terminal, 'input': face}
     manifest = {'schemaVersion': 3, 'createdAt': datetime.now(timezone.utc).isoformat(),
                 'pipeline': state, 'analysis': analysis, 'outputs': outputs}
+    if (folder / 'preview.png').is_file():
+        manifest['thumbnail'] = 'preview.png'
     for filename, value in [('pipeline.json', state), ('manifest.json', manifest)]:
         with (folder / filename).open('x') as stream:
             json.dump(value, stream, indent=2)
@@ -98,7 +100,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def end_headers(self):
-        if urlparse(self.path).path.startswith(('/studio/', '/api/')):
+        if urlparse(self.path).path.startswith(('/studio/', '/api/')) or urlparse(self.path).path in ('/', '/index.html', '/tesseract.js', '/viewer-skyboxes.js', '/skybox-paths.js'):
             self.send_header('Cache-Control', 'no-store')
         super().end_headers()
 
@@ -118,10 +120,32 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path.startswith('/studio/'):
+        if path.startswith('/studio/') or path in ('/', '/index.html', '/tesseract.js', '/viewer-skyboxes.js', '/skybox-paths.js'):
             for header in ('If-Modified-Since', 'If-None-Match'):
                 if header in self.headers:
                     del self.headers[header]
+        if path == '/api/exports':
+            exports = []
+            parent = ROOT / 'exports'
+            if parent.exists():
+                for folder in parent.iterdir():
+                    if not folder.is_dir() or not folder.resolve().is_relative_to(parent.resolve()) or not re.fullmatch(r'[a-zA-Z0-9_-]+', folder.name):
+                        continue
+                    if (folder / '.pending.json').exists() or not (folder / 'manifest.json').is_file():
+                        continue
+                    try:
+                        manifest = json.loads((folder / 'manifest.json').read_text())
+                        if set(manifest['outputs']) != set(FACES) or not all((folder / f'{face}.png').is_file() for face in FACES):
+                            continue
+                        pipeline = manifest['pipeline']
+                        exports.append({'folder': f'exports/{folder.name}', 'name': pipeline.get('name', folder.name),
+                                        'createdAt': manifest.get('createdAt', ''), 'size': pipeline.get('size'),
+                                        'sourceCount': len({n['source']['path'] for n in pipeline['nodes'] if n['type'] == 'source'}),
+                                        'thumbnail': 'preview.png' if (folder / 'preview.png').is_file() else 'px.png'})
+                    except (OSError, ValueError, KeyError, TypeError):
+                        continue
+            exports.sort(key=lambda item: item['createdAt'], reverse=True)
+            return self.send_json(200, {'exports': exports})
         if path != '/api/library':
             return super().do_GET()
         raw = ROOT / 'raw'
@@ -145,7 +169,7 @@ class Handler(SimpleHTTPRequestHandler):
                 query = parse_qs(route.query)
                 folder = pending_folder(query.get('folder', [''])[0])
                 face = query.get('face', [''])[0]
-                if face not in FACES:
+                if face not in (*FACES, 'preview'):
                     raise ValueError('Invalid cube face')
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 8 <= length <= MAX_FACE_BYTES:

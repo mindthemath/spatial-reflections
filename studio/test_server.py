@@ -88,6 +88,23 @@ class StudioAPITest(unittest.TestCase):
             self.assertEqual(manifest['outputs'][face]['terminalNode'], 'cube')
             self.assertEqual(manifest['outputs'][face]['input'], face)
 
+    def test_export_library_lists_only_finished_exports(self):
+        payload = self.payload()
+        payload['state']['name'] = 'Library artwork'
+        payload['state']['size'] = 512
+        code, finished = self.request('POST', '/api/export', payload)
+        self.assertEqual(code, 201)
+        self.request('POST', '/api/export/start', {'name': 'pending', 'state': payload['state']})
+        code, library = self.request('GET', '/api/exports')
+        self.assertEqual(code, 200)
+        self.assertEqual(len(library['exports']), 1)
+        entry = library['exports'][0]
+        self.assertEqual(entry['folder'], finished['folder'])
+        self.assertEqual(entry['name'], 'Library artwork')
+        self.assertEqual(entry['sourceCount'], 1)
+        self.assertEqual(entry['size'], 512)
+        self.assertEqual(entry['thumbnail'], 'px.png')
+
     def test_streamed_export(self):
         payload = self.payload()
         code, started = self.request('POST', '/api/export/start', {'name': 'large-art', 'state': payload['state']})

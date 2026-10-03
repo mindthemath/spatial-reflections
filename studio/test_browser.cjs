@@ -4,12 +4,14 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
 (async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'studio-integration-'));
  fs.cpSync(__dirname,path.join(root,'studio'),{recursive:true});fs.mkdirSync(path.join(root,'raw'));
+ for(const file of ['index.html','tesseract.js','viewer-skyboxes.js','skybox-paths.js'])fs.copyFileSync(path.join(__dirname,'..',file),path.join(root,file));
  const server=spawn('python3',['-c',`import sys;sys.path.insert(0,${JSON.stringify(__dirname)});import server;from pathlib import Path;server.ROOT=Path(${JSON.stringify(root)});http=server.ThreadingHTTPServer(('localhost',0),server.Handler);print(http.server_port,flush=True);http.serve_forever()`]);
  let browser;
  try{
   const port=await new Promise((resolve,reject)=>{server.stdout.once('data',data=>resolve(Number(data.toString().trim())));server.once('error',reject);});
   browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),args:['--use-gl=angle','--use-angle=swiftshader']});
-  const page=await browser.newPage({viewport:{width:1700,height:1100}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const context=await browser.newContext({viewport:{width:1700,height:1100}});
+  const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   const image=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=1536;c.height=1024;const ctx=c.getContext('2d'),g=ctx.createLinearGradient(0,0,1536,1024);g.addColorStop(0,'#203030');g.addColorStop(1,'#ffc080');ctx.fillStyle=g;ctx.fillRect(0,0,1536,1024);return c.toDataURL().split(',')[1];});
   fs.writeFileSync(path.join(root,'raw','a.png'),Buffer.from(image,'base64'));fs.writeFileSync(path.join(root,'raw','b.png'),Buffer.from(image,'base64'));
   await page.goto(`http://localhost:${port}/studio/`);await page.waitForSelector('.photo');
@@ -62,6 +64,35 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   const folder=fs.readdirSync(path.join(root,'exports'))[0],manifest=JSON.parse(fs.readFileSync(path.join(root,'exports',folder,'manifest.json')));
   assert.equal(Object.keys(manifest.outputs).length,6);assert.equal(Object.keys(manifest.analysis).length,1);assert(fs.existsSync(path.join(root,'exports',folder,'analysis.json')));
   assert.equal(manifest.pipeline.schemaVersion,3);assert.equal(manifest.pipeline.resolutionReport.maxSide,1024);assert.equal(manifest.pipeline.nodes.filter(n=>n.type==='skybox').length,1);assert.equal(manifest.pipeline.nodes.find(n=>n.type==='light').settings.exposure,1.25);
+  assert.equal(manifest.thumbnail,'preview.png');assert(await page.locator('#view-export').isVisible());
+  // Studio -> viewer handoff, gallery loading, shader prompt, persistent selection and failure retention.
+  fs.mkdirSync(path.join(root,'skybox'));for(const face of ['px','nx','py','ny','pz','nz'])fs.copyFileSync(path.join(root,'exports',folder,`${face}.png`),path.join(root,'skybox',`${face}.png`));
+  const broken=path.join(root,'exports','broken-fixture');fs.cpSync(path.join(root,'exports',folder),broken,{recursive:true});
+  const badManifest=JSON.parse(JSON.stringify(manifest));badManifest.pipeline.name='Broken fixture';fs.writeFileSync(path.join(broken,'manifest.json'),JSON.stringify(badManifest));fs.writeFileSync(path.join(broken,'px.png'),'not a PNG');
+  const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
+  await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
+  assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+  const cameraBefore=await viewer.locator('#viewer-camera-info').innerText();
+  await viewer.locator('#viewer-shader').selectOption('rough');assert(await viewer.locator('#switch-to-chrome').isVisible());
+  await viewer.locator('#default-skybox').click();await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='Default skybox');
+  assert.equal(await viewer.locator('#viewer-camera-info').innerText(),cameraBefore);assert.equal(await viewer.locator('#viewer-shader').inputValue(),'rough');
+  await viewer.locator('#browse-skyboxes').click();await viewer.waitForSelector('.skybox-card');
+  await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'untitled'})}).getByRole('button',{name:'Load skybox'}).click();
+  await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'rough');
+  await viewer.locator('#switch-to-chrome').click();assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');assert(!(await viewer.locator('#switch-to-chrome').isVisible()));
+  const validURL=viewer.url();await viewer.locator('#browse-skyboxes').click();await viewer.waitForSelector('.skybox-card');
+  await viewer.screenshot({path:path.join(os.tmpdir(),'tesseract-library.png')});
+  await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'Broken fixture'})}).getByRole('button',{name:'Load skybox'}).click();
+  await viewer.waitForFunction(()=>document.querySelector('#skybox-status').textContent.includes('Kept the current environment'));
+  assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(viewer.url(),validURL);assert.equal(await viewer.locator('#viewer-camera-info').innerText(),cameraBefore);
+  await viewer.locator('#close-skyboxes').click();const editURL=await viewer.locator('#edit-skybox').getAttribute('href');
+  await viewer.goto(`http://localhost:${port}/`);await viewer.waitForFunction(()=>document.querySelector('#active-skybox')?.textContent==='untitled');assert(viewer.url().includes('skybox=exports'));
+  const editing=await page.context().newPage();editing.on('pageerror',e=>errors.push(e.message));editing.on('dialog',dialog=>dialog.accept());await editing.goto(editURL);
+  await editing.waitForFunction(()=>document.querySelector('#resolution-limit')?.textContent==='≤ 1024px');assert.equal(await editing.locator('.node.skybox').count(),1);assert.equal(await editing.locator('.node.light').count(),1);
+  await editing.waitForFunction(()=>!new URL(location.href).searchParams.has('pipeline'));assert(!editing.url().includes('pipeline='));
+  await editing.locator('.node.light .body').click();const editExposure=editing.locator('#inspector input[type=range]').first();await editExposure.fill('2.5');await editExposure.dispatchEvent('change');
+  await editing.reload();await editing.waitForSelector('.photo');assert.equal(await editing.evaluate(()=>JSON.parse(localStorage.getItem('skybox-studio.workspace.v2')).pipeline.nodes.find(n=>n.type==='light').settings.exposure),2.5);
+  await editing.close();await viewer.close();
   // Processing tests run directly in-browser (Canvas API required).
   const processing=await page.evaluate(async()=>{
    const p=await import('./pipeline.js');const image=p.canvas(100,50),ctx=image.getContext('2d');ctx.fillStyle='rgb(128,128,128)';ctx.fillRect(0,0,100,50);
@@ -102,6 +133,6 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   assert.equal(await page.locator('.node').count(),1);assert.equal(await page.locator('.node.skybox').count(),1);assert.equal((await capture()).edges.length,0);assert(await page.locator('#undo').isDisabled());
   assert(fs.existsSync(path.join(root,'exports',folder,'pipeline.json')));assert(fs.existsSync(path.join(root,'raw','a.png')));
   await Promise.all([page.waitForEvent('load'),page.locator('#reload-app').click()]);await page.waitForSelector('.photo');assert.equal(await page.locator('.node').count(),1);assert.equal((await capture()).edges.length,0);
-  assert.deepEqual(errors,[]);console.log('PASS: cube output/protection, whole-node/face-row drops, rewiring, undo/redo, resize, lighting/statistics, export lineage, migration, refresh recovery, explicit reset and app reload.');
+  assert.deepEqual(errors,[]);console.log('PASS: Studio graph, native export, lineage, refresh/reset, viewer handoff/gallery, Chrome prompt, camera preservation, load failure retention, remembered skybox and Studio reopen.');
  }finally{if(browser)await browser.close();server.kill();fs.rmSync(root,{recursive:true,force:true});}
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { installSkyboxLibrary } from './viewer-skyboxes.js';
 
 // Main Three.js scene setup
 let scene, camera, renderer, controls;
@@ -32,6 +33,7 @@ let dropZone;
 let dropZoneVisible = false;
 // Environment map for reflections
 let envMap;
+let skyboxLibrary;
 
 // Initialize the scene
 function init() {
@@ -39,9 +41,6 @@ function init() {
     
     // Create scene
     scene = new THREE.Scene();
-    
-    // Create environment map for reflections
-    createEnvironmentMap();
     
     // Create camera
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -68,8 +67,9 @@ function init() {
     // Add keyboard controls
     window.addEventListener('keydown', onKeyDown, false);
     
-    // Add UI controls
+    // Add UI controls, then connect the export library to the existing Chrome environment.
     createControls();
+    createEnvironmentMap();
     
     // Initialize file upload for loading views
     initFileUpload();
@@ -88,84 +88,22 @@ function init() {
 
 // Create environment map for reflections
 function createEnvironmentMap() {
-    // Use our proxy API to bypass CORS restrictions
-    const proxyUrl = '';
-    const cdnPath = './skybox/';
-    const format = '.png';
-    const urls = [
-        proxyUrl + encodeURIComponent(cdnPath + 'px' + format), 
-        proxyUrl + encodeURIComponent(cdnPath + 'nx' + format),
-        proxyUrl + encodeURIComponent(cdnPath + 'py' + format), 
-        proxyUrl + encodeURIComponent(cdnPath + 'ny' + format),
-        proxyUrl + encodeURIComponent(cdnPath + 'pz' + format), 
-        proxyUrl + encodeURIComponent(cdnPath + 'nz' + format)
-    ];
-    
-    // Load the cube texture with error handling
-    const loader = new THREE.CubeTextureLoader();
-    
-    // Try loading from CDN through our proxy
-    loader.load(urls, 
-        // Success callback
-        (texture) => {
-            console.log("Successfully loaded environment map from CDN via proxy");
+    skyboxLibrary = installSkyboxLibrary({
+        mount: document.getElementById('controlPanelContent'),
+        renderer,
+        getShader: () => currentShader,
+        onTexture: texture => {
+            const previous = envMap;
             envMap = texture;
-            // Update materials that might be using the environment map
             updateMaterialsWithEnvMap();
+            previous?.dispose();
         },
-        // Progress callback
-        undefined,
-        // Error callback
-        (err) => {
-            console.error("Failed to load environment map from proxy:", err);
-            console.log("Trying direct loading from CDN (may have CORS issues)");
-            
-            // Try direct loading as fallback
-            const directUrls = [
-                cdnPath + 'px' + format, cdnPath + 'nx' + format,
-                cdnPath + 'py' + format, cdnPath + 'ny' + format,
-                cdnPath + 'pz' + format, cdnPath + 'nz' + format
-            ];
-            
-            loader.load(directUrls,
-                (texture) => {
-                    console.log("Successfully loaded environment map directly from CDN");
-                    envMap = texture;
-                    updateMaterialsWithEnvMap();
-                },
-                undefined,
-                (directErr) => {
-                    console.error("Failed direct loading from CDN:", directErr);
-                    console.log("Trying Three.js default skybox");
-                    
-                    // Try Three.js default skybox
-                    const threejsPath = 'https://threejs.org/examples/textures/cube/Park3Med/';
-                    const threejsFormat = '.jpg';
-                    const threejsUrls = [
-                        threejsPath + 'px' + threejsFormat, threejsPath + 'nx' + threejsFormat,
-                        threejsPath + 'py' + threejsFormat, threejsPath + 'ny' + threejsFormat,
-                        threejsPath + 'pz' + threejsFormat, threejsPath + 'nz' + threejsFormat
-                    ];
-                    
-                    loader.load(threejsUrls,
-                        (texture) => {
-                            console.log("Successfully loaded default Three.js environment map");
-                            envMap = texture;
-                            updateMaterialsWithEnvMap();
-                        },
-                        undefined,
-                        (threeErr) => {
-                            console.error("Failed to load Three.js environment map:", threeErr);
-                            console.log("Creating a fallback environment map");
-                            
-                            // Create a simple fallback environment map
-                            createFallbackEnvMap();
-                        }
-                    );
-                }
-            );
+        onSwitchChrome: () => {
+            const select = document.getElementById('viewer-shader');
+            select.value = 'chrome';
+            select.dispatchEvent(new Event('change'));
         }
-    );
+    });
 }
 
 // Setup drag and drop handlers for loading views
@@ -591,9 +529,12 @@ function createControls() {
     controlPanel.style.fontFamily = 'Arial, sans-serif';
     controlPanel.style.fontSize = '14px';
     controlPanel.style.zIndex = '100';
+    controlPanel.style.maxHeight = 'calc(100vh - 20px)';
+    controlPanel.style.overflowY = 'auto';
     
     // Create camera info display
     cameraInfoDisplay = document.createElement('div');
+    cameraInfoDisplay.id = 'viewer-camera-info';
     cameraInfoDisplay.style.marginBottom = '10px';
     controlPanel.appendChild(cameraInfoDisplay);
     
@@ -655,6 +596,7 @@ function createControls() {
     shaderContainer.appendChild(shaderLabel);
     
     const shaderSelect = document.createElement('select');
+    shaderSelect.id = 'viewer-shader';
     shaderSelect.style.width = '100%';
     shaderSelect.style.padding = '3px';
     shaderSelect.style.backgroundColor = '#222';
@@ -664,13 +606,13 @@ function createControls() {
     // Add shader options
     const roughOption = document.createElement('option');
     roughOption.value = 'rough';
-    roughOption.textContent = 'Rough';
+    roughOption.textContent = 'Rough (debug)';
     roughOption.selected = currentShader === 'rough';
     shaderSelect.appendChild(roughOption);
     
     const iridescientOption = document.createElement('option');
     iridescientOption.value = 'iridescent';
-    iridescientOption.textContent = 'Iridescent';
+    iridescientOption.textContent = 'Iridescent (debug)';
     iridescientOption.selected = currentShader === 'iridescent';
     shaderSelect.appendChild(iridescientOption);
     
@@ -684,6 +626,7 @@ function createControls() {
     shaderSelect.addEventListener('change', function() {
         currentShader = this.value;
         updateMaterials();
+        skyboxLibrary?.refreshShaderHint();
     });
     
     shaderContainer.appendChild(shaderSelect);
@@ -824,6 +767,7 @@ function createControls() {
     
     // Helper function to update all materials
     function updateMaterials() {
+        const previousMaterials = new Set([...faces, ...vertices].map(object => object.material));
         const newMaterial = createShaderMaterial();
         
         faces.forEach(face => {
@@ -833,6 +777,7 @@ function createControls() {
         vertices.forEach(vertex => {
             vertex.material = newMaterial;
         });
+        previousMaterials.forEach(material => material.dispose());
     }
     
     // Add rotation controls
@@ -1917,48 +1862,6 @@ function initFileUpload() {
 
 // Start the visualization
 init(); 
-
-function createFallbackEnvMap() {
-    // Create a simple cube with gradient colors as fallback
-    const size = 16;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    
-    const colors = [
-        [0.5, 0.0, 0.0], // Right (px)
-        [0.0, 0.0, 0.5], // Left (nx)
-        [0.0, 0.5, 0.0], // Top (py)
-        [0.5, 0.5, 0.0], // Bottom (ny)
-        [0.0, 0.5, 0.5], // Front (pz)
-        [0.5, 0.0, 0.5]  // Back (nz)
-    ];
-    
-    const textures = [];
-    
-    for (let i = 0; i < 6; i++) {
-        const ctx = canvas.getContext('2d');
-        const [r, g, b] = colors[i];
-        
-        // Create gradient
-        const grd = ctx.createLinearGradient(0, 0, size, size);
-        grd.addColorStop(0, `rgb(${r*255},${g*255},${b*255})`);
-        grd.addColorStop(1, 'black');
-        
-        ctx.fillStyle = grd;
-        ctx.fillRect(0, 0, size, size);
-        
-        // Create texture from canvas
-        const texture = new THREE.CanvasTexture(canvas);
-        textures.push(texture);
-    }
-    
-    envMap = new THREE.CubeTexture(textures);
-    envMap.needsUpdate = true;
-    
-    // Update materials that might be using the environment map
-    updateMaterialsWithEnvMap();
-}
 
 // Update materials with the new environment map
 function updateMaterialsWithEnvMap() {

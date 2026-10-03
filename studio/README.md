@@ -121,7 +121,7 @@ The green output is image passthrough. The purple **ƒ** statistics output opens
 
 **Reload app** reloads the editor while preserving the workspace. **Reset workspace** clears the saved browser draft, selection and undo history and creates a fresh graph with the permanent Skybox node. Reset requires confirmation and never deletes source images or exported folders. Save JSON first if you want to archive the current arrangement.
 
-The server sends Studio code and API responses with `Cache-Control: no-store` and ignores conditional cache headers for editor code, so ordinary reloads don't mix old UI and new processing modules. Restart `studio/server.py` after changing its Python code for this policy to take effect. Source photos and exported images retain normal static-file caching.
+The server sends Studio/viewer code and API responses with `Cache-Control: no-store` and ignores conditional cache headers for editor code, so ordinary reloads don't mix old UI and new processing modules. Restart `studio/server.py` after changing its Python code for this policy to take effect. Source photos and exported images retain normal static-file caching.
 
 The complete workspace is automatically saved to browser-local storage after edits, node movement, graph navigation and preview resizing. Reloading the same Studio origin restores the pipeline, selection, viewport, output settings and preview layout. The header reports **Autosaved** or **Restored**. Undo history intentionally starts fresh after a page reload. Browser storage is origin-specific and can be cleared by browser settings, so it is convenience recovery—not archival provenance.
 
@@ -134,6 +134,7 @@ exports/untitled-20261002T180000Z-a1b2c3d4e5f6/
   px.png nx.png py.png ny.png pz.png nz.png
   pipeline.json
   manifest.json
+  preview.png     # small representative PX-face thumbnail for the viewer gallery
   analysis.json    # when Info nodes are present
 ```
 
@@ -143,7 +144,9 @@ PNGs are encoded and uploaded one face at a time as binary data, avoiding a gian
 
 The server rechecks every source hash before starting and again before finalizing, including unused source nodes. The browser renders PNGs; the server checks their signatures, verifies sources and writes the files. This is not an independent rendering engine or a sandbox for untrusted clients. Color management / image decoding may vary across browsers; hashes identify exact inputs and outputs but do not guarantee bit-identical cross-browser rendering.
 
-Copy exported PNGs into `skybox/`, or point the viewer's `cdnPath` at the new export folder. Studio does not mutate the viewer's assets.
+After export, **View in Tesseract ↗** opens that completed arrangement in the original viewer. The viewer's **Skybox → Browse exports…** gallery lets you switch between completed exports without changing the camera or animation, and **Open in Studio ↗** imports the selected export's pipeline for further editing. Explicit URL imports are consumed once, preserving subsequent draft edits on refresh. The link in Studio always refers to the last completed export, not the current unexported draft. No copying to `skybox/` is necessary, and the viewer's assets are never overwritten.
+
+Only completed exports appear in the gallery; `.pending.json` folders stay hidden. Chrome displays the photographic reflections; the viewer offers **Switch to Chrome** if a debug shader is active. Failed loads retain the previous environment. See [the project README](../README.md) for the complete viewer workflow.
 
 ## Checks
 
@@ -160,4 +163,4 @@ Optional browser integration test (requires Playwright and its Chromium installa
 node studio/test_browser.cjs
 ```
 
-Use `PLAYWRIGHT_MODULE` to point to an external Playwright installation, and optionally `CHROMIUM_EXECUTABLE` to select a browser executable. The test uses a temporary project/library/export folder and synthetic photos; it never changes your real artwork. It covers graph gestures, endpoint rewiring, undo/redo, shortcuts, resizing, lighting calculations, statistics, schema migration, JSON round-trip and PNG export.
+Use `PLAYWRIGHT_MODULE` to point to an external Playwright installation, and optionally `CHROMIUM_EXECUTABLE` to select a browser executable. The test uses a temporary project/library/export folder and synthetic photos; it never changes your real artwork. It covers graph gestures, endpoint rewiring, undo/redo, shortcuts, resizing, lighting calculations, statistics, schema migration, JSON round-trip, PNG export, the viewer gallery/handoff, Chrome switching, camera preservation, load failure retention and refresh after reopening an export in Studio.
