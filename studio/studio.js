@@ -3,12 +3,29 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FACES,LABELS,RENDERER,cropDefaults,lightDefaults,CROP_FIELDS,LIGHT_FIELDS,clone,url,canvas,evaluate,validate,migrate,clearImageCache } from './pipeline.js';
 
 const $=id=>document.getElementById(id),uid=()=>crypto.randomUUID();
-let state={schemaVersion:2,name:'untitled',size:1024,renderer:RENDERER,
-    nodes:FACES.map((face,i)=>({id:`face-${face}`,type:'face',face,x:920,y:30+i*140})),edges:[],view:{x:20,y:20,scale:0.8},layout:{previewWidth:380,previewHeight:250}};
+function createWorkspace() {
+    return {
+        schemaVersion:3, name:'untitled', size:1024, renderer:RENDERER,
+        nodes:[{id:'skybox-output',type:'skybox',x:920,y:30}], edges:[],
+        view:{x:20,y:20,scale:0.8}, layout:{previewWidth:380,previewHeight:250}
+    };
+}
+let state=createWorkspace();
+const STORAGE_KEY='skybox-studio.workspace.v2';
+let recovered=null,recoveryError=null,draftTimer;
+try{const text=localStorage.getItem(STORAGE_KEY);if(text){recovered=JSON.parse(text);state=validate(migrate(recovered.pipeline));}}catch(error){recoveryError=error.message;recovered=null;}
 let library=[],selected=null,selectedEdge=null,pending=null,wireDrag=null,generation=0,analysis=new Map(),timer,exporting=false;
-let selectedNodes=new Set(),history=[clone(state)],historyIndex=0;
+let selectedNodes=new Set((Array.isArray(recovered?.selection)?recovered.selection:[]).filter(id=>state.nodes.some(n=>n.id===id))),history=[clone(state)],historyIndex=0;
+selected=selectedNodes.has(recovered?.selectedId)?recovered.selectedId:[...selectedNodes].at(-1)||null;
+function saveDraft(){
+    clearTimeout(draftTimer);
+    try{const savedAt=new Date().toISOString();localStorage.setItem(STORAGE_KEY,JSON.stringify({pipeline:snapshot(),selection:[...selectedNodes],selectedId:selected,savedAt}));$('autosave-status').textContent=recovered?'Restored · autosaved':'Autosaved';$('autosave-status').classList.remove('error');$('autosave-status').title=`Saved in this browser at ${new Date(savedAt).toLocaleTimeString()}. Save JSON for a portable backup.`;}
+    catch(error){$('autosave-status').textContent='Autosave unavailable';$('autosave-status').classList.add('error');$('autosave-status').title=error.message+' — use Save JSON.';}
+}
+function queueDraftSave(){clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,250);}
+window.addEventListener('pagehide',saveDraft);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveDraft();});
 function checkpoint(){
-    const next=snapshot();const comparable=s=>JSON.stringify({nodes:s.nodes,edges:s.edges,name:s.name,size:s.size});
+    saveDraft();const next=snapshot();const comparable=s=>JSON.stringify({nodes:s.nodes,edges:s.edges,name:s.name,size:s.size});
     if(comparable(next)===comparable(history[historyIndex]))return;
     history=history.slice(0,historyIndex+1);history.push(next);if(history.length>100)history.shift();historyIndex=history.length-1;updateHistoryButtons();
 }
@@ -21,20 +38,20 @@ function undoRedo(direction){
 }
 function deleteSelection(){
     if(selectedEdge){state.edges=state.edges.filter(e=>edgeKey(e)!==selectedEdge);changed();return;}
-    const ids=new Set([...selectedNodes].filter(id=>nodeById(id)?.type!=='face'));if(!ids.size)return;
+    const ids=new Set([...selectedNodes].filter(id=>nodeById(id)?.type!=='skybox'));if(!ids.size)return;
     state.nodes=state.nodes.filter(n=>!ids.has(n.id));state.edges=state.edges.filter(e=>!ids.has(e.from)&&!ids.has(e.to));selectedNodes.clear();selected=null;changed();
 }
 function duplicateSelection(){
-    const originals=state.nodes.filter(n=>selectedNodes.has(n.id)&&n.type!=='face');if(!originals.length)return;
+    const originals=state.nodes.filter(n=>selectedNodes.has(n.id)&&n.type!=='skybox');if(!originals.length)return;
     if(state.nodes.length+originals.length>300){status('Duplication would exceed the 300-node limit.',true);return;}
     const mapping=new Map(originals.map(n=>[n.id,uid()]));const copies=originals.map(n=>({...clone(n),id:mapping.get(n.id),x:n.x+40,y:n.y+40}));
     const edges=state.edges.filter(e=>mapping.has(e.to)).map(e=>({from:mapping.get(e.from)||e.from,to:mapping.get(e.to)}));
     state.nodes.push(...copies);state.edges.push(...edges);selectedNodes=new Set(copies.map(n=>n.id));selected=copies.at(-1).id;changed();
 }
-const nodeById=id=>state.nodes.find(n=>n.id===id),incoming=id=>state.edges.find(e=>e.to===id);
+const nodeById=id=>state.nodes.find(n=>n.id===id),incoming=(id,input)=>state.edges.find(e=>e.to===id&&(input===undefined||e.input===input));
 const status=(text,error=false)=>{$('status').textContent=text;$('status').classList.toggle('error',error);};
-const title=n=>n.type==='face'?`${n.face.toUpperCase()} · ${LABELS[n.face]}`:({source:'PHOTO / SOURCE',crop:'FRAME / CROP',light:'LIGHT / COLOR',info:'IMAGE / INFO'}[n.type]);
-const edgeKey=e=>`${e.from}→${e.to}`;
+const title=n=>({source:'PHOTO / SOURCE',crop:'FRAME / CROP',light:'LIGHT / COLOR',info:'IMAGE / INFO',skybox:'SKYBOX / CUBE OUTPUT'}[n.type]);
+const edgeKey=e=>`${e.from}→${e.to}:${e.input||''}`;
 function selectNode(id,additive=false){
     if(!additive)selectedNodes.clear();if(additive&&selectedNodes.has(id))selectedNodes.delete(id);else selectedNodes.add(id);
     selected=selectedNodes.has(id)?id:[...selectedNodes].at(-1)||null;selectedEdge=null;drawGraph();inspect();
@@ -70,8 +87,11 @@ function drawGraph(){
         }else if(node.type==='crop')body.textContent=`Zoom ${node.settings.zoom.toFixed(2)} · ${node.settings.rotation}°`;
         else if(node.type==='light')body.textContent=node.legacy?'Legacy grade · preserved':`EV ${node.settings.exposure>=0?'+':''}${node.settings.exposure.toFixed(2)} · light & color`;
         else if(node.type==='info'){body.classList.add('info-summary');body.textContent=infoSummary(node.id);}
-        else body.textContent=incoming(node.id)?'Connected':'Connect an image';
-        el.append(header,body);if(node.type!=='source')el.append(port(node,'input'));if(node.type!=='face')el.append(port(node,'output'));
+        else if(node.type==='skybox'){
+            body.classList.add('cube-inputs');
+            FACES.forEach((face,i)=>{const row=document.createElement('div');row.className='cube-input';row.dataset.input=face;const label=document.createElement('strong'),connection=document.createElement('span');label.textContent=`${face.toUpperCase()} · ${LABELS[face]}`;connection.className='state';connection.textContent=incoming(node.id,face)?'CONNECTED':'EMPTY';row.append(label,connection);body.append(row);el.append(port(node,'input',face,i));});
+        }
+        el.append(header,body);if(!['source','skybox'].includes(node.type))el.append(port(node,'input'));if(node.type!=='skybox')el.append(port(node,'output'));
         if(node.type==='info'){
             const data=document.createElement('button');data.className='data-port';data.textContent='ƒ';data.title='Structured statistics output · select to inspect / save JSON. Numeric wiring reserved for future nodes.';
             data.setAttribute('aria-label','Inspect statistics output');data.onclick=e=>{e.stopPropagation();selectNode(node.id);};el.append(data);
@@ -92,39 +112,47 @@ function drawGraph(){
             header.onpointerup=header.onpointercancel=()=>{header.onpointermove=null;checkpoint();};
         };
         $('nodes').append(el);
-    }applyView();drawWires();
+    }applyView();drawWires();queueDraftSave();
 }
 function infoSummary(id){const s=analysis.get(id);return !s?'Connect an image to analyze':s.error?s.error:`${s.width} × ${s.height}\nMean Y ${(s.luminance.mean*100).toFixed(1)}% · ΔEV ${s.suggestedExposureTo18PercentGrayEV.toFixed(2)}`;}
-function port(node,direction){
-    const button=document.createElement('button');button.className=`port ${direction}`;button.dataset.node=node.id;button.dataset.direction=direction;
-    if(pending===node.id&&direction==='output')button.classList.add('pending');
-    button.title=direction==='output'?'Image output · click or drag to connect':'Image input · drag to rewire';button.setAttribute('aria-label',`${title(node)} ${direction}`);
+function port(node,direction,input,index=0){
+    const button=document.createElement('button');button.className=`port ${direction}`;button.dataset.node=node.id;button.dataset.direction=direction;if(input)button.dataset.input=input;
+    if(input)button.style.top=(45+index*31)+'px';if(pending===node.id&&direction==='output')button.classList.add('pending');
+    button.title=direction==='output'?'Image output · click or drag to connect':`${input?input.toUpperCase()+' ':''}image input · drag to rewire`;button.setAttribute('aria-label',`${title(node)} ${input||''} ${direction}`);
     button.onpointerdown=event=>{
-        if(event.button!==0)return;event.stopPropagation();event.preventDefault();
-        const original=direction==='input'?incoming(node.id):null;
-        // Drag an occupied input to another input; an empty input can drag backwards to an output.
-        beginWire(event,original?{side:'to',fixed:original.from,original}:{side:direction==='output'?'to':'from',fixed:node.id},()=>clickPort(node,direction));
+        if(event.button!==0)return;event.stopPropagation();event.preventDefault();const original=direction==='input'?incoming(node.id,input):null;
+        beginWire(event,original?{side:'to',fixed:original.from,original}:{side:direction==='output'?'to':'from',fixed:node.id,fixedInput:input},()=>clickPort(node,direction,input));
     };
-    button.onclick=event=>{event.stopPropagation();if(event.detail===0)clickPort(node,direction);};
-    return button;
+    button.onclick=event=>{event.stopPropagation();if(event.detail===0)clickPort(node,direction,input);};return button;
 }
-function clickPort(node,direction){
+function clickPort(node,direction,input){
     if(direction==='output'){pending=pending===node.id?null:node.id;drawGraph();return;}
-    if(pending){connect(pending,node.id);return;}
-    const edge=incoming(node.id);if(edge){selected=null;selectedNodes.clear();selectedEdge=edgeKey(edge);drawGraph();inspect();}
+    if(pending){connect(pending,node.id,input);return;}
+    const edge=incoming(node.id,input);if(edge){selected=null;selectedNodes.clear();selectedEdge=edgeKey(edge);drawGraph();inspect();}
     else status('Drag from an output to this input, or click output then input.');
 }
-function validConnection(from,to,original){
-    if(!nodeById(from)||!nodeById(to)||nodeById(from).type==='face'||nodeById(to).type==='source'||from===to)return false;
-    const edges=state.edges.filter(e=>e!==original&&e.to!==to),seen=new Set();
-    function reaches(id){if(id===from)return true;if(seen.has(id))return false;seen.add(id);return edges.filter(e=>e.from===id).some(e=>reaches(e.to));}
-    return !reaches(to);
+function validConnection(from,to,input,original){
+    if(!nodeById(from)||!nodeById(to)||nodeById(from).type==='skybox'||nodeById(to).type==='source'||from===to)return false;
+    if(nodeById(to).type==='skybox'&&!FACES.includes(input))return false;if(nodeById(to).type!=='skybox'&&input!==undefined)return false;
+    const edges=state.edges.filter(e=>e!==original&&!(e.to===to&&e.input===input)),seen=new Set();
+    function reaches(id){if(id===from)return true;if(seen.has(id))return false;seen.add(id);return edges.filter(e=>e.from===id).some(e=>reaches(e.to));}return !reaches(to);
 }
-function connect(from,to,original){
-    if(!validConnection(from,to,original)){status('Connection rejected: invalid image port or cycle. Existing wiring preserved.',true);drawWires();return false;}
-    state.edges=state.edges.filter(e=>e!==original&&e.to!==to);state.edges.push({from,to});changed();return true;
+function connect(from,to,input,original){
+    if(!validConnection(from,to,input,original)){status('Connection rejected: invalid image port or cycle. Existing wiring preserved.',true);drawWires();return false;}
+    state.edges=state.edges.filter(e=>e!==original&&!(e.to===to&&e.input===input));state.edges.push(input===undefined?{from,to}:{from,to,input});changed();return true;
 }
 function graphPoint(event){const rect=$('viewport').getBoundingClientRect(),v=state.view;return {x:(event.clientX-rect.left-v.x)/v.scale,y:(event.clientY-rect.top-v.y)/v.scale};}
+function resolveDropTarget(event,side){
+    const element=document.elementFromPoint(event.clientX,event.clientY),expected=side==='to'?'input':'output',direct=element?.closest(`.port.${expected}`);
+    if(direct)return {node:direct.dataset.node,input:direct.dataset.input};
+    const nodeElement=element?.closest('.node');if(!nodeElement)return null;const node=nodeById(nodeElement.dataset.id);if(!node)return null;
+    if(side==='from')return node.type==='skybox'?null:{node:node.id};
+    if(node.type==='source')return null;
+    if(node.type!=='skybox')return {node:node.id};
+    const rows=[...nodeElement.querySelectorAll('.cube-input')];if(!rows.length)return null;
+    const row=rows.reduce((best,current)=>Math.abs(current.getBoundingClientRect().top+current.getBoundingClientRect().height/2-event.clientY)<Math.abs(best.getBoundingClientRect().top+best.getBoundingClientRect().height/2-event.clientY)?current:best);
+    return {node:node.id,input:row.dataset.input,row};
+}
 function beginWire(event,options,onClick){
     const start={x:event.clientX,y:event.clientY};let moved=false;
     const drag={...options,...graphPoint(event)};
@@ -133,22 +161,22 @@ function beginWire(event,options,onClick){
         if(!moved)return;
         wireDrag=drag;Object.assign(drag,graphPoint(e));document.body.classList.add('wiring');
         document.querySelectorAll('.port').forEach(p=>{
-            const compatible=p.dataset.direction===(drag.side==='to'?'input':'output');
-            const from=drag.side==='to'?drag.fixed:p.dataset.node,to=drag.side==='to'?p.dataset.node:drag.fixed;
-            p.classList.toggle('compatible',compatible&&validConnection(from,to,drag.original));
-        });drawWires();
+            const compatible=p.dataset.direction===(drag.side==='to'?'input':'output'),from=drag.side==='to'?drag.fixed:p.dataset.node,to=drag.side==='to'?p.dataset.node:drag.fixed,input=drag.side==='to'?p.dataset.input:drag.fixedInput;
+            p.classList.toggle('compatible',compatible&&validConnection(from,to,input,drag.original));
+        });
+        document.querySelectorAll('.node,.cube-input').forEach(el=>el.classList.remove('drop-compatible','drop-target'));
+        const target=resolveDropTarget(e,drag.side);if(target){const from=drag.side==='to'?drag.fixed:target.node,to=drag.side==='to'?target.node:drag.fixed,input=drag.side==='to'?target.input:drag.fixedInput;if(validConnection(from,to,input,drag.original)){document.querySelector(`[data-id="${CSS.escape(target.node)}"]`)?.classList.add('drop-compatible');target.row?.classList.add('drop-target');}}
+        drawWires();
     }
     function finish(e,cancel=false){
         document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);document.removeEventListener('pointercancel',cancelled);document.removeEventListener('keydown',key);
-        wireDrag=null;document.body.classList.remove('wiring');document.querySelectorAll('.port').forEach(p=>p.classList.remove('compatible'));
+        wireDrag=null;document.body.classList.remove('wiring');document.querySelectorAll('.port').forEach(p=>p.classList.remove('compatible'));document.querySelectorAll('.node,.cube-input').forEach(el=>el.classList.remove('drop-compatible','drop-target'));
         if(cancel){drawWires();return;}
         if(!moved){onClick?.();return;}
-        const target=document.elementFromPoint(e.clientX,e.clientY)?.closest('.port');
-        if(target){
-            const expected=drag.side==='to'?'input':'output';
-            if(target.dataset.direction===expected)connect(drag.side==='to'?drag.fixed:target.dataset.node,drag.side==='to'?target.dataset.node:drag.fixed,drag.original);
-            else status('Wrong port direction. Connection kept.',true);
-        }else if(drag.original){state.edges=state.edges.filter(edge=>edge!==drag.original);changed();status('Edge disconnected.');}
+        const target=resolveDropTarget(e,drag.side);
+        if(target)connect(drag.side==='to'?drag.fixed:target.node,drag.side==='to'?target.node:drag.fixed,drag.side==='to'?target.input:drag.fixedInput,drag.original);
+        else if(document.elementFromPoint(e.clientX,e.clientY)?.closest('.node'))status('That node has no compatible image input/output. Existing connection kept.',true);
+        else if(drag.original){state.edges=state.edges.filter(edge=>edge!==drag.original);changed();status('Edge disconnected.');}
         drawWires();
     }
     const up=e=>finish(e),cancelled=e=>finish(e,true),key=e=>{if(e.key==='Escape')finish(e,true);};
@@ -156,14 +184,14 @@ function beginWire(event,options,onClick){
 }
 const svgElement=tag=>document.createElementNS('http://www.w3.org/2000/svg',tag);
 function cable(from,to){return `M ${from.x} ${from.y} C ${from.x+Math.max(60,Math.abs(to.x-from.x)*0.4)} ${from.y}, ${to.x-Math.max(60,Math.abs(to.x-from.x)*0.4)} ${to.y}, ${to.x} ${to.y}`;}
-function endpoint(id,side){const n=nodeById(id);return {x:n.x+(side==='output'?180:0),y:n.y+53};}
+function endpoint(id,side,input){const n=nodeById(id),index=n.type==='skybox'?Math.max(0,FACES.indexOf(input)):0;return {x:n.x+(side==='output'?180:0),y:n.y+(n.type==='skybox'?54+index*31:53)};}
 function drawWires(){
     $('wires').replaceChildren();
     // Selected cable handles must sit above every other cable's generous hit area.
     const edges=[...state.edges].sort((a,b)=>Number(edgeKey(a)===selectedEdge)-Number(edgeKey(b)===selectedEdge));
     for(const edge of edges){
         if(wireDrag?.original===edge)continue;
-        const from=endpoint(edge.from,'output'),to=endpoint(edge.to,'input'),active=selectedEdge===edgeKey(edge);
+        const from=endpoint(edge.from,'output'),to=endpoint(edge.to,'input',edge.input),active=selectedEdge===edgeKey(edge);
         const group=svgElement('g');group.classList.add('edge');if(active)group.classList.add('selected');
         const hit=svgElement('path');hit.setAttribute('d',cable(from,to));hit.classList.add('edge-hit');
         hit.onpointerdown=e=>{e.stopPropagation();};hit.onclick=e=>{e.stopPropagation();selected=null;selectedNodes.clear();selectedEdge=edgeKey(edge);drawGraph();inspect();};
@@ -173,15 +201,15 @@ function drawWires(){
                 const point=side==='from'?{x:from.x+22,y:from.y}:{x:to.x-22,y:to.y};
                 const handle=svgElement('circle');handle.setAttribute('cx',point.x);handle.setAttribute('cy',point.y);handle.setAttribute('r',8);handle.classList.add('edge-handle');handle.dataset.end=side;
                 const hint=svgElement('title');hint.textContent=`Drag ${side==='from'?'source':'destination'} endpoint · drop on empty space to disconnect · Esc cancels`;handle.append(hint);
-                handle.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();beginWire(e,{side,fixed:side==='from'?edge.to:edge.from,original:edge},()=>{});};group.append(handle);
+                handle.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();beginWire(e,{side,fixed:side==='from'?edge.to:edge.from,fixedInput:side==='from'?edge.input:undefined,original:edge},()=>{});};group.append(handle);
             }
         }$('wires').append(group);
     }
     if(wireDrag){
-        const fixed=endpoint(wireDrag.fixed,wireDrag.side==='to'?'output':'input'),path=svgElement('path');path.setAttribute('d',wireDrag.side==='to'?cable(fixed,wireDrag):cable(wireDrag,fixed));path.classList.add('edge-line','draft');$('wires').append(path);
+        const fixed=endpoint(wireDrag.fixed,wireDrag.side==='to'?'output':'input',wireDrag.fixedInput),path=svgElement('path');path.setAttribute('d',wireDrag.side==='to'?cable(fixed,wireDrag):cable(wireDrag,fixed));path.classList.add('edge-line','draft');$('wires').append(path);
     }
 }
-function applyView(){const v=state.view;$('graph').style.transform=`translate(${v.x}px,${v.y}px) scale(${v.scale})`;}
+function applyView(){const v=state.view;$('graph').style.transform=`translate(${v.x}px,${v.y}px) scale(${v.scale})`;queueDraftSave();}
 $('viewport').onpointerdown=event=>{
     if(event.button!==0||event.target.closest('.node,.edge'))return;
     const x=event.clientX,y=event.clientY,start=clone(state.view),boxSelect=event.shiftKey,origin=graphPoint(event);let moved=false;
@@ -191,7 +219,7 @@ $('viewport').onpointerdown=event=>{
         if(boxSelect){
             const rect=$('viewport').getBoundingClientRect(),m=$('marquee');m.hidden=false;m.style.left=Math.min(x,e.clientX)-rect.left+'px';m.style.top=Math.min(y,e.clientY)-rect.top+'px';m.style.width=Math.abs(e.clientX-x)+'px';m.style.height=Math.abs(e.clientY-y)+'px';
             const p=graphPoint(e);selectedNodes=new Set(previous);
-            for(const n of state.nodes)if(n.x+180>=Math.min(origin.x,p.x)&&n.x<=Math.max(origin.x,p.x)&&n.y+100>=Math.min(origin.y,p.y)&&n.y<=Math.max(origin.y,p.y))selectedNodes.add(n.id);
+            for(const n of state.nodes){const width=n.type==='skybox'?230:180,height=n.type==='skybox'?250:n.type==='source'?160:100;if(n.x+width>=Math.min(origin.x,p.x)&&n.x<=Math.max(origin.x,p.x)&&n.y+height>=Math.min(origin.y,p.y)&&n.y<=Math.max(origin.y,p.y))selectedNodes.add(n.id);}
             document.querySelectorAll('.node').forEach(el=>el.classList.toggle('selected',selectedNodes.has(el.dataset.id)));
         }else{$('viewport').classList.add('panning');state.view.x=start.x+e.clientX-x;state.view.y=start.y+e.clientY-y;applyView();}
     };
@@ -208,7 +236,7 @@ $('viewport').addEventListener('wheel',event=>{
 },{passive:false});
 function frameGraph(selection=false){
     const nodes=state.nodes.filter(n=>!selection||selectedNodes.has(n.id));if(!nodes.length)return;
-    const left=Math.min(...nodes.map(n=>n.x)),top=Math.min(...nodes.map(n=>n.y)),right=Math.max(...nodes.map(n=>n.x+200)),bottom=Math.max(...nodes.map(n=>n.y+(n.type==='source'?160:110)));
+    const left=Math.min(...nodes.map(n=>n.x)),top=Math.min(...nodes.map(n=>n.y)),right=Math.max(...nodes.map(n=>n.x+(n.type==='skybox'?250:200))),bottom=Math.max(...nodes.map(n=>n.y+(n.type==='skybox'?270:n.type==='source'?160:110)));
     const box=$('viewport'),scale=Math.min(1.2,Math.max(0.2,Math.min((box.clientWidth-80)/(right-left),(box.clientHeight-80)/(bottom-top))));
     state.view={scale,x:(box.clientWidth-(right-left)*scale)/2-left*scale,y:(box.clientHeight-(bottom-top)*scale)/2-top*scale};applyView();
 }
@@ -225,7 +253,6 @@ document.addEventListener('keydown',event=>{
     if(modifier&&key==='z')undoRedo(event.shiftKey?1:-1);else if(modifier&&key==='y')undoRedo(1);
     else if(modifier&&key==='d')duplicateSelection();
     else if(modifier&&key==='a'){selectedNodes=new Set(state.nodes.map(n=>n.id));selected=state.nodes.at(-1)?.id;selectedEdge=null;drawGraph();inspect();}
-    else if(modifier&&key==='s')$(event.shiftKey?'export':'save').click();else if(modifier&&key==='o')$('restore').click();
     else if(key==='delete'||key==='backspace')deleteSelection();
     else if(key==='escape'){pending=null;selected=null;selectedNodes.clear();selectedEdge=null;drawGraph();inspect();}
     else if(!modifier&&key==='c')addNode('crop');else if(!modifier&&key==='l')addNode('light');else if(!modifier&&key==='i')addNode('info');
@@ -267,10 +294,14 @@ function inspect(){
     }else if(node.type==='info'){
         const help=document.createElement('p');help.textContent='Image passes through unchanged. The ƒ output holds structured statistics for future numeric nodes. Measurements use an aspect-preserving sample, up to 512 px, with linear-sRGB luminance. Compare stages or photos to assess light balance.';root.append(help);
         const stats=document.createElement('div');stats.id='info-detail';root.append(stats);renderInfo();
-    }else{const p=document.createElement('p');p.textContent='Face labels follow Three.js +X, −X, +Y, −Y, +Z, −Z. No seam constraints: arrange photographs as artwork.';root.append(p);}
+    }else if(node.type==='skybox'){
+        const p=document.createElement('p');p.textContent='The permanent terminal node: six named image inputs become one cube environment. It can be moved and selected, but never deleted or duplicated.';root.append(p);
+        const list=document.createElement('div');list.className='cube-inspector';
+        for(const face of FACES){const row=document.createElement('div'),edge=incoming(node.id,face),label=document.createElement('span');label.textContent=`${face.toUpperCase()} · ${LABELS[face]} — ${edge?'connected':'empty'}`;row.append(label);if(edge)row.append(action('Disconnect',()=>{state.edges=state.edges.filter(e=>e!==edge);changed();}));list.append(row);}root.append(list);
+    }
     const actions=document.createElement('div');actions.className='node-actions';
-    if(incoming(node.id))actions.append(action('Disconnect input',()=>{state.edges=state.edges.filter(e=>e.to!==node.id);changed();}));
-    if(node.type!=='face')actions.append(action('Delete node',()=>{state.nodes=state.nodes.filter(n=>n.id!==node.id);state.edges=state.edges.filter(e=>e.to!==node.id&&e.from!==node.id);selectedNodes.delete(node.id);selected=[...selectedNodes].at(-1)||null;changed();}));root.append(actions);
+    if(node.type!=='skybox'&&incoming(node.id))actions.append(action('Disconnect input',()=>{state.edges=state.edges.filter(e=>e.to!==node.id);changed();}));
+    if(node.type!=='skybox')actions.append(action('Delete node',()=>{state.nodes=state.nodes.filter(n=>n.id!==node.id);state.edges=state.edges.filter(e=>e.to!==node.id&&e.from!==node.id);selectedNodes.delete(node.id);selected=[...selectedNodes].at(-1)||null;changed();}));root.append(actions);
 }
 function renderInfo(){
     const root=$('info-detail');if(!root)return;root.replaceChildren();const s=analysis.get(selected);
@@ -293,9 +324,9 @@ function renderInfo(){
     root.append(action('Save statistics JSON',()=>downloadJSON({nodeId:selected,pipeline:snapshot(),statistics:s},'image-statistics.json')));
 }
 
-function schedule(){generation++;clearTimeout(timer);timer=setTimeout(renderPreview,100);}
+function schedule(){generation++;clearTimeout(timer);timer=setTimeout(renderPreview,100);queueDraftSave();}
 const tiles=new Map();for(const face of FACES){
-    const button=document.createElement('button'),c=canvas(256);button.append(c,document.createTextNode(`${face} · ${LABELS[face]}`));button.onclick=()=>selectNode(state.nodes.find(n=>n.type==='face'&&n.face===face).id);$('faces').append(button);tiles.set(face,{canvas:c,button});
+    const button=document.createElement('button'),c=canvas(256);button.append(c,document.createTextNode(`${face} · ${LABELS[face]}`));button.onclick=()=>selectNode(state.nodes.find(n=>n.type==='skybox').id);$('faces').append(button);tiles.set(face,{canvas:c,button});
 }
 async function renderPreview(){
     const version=generation,{outputs,analysis:nextAnalysis}=await evaluate(clone(state),256);if(version!==generation)return;
@@ -303,16 +334,17 @@ async function renderPreview(){
     for(const face of FACES){const result=outputs.get(face),tile=tiles.get(face),ctx=tile.canvas.getContext('2d');ctx.fillStyle='#151922';ctx.fillRect(0,0,256,256);
         if(result.error){missing++;tile.button.title=result.error;ctx.fillStyle='#8491a6';ctx.font='16px sans-serif';ctx.fillText('No input',85,132);}else{ctx.drawImage(result,0,0);tile.button.title=LABELS[face];}}
     for(const node of state.nodes.filter(n=>n.type==='info')){const body=document.querySelector(`[data-id="${CSS.escape(node.id)}"] .info-summary`);if(body)body.textContent=infoSummary(node.id);}
-    renderInfo();updateEnvironment();if(!exporting)status(missing?`${missing} faces incomplete · Photo → Frame → Light → Face · tap any stage with Info.`:'Preview ready · full-resolution rendering on export.');
+    renderInfo();updateEnvironment();if(!exporting)status(missing?`${missing} cube inputs incomplete · Photo → Frame → Light → Skybox · tap any stage with Info.`:'Preview ready · full-resolution rendering on export.');
 }
 const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(65,1,0.01,100);camera.position.set(3,2,4);
 const renderer=new THREE.WebGLRenderer({antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));$('three').append(renderer.domElement);
 const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;
 const material=new THREE.MeshStandardMaterial({metalness:1,roughness:0.08}),sphere=new THREE.Mesh(new THREE.SphereGeometry(1,48,32),material);scene.add(sphere);scene.add(new THREE.HemisphereLight(0xffffff,0x444444,1));
-let environment=null,inside=false;
+let environment=null,inside=!!state.layout?.inside;
 function updateEnvironment(){if(environment)environment.dispose();environment=new THREE.CubeTexture(FACES.map(face=>tiles.get(face).canvas));environment.colorSpace=THREE.SRGBColorSpace;environment.needsUpdate=true;scene.environment=environment;material.envMap=environment;material.needsUpdate=true;scene.background=$('background').checked?environment:new THREE.Color('#090b10');}
-$('background').onchange=updateEnvironment;
-$('inside').onclick=()=>{inside=!inside;sphere.visible=!inside;controls.target.set(0,0,0);camera.position.set(...(inside?[0,0,0.01]:[3,2,4]));controls.enableZoom=!inside;controls.enablePan=!inside;controls.update();};
+$('background').onchange=()=>{state.layout??={};state.layout.environment=$('background').checked;updateEnvironment();queueDraftSave();};
+function applyPreviewMode(){inside=!!state.layout?.inside;sphere.visible=!inside;controls.target.set(0,0,0);camera.position.set(...(inside?[0,0,0.01]:[3,2,4]));controls.enableZoom=!inside;controls.enablePan=!inside;controls.update();$('background').checked=state.layout?.environment!==false;updateEnvironment();}
+$('inside').onclick=()=>{state.layout??={};state.layout.inside=!inside;applyPreviewMode();queueDraftSave();};
 new ResizeObserver(()=>{const box=$('three');if(!box.clientWidth||!box.clientHeight)return;renderer.setSize(box.clientWidth,box.clientHeight);camera.aspect=box.clientWidth/box.clientHeight;camera.updateProjectionMatrix();}).observe($('three'));
 renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera);});
 
@@ -324,6 +356,7 @@ function applyLayout(){
     for(const [id,value,min,max]of [['preview-resizer',width,280,maxWidth],['preview-height-resizer',height,160,maxHeight]]){
         $(id).setAttribute('aria-valuenow',String(Math.round(value)));$(id).setAttribute('aria-valuemin',String(min));$(id).setAttribute('aria-valuemax',String(Math.round(max)));
     }
+    queueDraftSave();
 }
 function resizeHandle(id,axis){
     const handle=$(id);handle.onpointerdown=event=>{
@@ -346,7 +379,7 @@ $('snapshot').onchange=async event=>{
     try{const file=event.target.files[0];if(!file)return;const next=validate(migrate(JSON.parse(await file.text())));
         const warnings=next.nodes.filter(n=>n.type==='source'&&!library.some(s=>s.path===n.source.path&&s.sha256===n.source.sha256));
         if(warnings.length&&!confirm(`${warnings.length} sources are missing or changed. Load anyway? Export requires matching originals.`))return;
-        state=next;selected=null;selectedNodes.clear();selectedEdge=null;pending=null;analysis.clear();clearImageCache();$('name').value=state.name||'untitled';$('size').value=state.size;checkpoint();applyLayout();drawGraph();inspect();schedule();
+        state=next;selected=null;selectedNodes.clear();selectedEdge=null;pending=null;analysis.clear();clearImageCache();$('name').value=state.name||'untitled';$('size').value=state.size;checkpoint();applyLayout();applyPreviewMode();drawGraph();inspect();schedule();
     }catch(error){status(error.message,true);}finally{event.target.value='';}
 };
 $('export').onclick=async()=>{
@@ -354,8 +387,38 @@ $('export').onclick=async()=>{
     try{const pipeline=validate(snapshot());status('Rendering full-resolution faces and image statistics…');const {outputs,analysis:stats}=await evaluate(pipeline,pipeline.size),images={};
         for(const face of FACES){const c=outputs.get(face);if(c.error)throw new Error(`${face}: ${c.error}`);images[face]=c.toDataURL('image/png').split(',')[1];}
         status('Writing unique export folder…');const response=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:pipeline.name,state:pipeline,images,analysis:Object.fromEntries(stats)})});
-        const result=await response.json();if(!response.ok)throw new Error(result.error||'Export failed');status(`Saved ${result.folder}/ — six PNGs, pipeline, provenance and analysis.`);
+        const result=await response.json();if(!response.ok)throw new Error(result.error||'Export failed');status(`Saved ${result.folder}/ — six PNGs + pipeline.json + manifest.json${stats.size?' + analysis.json':''}.`);
     }catch(error){status(error.message,true);}finally{button.disabled=false;exporting=false;}
 };
 $('crop').onclick=()=>addNode('crop');$('light').onclick=()=>addNode('light');$('info').onclick=()=>addNode('info');$('refresh').onclick=()=>refreshLibrary().catch(e=>status(e.message,true));$('size').onchange=()=>{state.size=Number($('size').value);checkpoint();};$('name').onchange=()=>{state.name=$('name').value;checkpoint();};
-applyLayout();drawGraph();inspect();updateHistoryButtons();schedule();refreshLibrary().catch(e=>status(e.message,true));
+function resetWorkspace() {
+    if (!confirm('Reset the workspace? This clears the browser draft and undo history. Save JSON first if you want to keep this arrangement. Photos and exported folders are not deleted.')) return;
+    clearTimeout(draftTimer);
+    try { localStorage.removeItem(STORAGE_KEY); } catch { /* Reset still works if browser storage is disabled. */ }
+    recovered=null;
+    recoveryError=null;
+    state=createWorkspace();
+    selected=null;
+    selectedNodes.clear();
+    selectedEdge=null;
+    pending=null;
+    analysis.clear();
+    clearImageCache();
+    history=[clone(state)];
+    historyIndex=0;
+    $('name').value=state.name;
+    $('size').value=state.size;
+    applyLayout();
+    applyPreviewMode();
+    drawGraph();
+    inspect();
+    updateHistoryButtons();
+    schedule();
+    saveDraft();
+}
+$('reset-workspace').onclick=resetWorkspace;
+$('reload-app').onclick=()=>{saveDraft();location.reload();};
+$('name').value=state.name||'untitled';$('size').value=state.size;
+applyLayout();applyPreviewMode();drawGraph();inspect();updateHistoryButtons();schedule();refreshLibrary().catch(e=>status(e.message,true));
+if(recovered){$('autosave-status').textContent='Restored · autosaved';$('autosave-status').title='Workspace restored from this browser. Undo history starts fresh after reload.';}
+if(recoveryError){$('autosave-status').textContent='Recovery failed';$('autosave-status').classList.add('error');$('autosave-status').title=recoveryError;}

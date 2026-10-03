@@ -18,7 +18,7 @@ The server uses Python 3.9+ and the standard library. Three.js loads from unpkg,
 
 1. Put photos in `raw/` (nested folders supported). Supported browser formats: JPG/JPEG, PNG, WebP, GIF, BMP. Convert HEIC or camera RAW first. For reproducible artwork, use still images, not animated GIFs.
 2. Click **↻** to rescan. Click a photo to add a **Photo / Source** node.
-3. Add **Frame** and **Light** nodes. Connect **Photo → Frame → Light → Face**. Any stage may branch to multiple inputs; direct Source → Face is also valid.
+3. Add **Frame** and **Light** nodes. Connect **Photo → Frame → Light → Skybox input**. Any stage may branch to multiple inputs; direct Source → Skybox is also valid.
 4. Select a node to edit its settings. **Frame** owns crop/zoom/pan/rotation/flips; **Light** owns exposure and color. Chain nodes in the order you want. Light before Frame can be useful when inspecting the uncropped photograph.
 5. Add **Info** and connect it to any image stage to inspect that stage's statistics. Info passes the image through unchanged, so it may live inline or on its own branch.
 6. Complete all six faces and click **Export folder**.
@@ -29,7 +29,7 @@ Cube face order matches Three.js / the viewer: `px` (+X/right), `nx` (−X/left)
 
 ## Graph interaction
 
-- **Connect:** drag output → input, or click output then input. Empty inputs can also drag backwards to outputs.
+- **Connect:** drag output → input, or click output then input. Empty inputs can also drag backwards to outputs. A whole Frame, Light, Info or Photo node is a valid drop target; on the Skybox node, the nearest face row is selected and highlighted.
 - **Rewire destination:** drag an occupied input to a different input. Alternatively, click the cable and drag its destination handle.
 - **Rewire source:** click a cable and drag its source handle to another output. This affects only that cable, not all branches from the original output.
 - Connecting to an occupied input replaces its old connection. Invalid connections / cycles preserve existing wiring. Drop an existing endpoint on empty space to disconnect it. **Esc** cancels a drag without changing it.
@@ -37,7 +37,7 @@ Cube face order matches Three.js / the viewer: `px` (+X/right), `nx` (−X/left)
 - **Box-select:** Shift-drag empty space. Selection is additive.
 - **Deselect:** click empty space. A small movement threshold prevents clicks from panning.
 - **Pan:** drag empty space. **Zoom:** wheel. **Frame all:** toolbar or F.
-- Face nodes are permanent output slots: deletion / duplication affects only other nodes.
+- One permanent **Skybox / Cube Output** node contains six named inputs. It makes the single-cube result visually explicit and cannot be deleted or duplicated; deletion affects only processing/source nodes.
 
 ## Resize / preview
 
@@ -68,7 +68,7 @@ Adjustments have sliders and editable numeric values. Double-click a slider labe
 
 ## Frame / Light processing
 
-Snapshots identify the new renderer as `canvas-linear-grade-v2` (schema version 2).
+Snapshots identify the renderer as `canvas-linear-grade-v2` with schema version 3. Version 3 models the terminal result as one Skybox node with six named inputs rather than six unrelated terminal nodes.
 
 **Frame**:
 
@@ -91,7 +91,7 @@ Live image previews render at 256 px; export evaluates the graph again at 512, 1
 
 ### Old snapshots
 
-Schema-1 combined Crop/Grade nodes migrate into **Frame → Light** pairs. The migrated Light node preserves the exact old display-RGB grading algorithm, shown as **Legacy grade · preserved**. Its new sliders remain disabled until you click **Use new light engine** or reset it; switching can change its appearance. Migrated wiring and provenance stay intact.
+Schema-1 combined Crop/Grade nodes migrate into **Frame → Light** pairs. Schema-1 and schema-2 face nodes migrate into the six named inputs of one permanent Skybox node. The migrated Light node preserves the exact old display-RGB grading algorithm, shown as **Legacy grade · preserved**. Its new sliders remain disabled until you click **Use new light engine** or reset it; switching can change its appearance. Migrated wiring and provenance stay intact.
 
 ## Info / light comparison
 
@@ -113,7 +113,13 @@ The green output is image passthrough. The purple **ƒ** statistics output opens
 
 ## Save / restore / export
 
-**Save JSON** captures source paths and SHA-256 hashes, node settings, edges, face assignments, resolution, graph layout, viewport and sidebar size. **Load JSON** validates its schema / DAG, migrates legacy snapshots, and restores it. Keep `raw/` alongside snapshots: image bytes are not embedded. Missing or changed originals warn on import and block folder export until resolved.
+**Reload app** reloads the editor while preserving the workspace. **Reset workspace** clears the saved browser draft, selection and undo history and creates a fresh graph with the permanent Skybox node. Reset requires confirmation and never deletes source images or exported folders. Save JSON first if you want to archive the current arrangement.
+
+The server sends Studio code and API responses with `Cache-Control: no-store` and ignores conditional cache headers for editor code, so ordinary reloads don't mix old UI and new processing modules. Restart `studio/server.py` after changing its Python code for this policy to take effect. Source photos and exported images retain normal static-file caching.
+
+The complete workspace is automatically saved to browser-local storage after edits, node movement, graph navigation and preview resizing. Reloading the same Studio origin restores the pipeline, selection, viewport, output settings and preview layout. The header reports **Autosaved** or **Restored**. Undo history intentionally starts fresh after a page reload. Browser storage is origin-specific and can be cleared by browser settings, so it is convenience recovery—not archival provenance.
+
+**Save JSON** captures source paths and SHA-256 hashes, node settings, edges, face assignments, resolution, graph layout, viewport and sidebar size. **Load JSON** validates its schema / DAG, migrates legacy snapshots, and restores it. Keep `raw/` alongside snapshots: image bytes are not embedded. Missing or changed originals warn on import and block folder export until resolved. Use JSON as the portable backup across browsers, machines, ports or hostnames.
 
 Every **Export folder** creates a fresh directory under `exports/` using UTC time and a random suffix, with exclusive creation:
 
@@ -125,7 +131,7 @@ exports/untitled-20261002T180000Z-a1b2c3d4e5f6/
   analysis.json    # when Info nodes are present
 ```
 
-It never overwrites existing exports or `skybox/`. The manifest contains the full pipeline, per-output hashes and face-node IDs for upstream lineage, plus Info statistics from the export-resolution pipeline. Info branches without image inputs record an error rather than blocking otherwise-complete faces.
+Every exported folder includes `pipeline.json` alongside the images. It never overwrites existing exports or `skybox/`. `manifest.json` also embeds the complete pipeline and adds per-output hashes, the terminal Skybox node ID, and the named cube input for upstream lineage, plus Info statistics from the export-resolution pipeline. Info branches without image inputs record an error rather than blocking otherwise-complete faces.
 
 The server rechecks every source hash, including unused source nodes. The browser renders PNGs; the server checks their signatures, verifies sources and writes the files. This is not an independent rendering engine or a sandbox for untrusted clients. Color management / image decoding may vary across browsers; hashes identify exact inputs and outputs but do not guarantee bit-identical cross-browser rendering.
 

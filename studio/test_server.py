@@ -60,7 +60,8 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(len(list(folder.iterdir())), 8)
         manifest = json.loads((folder / 'manifest.json').read_text())
         self.assertEqual(manifest['outputs']['px']['sha256'], hashlib.sha256(PNG).hexdigest())
-        self.assertEqual(manifest['outputs']['px']['faceNode'], 'px')
+        self.assertEqual(manifest['outputs']['px']['terminalNode'], 'px')
+        self.assertEqual(manifest['outputs']['px']['input'], 'px')
 
     def test_v2_analysis_export(self):
         payload = self.payload()
@@ -71,9 +72,32 @@ class StudioAPITest(unittest.TestCase):
         folder = server.ROOT / result['folder']
         analysis = json.loads((folder / 'analysis.json').read_text())
         manifest = json.loads((folder / 'manifest.json').read_text())
-        self.assertEqual(manifest['schemaVersion'], 2)
+        self.assertEqual(manifest['schemaVersion'], 3)
         self.assertEqual(manifest['analysis'], analysis)
         self.assertEqual(analysis['info-node']['luminance']['mean'], 0.18)
+
+    def test_v3_cube_lineage_export(self):
+        payload = self.payload()
+        payload['state']['schemaVersion'] = 3
+        payload['state']['nodes'] = [payload['state']['nodes'][0], {'id': 'cube', 'type': 'skybox'}]
+        payload['state']['edges'] = [{'from': 'source', 'to': 'cube', 'input': face} for face in server.FACES]
+        code, result = self.request('POST', '/api/export', payload)
+        self.assertEqual(code, 201)
+        manifest = json.loads((server.ROOT / result['folder'] / 'manifest.json').read_text())
+        for face in server.FACES:
+            self.assertEqual(manifest['outputs'][face]['terminalNode'], 'cube')
+            self.assertEqual(manifest['outputs'][face]['input'], face)
+
+    def test_studio_code_bypasses_cache(self):
+        (server.ROOT / 'studio').mkdir()
+        (server.ROOT / 'studio' / 'app.js').write_text('const version = 3;')
+        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection.request('GET', '/studio/app.js', headers={'If-Modified-Since': 'Wed, 01 Jan 2099 00:00:00 GMT'})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader('Cache-Control'), 'no-store')
+        self.assertIn(b'version = 3', response.read())
+        connection.close()
 
     def test_changed_source_rejected(self):
         payload = self.payload()

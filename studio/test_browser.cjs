@@ -20,9 +20,10 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   await page.locator('.photo').first().click();await page.locator('.photo').nth(1).click();
   await key('c');await key('l');await key('i');
   assert.equal(await page.locator('.node.crop').count(),1);assert.equal(await page.locator('.node.light').count(),1);assert.equal(await page.locator('.node.info').count(),1);
-  await drag(page.locator('.node.source .output').first(),page.locator('.node.crop .input'));
-  await page.locator('.node.crop .output').click();await page.locator('.node.light .input').click();
-  for(const face of ['px','nx','py','ny','pz','nz'])await drag(page.locator('.node.light .output'),page.locator(`[data-id="face-${face}"] .input`));
+  // Whole node bodies are generous drop targets; precision ports remain available.
+  await drag(page.locator('.node.source .output').first(),page.locator('.node.crop .body'));
+  await drag(page.locator('.node.crop .output'),page.locator('.node.light .body'));
+  for(const face of ['px','nx','py','ny','pz','nz'])await drag(page.locator('.node.light .output'),page.locator(`.node.skybox .input[data-input="${face}"]`));
   await drag(page.locator('.node.info .input'),page.locator('.node.light .output')); // reverse drag
   await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Preview ready'));
   await page.locator('.node.info .body').click();await page.waitForSelector('#info-detail .histogram');
@@ -39,15 +40,15 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   await page.locator('.node.crop .body').click();await key('Control+d');assert.equal(await page.locator('.node.crop').count(),2);
   await key('Delete');assert.equal(await page.locator('.node.crop').count(),1);await key('Control+z');assert.equal(await page.locator('.node.crop').count(),2);await key('Control+Shift+z');
   // Rewire SOURCE endpoint through its selected cable handle.
-  await page.locator('[data-id="face-px"] .input').click();await drag(page.locator('.edge-handle[data-end=from]'),page.locator('.node.source .output').nth(1));
-  let snapshot=await capture();const secondSource=snapshot.nodes.filter(n=>n.type==='source')[1];assert.equal(snapshot.edges.find(e=>e.to==='face-px').from,secondSource.id);
-  await key('Control+z');snapshot=await capture();assert.equal(snapshot.nodes.find(n=>n.id===snapshot.edges.find(e=>e.to==='face-px').from).type,'light');
+  await page.locator('.node.skybox .input[data-input="px"]').click();await drag(page.locator('.edge-handle[data-end=from]'),page.locator('.node.source').nth(1));
+  let snapshot=await capture(),cube=snapshot.nodes.find(n=>n.type==='skybox'),secondSource=snapshot.nodes.filter(n=>n.type==='source')[1];assert.equal(snapshot.edges.find(e=>e.to===cube.id&&e.input==='px').from,secondSource.id);
+  await key('Control+z');snapshot=await capture();cube=snapshot.nodes.find(n=>n.type==='skybox');assert.equal(snapshot.nodes.find(n=>n.id===snapshot.edges.find(e=>e.to===cube.id&&e.input==='px').from).type,'light');
   // Move DESTINATION endpoint to replace another connection, then undo.
-  await page.locator('[data-id="face-px"] .input').click();await drag(page.locator('.edge-handle[data-end=to]'),page.locator('[data-id="face-nx"] .input'));
-  assert(!(await capture()).edges.some(e=>e.to==='face-px'));await key('Control+z');
+  await page.locator('.node.skybox .input[data-input="px"]').click();await drag(page.locator('.edge-handle[data-end=to]'),page.locator('.node.skybox .cube-input[data-input="nx"]'));
+  snapshot=await capture();cube=snapshot.nodes.find(n=>n.type==='skybox');assert(!snapshot.edges.some(e=>e.to===cube.id&&e.input==='px'));await key('Control+z');
   // Drop connected input on empty space to disconnect, restore via undo.
-  const input=await center(page.locator('[data-id="face-px"] .input'));await page.mouse.move(input.x,input.y);await page.mouse.down();await page.mouse.move(vp.x+30,vp.y+vp.height-30,{steps:10});await page.mouse.up();
-  assert(!(await capture()).edges.some(e=>e.to==='face-px'));await key('Control+z');
+  const input=await center(page.locator('.node.skybox .input[data-input="px"]'));await page.mouse.move(input.x,input.y);await page.mouse.down();await page.mouse.move(vp.x+30,vp.y+vp.height-30,{steps:10});await page.mouse.up();
+  snapshot=await capture();cube=snapshot.nodes.find(n=>n.type==='skybox');assert(!snapshot.edges.some(e=>e.to===cube.id&&e.input==='px'));await key('Control+z');
   // Invalid cycle drop preserves the existing cable.
   const original=await capture();await drag(page.locator('.node.light .output'),page.locator('.node.crop .input'));assert.deepEqual((await capture()).edges,original.edges);
   // Resizing changes both sidebar and 3D dimensions.
@@ -58,7 +59,7 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   await page.locator('#size').selectOption('512');await page.locator('#export').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Saved '),{timeout:30000});
   const folder=fs.readdirSync(path.join(root,'exports'))[0],manifest=JSON.parse(fs.readFileSync(path.join(root,'exports',folder,'manifest.json')));
   assert.equal(Object.keys(manifest.outputs).length,6);assert.equal(Object.keys(manifest.analysis).length,1);assert(fs.existsSync(path.join(root,'exports',folder,'analysis.json')));
-  assert.equal(manifest.pipeline.schemaVersion,2);assert.equal(manifest.pipeline.nodes.find(n=>n.type==='light').settings.exposure,1.25);
+  assert.equal(manifest.pipeline.schemaVersion,3);assert.equal(manifest.pipeline.nodes.filter(n=>n.type==='skybox').length,1);assert.equal(manifest.pipeline.nodes.find(n=>n.type==='light').settings.exposure,1.25);
   // Processing tests run directly in-browser (Canvas API required).
   const processing=await page.evaluate(async()=>{
    const p=await import('./pipeline.js');const image=p.canvas(100,50),ctx=image.getContext('2d');ctx.fillStyle='rgb(128,128,128)';ctx.fillRect(0,0,100,50);
@@ -66,15 +67,39 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
    const pixel=c=>c.getContext('2d').getImageData(0,0,1,1).data[0];
    const v1={schemaVersion:1,renderer:'canvas2d-cover-v1',size:512,nodes:[{id:'old',type:'transform',x:0,y:0,transforms:{...p.cropDefaults(),exposure:1,contrast:1.2,saturation:0.8}},...p.FACES.map(face=>({id:face,type:'face',face,x:600,y:0}))],edges:[{from:'old',to:'px'}]};
    const migrated=p.validate(p.migrate(v1));let cycle=false;try{p.validate({...migrated,edges:[{from:'old',to:'old-light'},{from:'old-light',to:'old'}]});}catch{cycle=true;}
-   return {mean:stats.luminance.mean,ev:stats.suggestedExposureTo18PercentGrayEV,width:stats.width,height:stats.height,neutral:pixel(neutral),bright:pixel(bright),migration:migrated.nodes.filter(n=>n.type==='crop'||n.type==='light').map(n=>n.type),cycle};
+   return {mean:stats.luminance.mean,ev:stats.suggestedExposureTo18PercentGrayEV,width:stats.width,height:stats.height,neutral:pixel(neutral),bright:pixel(bright),migration:migrated.nodes.filter(n=>n.type==='crop'||n.type==='light').map(n=>n.type),cubeCount:migrated.nodes.filter(n=>n.type==='skybox').length,cycle};
   });
-  assert(Math.abs(processing.mean-0.21586)<0.001);assert.equal(processing.width,100);assert.equal(processing.height,50);assert.equal(processing.neutral,128);assert(processing.bright>170);assert.deepEqual(processing.migration,['crop','light']);assert(processing.cycle);
+  assert(Math.abs(processing.mean-0.21586)<0.001);assert.equal(processing.width,100);assert.equal(processing.height,50);assert.equal(processing.neutral,128);assert(processing.bright>170);assert.deepEqual(processing.migration,['crop','light']);assert.equal(processing.cubeCount,1);assert(processing.cycle);
   // JSON round trip and multiple selection.
   snapshot=await capture();const json=path.join(root,'roundtrip.json');fs.writeFileSync(json,JSON.stringify(snapshot));await page.locator('#snapshot').setInputFiles(json);
   await page.waitForTimeout(300);assert.equal(await page.locator('.node.info').count(),1);await key('Control+a');assert.equal(await page.locator('.node.selected').count(),snapshot.nodes.length);
   await key('Escape');assert.equal(await page.locator('.node.selected').count(),0);await key('?');assert(await page.locator('#shortcut-guide').isVisible());await page.locator('#close-shortcuts').click();
+  // Cube remains permanent through direct deletion and duplication commands.
+  await page.locator('.node.skybox .body').click();await key('Delete');assert.equal(await page.locator('.node.skybox').count(),1);
+  await key('Control+d');assert.equal(await page.locator('.node.skybox').count(),1);assert(!(await page.locator('#inspector').innerText()).includes('Delete node'));
   await page.locator('.node.info .body').click();await page.waitForSelector('#info-detail .histogram');
+  assert.equal(await page.locator('#workspace').evaluate(e=>getComputedStyle(e).userSelect),'none');
+  const countBeforeReload=await page.locator('.node').count(),widthBeforeReload=await page.locator('#preview').evaluate(e=>e.clientWidth),heightBeforeReload=await page.locator('#three').evaluate(e=>e.clientHeight);
+  await page.waitForFunction(()=>document.querySelector('#autosave-status').textContent==='Autosaved');await page.reload();await page.waitForSelector('.photo');
+  assert.equal(await page.locator('.node').count(),countBeforeReload);assert.equal((await capture()).nodes.find(n=>n.type==='light').settings.exposure,1.25);
+  assert(Math.abs((await page.locator('#preview').evaluate(e=>e.clientWidth))-widthBeforeReload)<3);assert(Math.abs((await page.locator('#three').evaluate(e=>e.clientHeight))-heightBeforeReload)<3);
+  assert.equal(await page.locator('#autosave-status').innerText(),'Restored · autosaved');await page.locator('.node.info .body').click();await page.waitForSelector('#info-detail .histogram');
   await page.screenshot({path:process.env.STUDIO_SCREENSHOT||path.join(os.tmpdir(),'skybox-studio-v2.png')});
-  assert.deepEqual(errors,[]);console.log('PASS: drag/click/reverse wiring, both edge endpoints, disconnect/cycle protection, deselect, undo/redo, duplication/deletion, resize, lighting, statistics, migration, JSON roundtrip, six-face export, keyboard shortcuts.');
+  // An old browser draft also migrates on page load, not only through JSON import.
+  snapshot=await capture();const legacy=JSON.parse(JSON.stringify(snapshot)),oldCube=legacy.nodes.find(n=>n.type==='skybox');legacy.schemaVersion=2;legacy.name='legacy-migration-check';
+  legacy.nodes=legacy.nodes.filter(n=>n.type!=='skybox');for(const [i,face]of ['px','nx','py','ny','pz','nz'].entries())legacy.nodes.push({id:`face-${face}`,type:'face',face,x:oldCube.x,y:oldCube.y+i*140});
+  legacy.edges=legacy.edges.map(e=>e.to===oldCube.id?{from:e.from,to:`face-${e.input}`}:{...e});
+  const legacyContext=await browser.newContext({viewport:{width:1700,height:1100}}),legacyPage=await legacyContext.newPage();legacyPage.on('pageerror',e=>errors.push(e.message));
+  await legacyPage.addInitScript(value=>localStorage.setItem('skybox-studio.workspace.v2',JSON.stringify({pipeline:value,selection:['face-px']})),legacy);
+  await legacyPage.goto(`http://localhost:${port}/studio/`);await legacyPage.waitForSelector('.photo');assert.equal(await legacyPage.locator('#name').inputValue(),'legacy-migration-check');
+  assert.equal(await legacyPage.locator('.node.skybox').count(),1);assert.equal(await legacyPage.locator('.node.face').count(),0);assert.equal(await legacyPage.locator('.cube-input .state').filter({hasText:'CONNECTED'}).count(),6);
+  await legacyPage.waitForTimeout(400);const migratedDraft=await legacyPage.evaluate(()=>JSON.parse(localStorage.getItem('skybox-studio.workspace.v2')).pipeline);assert.equal(migratedDraft.schemaVersion,3);assert.equal(migratedDraft.edges.filter(e=>e.input).length,6);
+  await legacyContext.close();
+  // Reset is explicit, confirmed and leaves source files / exported lineage untouched.
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#reset-workspace').click();
+  assert.equal(await page.locator('.node').count(),1);assert.equal(await page.locator('.node.skybox').count(),1);assert.equal((await capture()).edges.length,0);assert(await page.locator('#undo').isDisabled());
+  assert(fs.existsSync(path.join(root,'exports',folder,'pipeline.json')));assert(fs.existsSync(path.join(root,'raw','a.png')));
+  await Promise.all([page.waitForEvent('load'),page.locator('#reload-app').click()]);await page.waitForSelector('.photo');assert.equal(await page.locator('.node').count(),1);assert.equal((await capture()).edges.length,0);
+  assert.deepEqual(errors,[]);console.log('PASS: cube output/protection, whole-node/face-row drops, rewiring, undo/redo, resize, lighting/statistics, export lineage, migration, refresh recovery, explicit reset and app reload.');
  }finally{if(browser)await browser.close();server.kill();fs.rmSync(root,{recursive:true,force:true});}
 })().catch(error=>{console.error(error);process.exitCode=1;});

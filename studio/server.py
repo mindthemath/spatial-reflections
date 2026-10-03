@@ -21,6 +21,12 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def end_headers(self):
+        path = urlparse(self.path).path
+        if path.startswith(('/studio/', '/api/')):
+            self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+
     def send_json(self, status, value):
         data = json.dumps(value).encode()
         self.send_response(status)
@@ -30,7 +36,13 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if urlparse(self.path).path != '/api/library':
+        path = urlparse(self.path).path
+        if path.startswith('/studio/'):
+            # Never return a stale conditional response for locally edited app code.
+            for header in ('If-Modified-Since', 'If-None-Match'):
+                if header in self.headers:
+                    del self.headers[header]
+        if path != '/api/library':
             return super().do_GET()
         raw = ROOT / 'raw'
         raw.mkdir(exist_ok=True)
@@ -55,7 +67,7 @@ class Handler(SimpleHTTPRequestHandler):
                 raise ValueError('Export must be between 1 byte and 100 MB')
             request = json.loads(self.rfile.read(length))
             state = request['state']
-            if state.get('schemaVersion') not in (1, 2):
+            if state.get('schemaVersion') not in (1, 2, 3):
                 raise ValueError('Unsupported snapshot schema')
             images = request['images']
             if set(images) != set(FACES):
@@ -65,6 +77,13 @@ class Handler(SimpleHTTPRequestHandler):
                 decoded[face] = base64.b64decode(images[face], validate=True)
                 if not decoded[face].startswith(b'\x89PNG\r\n\x1a\n'):
                     raise ValueError('Faces must be PNG images')
+            if state.get('schemaVersion') == 3:
+                cubes = [n for n in state['nodes'] if n['type'] == 'skybox']
+                if len(cubes) != 1:
+                    raise ValueError('Exactly one permanent skybox output is required')
+                connections = [e for e in state['edges'] if e['to'] == cubes[0]['id']]
+                if len(connections) != 6 or {e.get('input') for e in connections} != set(FACES):
+                    raise ValueError('The skybox must have all six named inputs connected')
             # Verify the sources still match the snapshot before exporting.
             for node in state['nodes']:
                 if node['type'] != 'source':
@@ -82,12 +101,14 @@ class Handler(SimpleHTTPRequestHandler):
             destination = parent / f'{label}-{timestamp}-{uuid.uuid4().hex[:12]}'
             destination.mkdir(exist_ok=False)
             analysis = request.get('analysis', {})
-            manifest = {'schemaVersion': 2, 'createdAt': datetime.now(timezone.utc).isoformat(),
+            manifest = {'schemaVersion': 3, 'createdAt': datetime.now(timezone.utc).isoformat(),
                         'pipeline': state, 'analysis': analysis, 'outputs': {}}
             for face, data in decoded.items():
                 (destination / f'{face}.png').write_bytes(data)
+                cube = next((n for n in state['nodes'] if n['type'] == 'skybox'), None)
+                terminal = cube['id'] if cube else next(n['id'] for n in state['nodes'] if n['type'] == 'face' and n['face'] == face)
                 manifest['outputs'][face] = {'file': f'{face}.png', 'sha256': hashlib.sha256(data).hexdigest(),
-                                             'faceNode': next(n['id'] for n in state['nodes'] if n['type'] == 'face' and n['face'] == face)}
+                                             'terminalNode': terminal, 'input': face}
             (destination / 'pipeline.json').write_text(json.dumps(state, indent=2))
             (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2))
             if analysis:

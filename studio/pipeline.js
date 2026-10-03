@@ -100,35 +100,43 @@ export async function evaluate(snapshot,size){
             if(node.type==='crop')return crop(input,node.settings,size);
             if(node.type==='light')return node.legacy?legacyGrade(input,node.legacy,size):light(input,node.settings,size);
             if(node.type==='info'){analysis.set(id,statistics(input));return input;}
-            return crop(input,cropDefaults(),size);
+            throw new Error(`Cannot evaluate ${node.type} as an image node`);
         })();memo.set(id,promise);return promise;
     }
-    const outputs=new Map();
-    for(const face of FACES){try{outputs.set(face,await run(snapshot.nodes.find(n=>n.type==='face'&&n.face===face).id));}catch(e){outputs.set(face,{error:e.message});}}
-    // Info nodes also run on independent branches not connected to an output face.
+    const outputs=new Map(),skybox=snapshot.nodes.find(n=>n.type==='skybox');
+    for(const face of FACES){
+        try{const edge=snapshot.edges.find(e=>e.to===skybox.id&&e.input===face);if(!edge)throw new Error(`${face.toUpperCase()} has no image input`);outputs.set(face,crop(await run(edge.from),cropDefaults(),size));}
+        catch(e){outputs.set(face,{error:e.message});}
+    }
     for(const node of snapshot.nodes.filter(n=>n.type==='info')){try{await run(node.id);}catch(e){analysis.set(node.id,{error:e.message});}}
     return {outputs,analysis};
 }
 export function migrate(value){
-    if(value.schemaVersion!==1)return value;
-    if(value.renderer!=='canvas2d-cover-v1')throw new Error('Unsupported legacy renderer');
-    const next=clone(value);next.schemaVersion=2;next.renderer=RENDERER;
-    const ids=new Set(next.nodes.map(n=>n.id));
-    for(const n of [...next.nodes]){
-        if(n.type!=='transform')continue;
-        let id=n.id+'-light';while(ids.has(id))id+='-';ids.add(id);
-        const t=n.transforms;n.type='crop';n.settings=Object.fromEntries(Object.keys(cropDefaults()).map(k=>[k,t[k]]));delete n.transforms;
-        const grade={id,type:'light',x:n.x+220,y:n.y,settings:lightDefaults(),legacy:{exposure:t.exposure,contrast:t.contrast,saturation:t.saturation}};
-        for(const e of next.edges)if(e.from===n.id)e.from=id;
-        next.edges.push({from:n.id,to:id});next.nodes.push(grade);
-    }return next;
+    let next=clone(value);
+    if(next.schemaVersion===1){
+        if(next.renderer!=='canvas2d-cover-v1')throw new Error('Unsupported legacy renderer');
+        next.schemaVersion=2;next.renderer=RENDERER;const ids=new Set(next.nodes.map(n=>n.id));
+        for(const n of [...next.nodes]){
+            if(n.type!=='transform')continue;
+            let id=n.id+'-light';while(ids.has(id))id+='-';ids.add(id);
+            const t=n.transforms;n.type='crop';n.settings=Object.fromEntries(Object.keys(cropDefaults()).map(k=>[k,t[k]]));delete n.transforms;
+            const grade={id,type:'light',x:n.x+220,y:n.y,settings:lightDefaults(),legacy:{exposure:t.exposure,contrast:t.contrast,saturation:t.saturation}};
+            for(const e of next.edges)if(e.from===n.id)e.from=id;next.edges.push({from:n.id,to:id});next.nodes.push(grade);
+        }
+    }
+    if(next.schemaVersion===2){
+        const faces=next.nodes.filter(n=>n.type==='face'),ids=new Set(next.nodes.map(n=>n.id));let id='skybox-output';while(ids.has(id))id+='-';
+        const cube={id,type:'skybox',x:faces.length?Math.max(...faces.map(n=>n.x)):920,y:faces.length?Math.min(...faces.map(n=>n.y)):30},faceById=new Map(faces.map(n=>[n.id,n.face]));
+        next.edges=next.edges.map(e=>faceById.has(e.to)?{from:e.from,to:id,input:faceById.get(e.to)}:e);next.nodes=next.nodes.filter(n=>n.type!=='face');next.nodes.push(cube);next.schemaVersion=3;
+    }
+    return next;
 }
 export function validate(value){
-    if(!value||value.schemaVersion!==2||value.renderer!==RENDERER||!Array.isArray(value.nodes)||!Array.isArray(value.edges)||value.nodes.length>300)throw new Error('Invalid or unsupported pipeline JSON');
+    if(!value||value.schemaVersion!==3||value.renderer!==RENDERER||!Array.isArray(value.nodes)||!Array.isArray(value.edges)||value.nodes.length>300)throw new Error('Invalid or unsupported pipeline JSON');
     if(![512,1024,2048].includes(value.size))throw new Error('Invalid output size');
     const ids=new Set();
     for(const n of value.nodes){
-        if(!n||typeof n.id!=='string'||ids.has(n.id)||!['source','crop','light','info','face'].includes(n.type)||!Number.isFinite(n.x)||!Number.isFinite(n.y))throw new Error('Invalid node');ids.add(n.id);
+        if(!n||typeof n.id!=='string'||ids.has(n.id)||!['source','crop','light','info','skybox'].includes(n.type)||!Number.isFinite(n.x)||!Number.isFinite(n.y))throw new Error('Invalid node');ids.add(n.id);
         if(n.type==='source'&&(!n.source||typeof n.source.path!=='string'||!n.source.path.startsWith('raw/')||n.source.path.split('/').includes('..')||! /^[a-f0-9]{64}$/.test(n.source.sha256)))throw new Error('Invalid source');
         if(n.type==='crop'||n.type==='light'){
             if(!n.settings)throw new Error('Missing node settings');
@@ -137,11 +145,11 @@ export function validate(value){
             if(n.legacy&&(!Number.isFinite(n.legacy.exposure)||n.legacy.exposure< -3||n.legacy.exposure>3||!Number.isFinite(n.legacy.contrast)||n.legacy.contrast<0||n.legacy.contrast>3||!Number.isFinite(n.legacy.saturation)||n.legacy.saturation<0||n.legacy.saturation>3))throw new Error('Invalid legacy grade');
         }
     }
-    for(const face of FACES)if(value.nodes.filter(n=>n.type==='face'&&n.face===face).length!==1)throw new Error('Exactly one node per face is required');
-    if(value.nodes.filter(n=>n.type==='face').length!==6)throw new Error('Unexpected face node');
+    if(value.nodes.filter(n=>n.type==='skybox').length!==1)throw new Error('Exactly one skybox output node is required');
     const targets=new Set();for(const e of value.edges){
-        const from=value.nodes.find(n=>n.id===e.from),to=value.nodes.find(n=>n.id===e.to);
-        if(!from||!to||from.type==='face'||to.type==='source'||targets.has(e.to))throw new Error('Invalid image connection');targets.add(e.to);
+        const from=value.nodes.find(n=>n.id===e.from),to=value.nodes.find(n=>n.id===e.to),targetKey=to?.type==='skybox'?`${e.to}:${e.input}`:e.to;
+        if(!from||!to||from.type==='skybox'||to.type==='source'||targets.has(targetKey))throw new Error('Invalid image connection');
+        if(to.type==='skybox'&&!FACES.includes(e.input))throw new Error('Invalid skybox input');if(to.type!=='skybox'&&e.input!==undefined)throw new Error('Unexpected named input');targets.add(targetKey);
     }
     const visiting=new Set(),done=new Set();function visit(id){if(visiting.has(id))throw new Error('Cycle in snapshot');if(done.has(id))return;visiting.add(id);for(const e of value.edges.filter(e=>e.from===id))visit(e.to);visiting.delete(id);done.add(id);}
     for(const id of ids)visit(id);
