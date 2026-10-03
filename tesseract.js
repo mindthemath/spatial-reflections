@@ -1502,6 +1502,10 @@ function createVideoExportDialog() {
                     <option value="3840x2160">3840 × 2160 · 4K</option>
                     <option value="1080x1080">1080 × 1080 · square</option>
                 </select></label>
+                <label>Container<select id="video-export-format">
+                    <option value="mp4">MP4</option>
+                    <option value="mkv">MKV · Matroska</option>
+                </select></label>
                 <label>Quality<select id="video-export-quality">
                     <option value="draft">Draft</option>
                     <option value="standard">Standard</option>
@@ -1530,7 +1534,7 @@ function createVideoExportDialog() {
     const resolution = document.getElementById('video-export-resolution');
     resolution.value = `${videoExportWidth}x${videoExportHeight}`;
     document.getElementById('video-export-quality').value = videoExportQuality;
-    for (const id of ['video-export-resolution', 'video-export-quality', 'video-export-range', 'video-export-start', 'video-export-duration']) {
+    for (const id of ['video-export-resolution', 'video-export-format', 'video-export-quality', 'video-export-range', 'video-export-start', 'video-export-duration']) {
         document.getElementById(id).addEventListener('input', updateVideoExportSummary);
         document.getElementById(id).addEventListener('change', updateVideoExportSummary);
     }
@@ -1599,6 +1603,7 @@ async function openVideoExportDialog() {
 function videoExportPlan() {
     if (!videoExportDialog) return null;
     const [width, height] = document.getElementById('video-export-resolution').value.split('x').map(Number);
+    const format = document.getElementById('video-export-format').value;
     const quality = document.getElementById('video-export-quality').value;
     const range = document.getElementById('video-export-range').value;
     let startFrame = 0;
@@ -1620,7 +1625,7 @@ function videoExportPlan() {
     const duration = frames / exportFps;
     const bitRate = width * height * exportFps * VIDEO_QUALITY_BITS_PER_PIXEL[quality];
     const estimatedBytes = bitRate * duration / 8 * 1.03;
-    return { width, height, quality, range, startFrame, frames, duration, bitRate, estimatedBytes, error };
+    return { width, height, format, quality, range, startFrame, frames, duration, bitRate, estimatedBytes, error };
 }
 
 function updateVideoExportSummary() {
@@ -1644,8 +1649,8 @@ function updateVideoExportSummary() {
         summary.innerHTML = `
             <strong>${rangeText}</strong><br>
             ${plan.width} × ${plan.height} · ${exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
-            H.264 MP4 · ${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target · no audio · current ${currentShader} shader<br>
-            Duration ${formatDuration(plan.duration)} · estimated MP4 size <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
+            H.264 ${plan.format.toUpperCase()} · ${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target · no audio · current ${currentShader} shader<br>
+            Duration ${formatDuration(plan.duration)} · estimated ${plan.format.toUpperCase()} size <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
             <small>Saved under <code>videos/</code>. Size is a bitrate-based estimate; visual complexity can change the final file size.${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
         summary.classList.remove('error');
     }
@@ -1739,7 +1744,7 @@ async function runVideoExport(plan) {
         activeVideoExportJob = await videoApi('/api/video/start', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, width: plan.width, height: plan.height, fps: exportFps,
-                frames: plan.frames, quality: plan.quality, startFrame: plan.startFrame,
+                frames: plan.frames, quality: plan.quality, format: plan.format, startFrame: plan.startFrame,
                 loopFrameCount: loopTiming.frameCount, loopPeriod: loopTiming.period,
                 timeStep: loopTiming.timeStep, viewerState: viewerSettings() })
         });

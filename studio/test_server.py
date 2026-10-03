@@ -201,6 +201,48 @@ class StudioAPITest(unittest.TestCase):
         self.assertNotIn('..', completed['filename'])
         self.assertIn('mirror-clip', server.video_clip_labels())
 
+    def test_mkv_video_export_uses_matroska_container(self):
+        commands = []
+
+        class FakeFFmpeg:
+            def __init__(self, command, **_kwargs):
+                commands.append(command)
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.output.write_bytes(b'fake mkv')
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        request = {'name': 'matroska clip', 'width': 64, 'height': 64, 'fps': 24,
+                   'frames': 1, 'quality': 'standard', 'format': 'mkv'}
+        frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg):
+            code, started = self.request('POST', '/api/video/start', request)
+            self.assertEqual(code, 201)
+            self.assertTrue(started['filename'].endswith('.mkv'))
+            self.assertNotIn('-movflags', commands[0])
+            self.assertEqual(commands[0][-3:-1], ['-f', 'matroska'])
+            self.assertTrue(str(commands[0][-1]).endswith('.pending.mkv'))
+            self.assertEqual(self.raw_request(
+                'POST', f"/api/video/frame?id={started['id']}&frame=0", frame,
+                {'Content-Type': 'image/png'})[0], 201)
+            code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
+            self.assertEqual(code, 201)
+        self.assertTrue(completed['filename'].endswith('.mkv'))
+        metadata = json.loads((server.ROOT / completed['url'].lstrip('/')).with_suffix('.json').read_text())
+        self.assertEqual(metadata['format'], 'mkv')
+        self.assertIn('matroska-clip', server.video_clip_labels())
+
     def test_video_cancel_does_not_wait_for_frame_lock(self):
         class FakeProcess:
             def __init__(self):
@@ -292,12 +334,17 @@ class StudioAPITest(unittest.TestCase):
             code, capabilities = self.request('GET', '/api/video/capabilities')
             self.assertEqual(code, 200)
             self.assertFalse(capabilities['available'])
+            self.assertEqual(capabilities['formats'], ['mp4', 'mkv'])
             code, result = self.request('POST', '/api/video/start', {
                 'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60, 'quality': 'standard'})
             self.assertEqual(code, 400)
             self.assertIn('ffmpeg', result['error'])
         with self.assertRaises(ValueError):
             server.validate_video_request({'width': 1919, 'height': 1080, 'fps': 60, 'frames': 60, 'quality': 'standard'})
+        with self.assertRaisesRegex(ValueError, 'format'):
+            server.validate_video_request({
+                'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60,
+                'quality': 'standard', 'format': 'avi'})
 
     def test_publish_creates_standalone_work_and_catalog(self):
         payload = self.payload()

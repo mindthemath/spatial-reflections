@@ -33,7 +33,7 @@ pending_encoders() {
     # pid and the pending path, one encoder per line. Only this repo's unfinished videos.
     pgrep -lf ffmpeg 2>/dev/null | while read -r pid command; do
         case $command in
-            *"$root/videos/"*.pending.mp4*)
+            *"$root/videos/"*.pending.mp4|*"$root/videos/"*.pending.mkv)
                 path=${command##* }
                 printf '%s %s\n' "$pid" "$path"
                 ;;

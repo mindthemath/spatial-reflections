@@ -22,6 +22,7 @@ MAX_BODY = 100 * 1024 * 1024  # Legacy JSON export limit; Studio uses streamed P
 MAX_FACE_BYTES = 512 * 1024 * 1024
 PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
 VIDEO_QUALITIES = {'draft': 0.035, 'standard': 0.07, 'high': 0.12}
+VIDEO_FORMATS = ('mp4', 'mkv')
 MAX_VIDEO_FRAME_BYTES = 100 * 1024 * 1024
 MAX_VIDEO_FRAMES = 10_000_000
 VIDEO_FRAME_READ_TIMEOUT = 30
@@ -189,8 +190,8 @@ def video_clip_labels():
     labels = []
     if not parent.is_dir():
         return labels
-    pattern = re.compile(r'^(.+)-\d{8}T\d{6}Z-[a-f0-9]{8}\.mp4$')
-    for path in sorted(parent.glob('*.mp4')):
+    pattern = re.compile(r'^(.+)-\d{8}T\d{6}Z-[a-f0-9]{8}\.(?:mp4|mkv)$')
+    for path in sorted((*parent.glob('*.mp4'), *parent.glob('*.mkv'))):
         if not path.is_file() or path.name.startswith('.') or not path.resolve().is_relative_to(parent.resolve()):
             continue
         match = pattern.fullmatch(path.name)
@@ -201,8 +202,9 @@ def video_clip_labels():
 
 def video_capabilities():
     ffmpeg = shutil.which('ffmpeg')
-    return {'available': bool(ffmpeg), 'encoder': 'H.264 / MP4' if ffmpeg else None,
-            'qualities': list(VIDEO_QUALITIES), 'freeBytes': shutil.disk_usage(ROOT).free,
+    return {'available': bool(ffmpeg), 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
+            'qualities': list(VIDEO_QUALITIES), 'formats': list(VIDEO_FORMATS),
+            'freeBytes': shutil.disk_usage(ROOT).free,
             'clips': video_clip_labels(),
             'reason': None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'}
 
@@ -213,6 +215,7 @@ def validate_video_request(request):
     fps = int(request.get('fps', 0))
     frames = int(request.get('frames', 0))
     quality = request.get('quality', 'standard')
+    video_format = request.get('format', 'mp4')
     if width < 64 or height < 64 or width > 7680 or height > 4320 or width % 2 or height % 2:
         raise ValueError('Video dimensions must be even and between 64×64 and 7680×4320')
     if fps not in (24, 25, 30, 50, 60):
@@ -221,16 +224,19 @@ def validate_video_request(request):
         raise ValueError(f'Video must contain between 1 and {MAX_VIDEO_FRAMES:,} frames')
     if quality not in VIDEO_QUALITIES:
         raise ValueError('Unsupported video quality')
+    if video_format not in VIDEO_FORMATS:
+        raise ValueError('Unsupported video format')
     bit_rate = round(width * height * fps * VIDEO_QUALITIES[quality])
     estimate = round(bit_rate * (frames / fps) / 8 * 1.03)
-    return width, height, fps, frames, quality, bit_rate, estimate
+    return width, height, fps, frames, quality, video_format, bit_rate, estimate
 
 
 def start_video(request):
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
-    width, height, fps, frames, quality, bit_rate, estimate = validate_video_request(request)
+    width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
+    request = {**request, 'format': video_format}
     label = re.sub(r'[^a-zA-Z0-9_-]+', '-', str(request.get('name', 'tesseract')))[:60].strip('-') or 'tesseract'
     timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     job_id = uuid.uuid4().hex
@@ -239,14 +245,15 @@ def start_video(request):
     free_bytes = shutil.disk_usage(parent).free
     if estimate > free_bytes * 0.9:
         raise ValueError(f'Estimated video size exceeds available disk space ({free_bytes:,} bytes free)')
-    filename = f'{label}-{timestamp}-{job_id[:8]}.mp4'
+    filename = f'{label}-{timestamp}-{job_id[:8]}.{video_format}'
     final_path = parent / filename
-    pending_path = parent / f'.{filename}.pending.mp4'
+    pending_path = parent / f'.{final_path.stem}.pending{final_path.suffix}'
+    container_args = ['-movflags', '+faststart'] if video_format == 'mp4' else ['-f', 'matroska']
     command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe',
                '-framerate', str(fps), '-vcodec', 'png', '-i', 'pipe:0', '-an',
                '-c:v', 'libx264', '-preset', 'medium', '-b:v', str(bit_rate),
                '-maxrate', str(round(bit_rate * 1.5)), '-bufsize', str(bit_rate * 2),
-               '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(pending_path)]
+               '-pix_fmt', 'yuv420p', *container_args, str(pending_path)]
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     job = {'id': job_id, 'process': process, 'lock': threading.Lock(), 'width': width, 'height': height,
            'fps': fps, 'frames': frames, 'received': 0, 'quality': quality, 'bitRate': bit_rate,
