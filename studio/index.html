@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Skybox Studio</title>
+<link rel="stylesheet" href="studio.css">
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.155.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.155.0/examples/jsm/"}}</script>
+</head>
+<body>
+<header><strong>SKYBOX / STUDIO</strong><input id="name" aria-label="Artwork name" value="untitled"><label>Output <select id="size"><option>512</option><option selected>1024</option><option>2048</option></select> px</label><button id="save">Save JSON</button><button id="restore">Load JSON</button><input id="snapshot" type="file" accept=".json" hidden><button id="export">Export folder</button><a href="/" target="_blank" rel="noopener">Viewer ↗</a></header>
+<main>
+<aside><div class="heading">SOURCE LIBRARY <button id="refresh">↻</button></div><p>Place photographs in <code>raw/</code>. Click a photo to add a source node.</p><div id="library"></div></aside>
+<section id="workspace"><div id="toolbar"><button id="crop" title="Add geometry node (C)">+ Frame</button><button id="light" title="Add lighting node (L)">+ Light</button><button id="info" title="Add analysis node (I)">+ Info</button><button id="undo" title="Undo (⌘/Ctrl Z)">↶</button><button id="redo" title="Redo (⌘/Ctrl Shift Z)">↷</button><button id="fit" title="Frame graph (F)">Frame all</button><button id="shortcuts" title="Keyboard shortcuts (?)">?</button></div><div id="viewport"><div id="graph"><svg id="wires"></svg><div id="nodes"></div></div><div id="marquee" hidden></div></div></section>
+<div id="preview-resizer" class="resizer vertical" role="separator" aria-label="Resize preview sidebar" aria-orientation="vertical" tabindex="0"></div>
+<section id="preview"><div class="heading">LIVE PREVIEW <small>drag divider to resize</small></div><div id="three"></div><div id="preview-height-resizer" class="resizer horizontal" role="separator" aria-label="Resize 3D preview height" aria-orientation="horizontal" tabindex="0"></div><div class="preview-tools"><button id="inside">Inside / orbit</button><label><input type="checkbox" id="background" checked> Environment</label></div><div id="faces"></div><div id="inspector"><p>Select a node to edit. Each face needs a source or transform connection.</p></div></section>
+</main><footer id="status" role="status">Loading studio…</footer>
+<dialog id="shortcut-guide"><div class="heading">SANDBOX / SHORTCUTS <button id="close-shortcuts">Close</button></div><dl class="stats"><dt>Undo / redo</dt><dd>⌘/Ctrl Z · Shift Z / Ctrl Y</dd><dt>Delete selected nodes / edge</dt><dd>Delete / Backspace</dd><dt>Duplicate selection</dt><dd>⌘/Ctrl D</dd><dt>Select all</dt><dd>⌘/Ctrl A</dd><dt>Multi-select</dt><dd>Shift click / Shift drag empty space</dd><dt>Add Frame / Light / Info</dt><dd>C / L / I</dd><dt>Frame graph / selection</dt><dd>F / Shift F</dd><dt>Save / load JSON</dt><dd>⌘/Ctrl S / O</dd><dt>Export folder</dt><dd>⌘/Ctrl Shift S</dd><dt>Cancel wire / deselect</dt><dd>Esc</dd><dt>Show this guide</dt><dd>?</dd></dl><p>Click empty space to deselect. Drag empty space to pan. Drag ports to connect, or click output then input. Click a cable to reveal both rewire handles. Drop an existing endpoint on empty space to disconnect. Double-click a slider label to reset it.</p></dialog>
+<script type="module" src="studio.js"></script>
+</body></html>
