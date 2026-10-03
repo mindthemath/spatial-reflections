@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import uuid
+import fcntl
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,6 +42,15 @@ def _fsync_directory(path):
         pass
 
 
+def _durable_fsync(stream):
+    try:
+        os.fsync(stream.fileno())
+        if hasattr(fcntl, 'F_FULLFSYNC'):
+            fcntl.fcntl(stream.fileno(), fcntl.F_FULLFSYNC)
+    except OSError:
+        pass
+
+
 def atomic_write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
@@ -49,10 +59,7 @@ def atomic_write_json(path, value):
             json.dump(value, stream, indent=2)
             stream.write('\n')
             stream.flush()
-            try:
-                os.fsync(stream.fileno())
-            except OSError:
-                pass
+            _durable_fsync(stream)
         temporary.replace(path)
         _fsync_directory(path.parent)
     finally:
@@ -70,6 +77,7 @@ class VideoJobStore:
         self.job_locks = {}
         self.active = {}
         self.leases = {}
+        self.owners = {}
         self.popen = subprocess.Popen
         self.run = subprocess.run
         self.clock = time.monotonic
@@ -112,7 +120,12 @@ class VideoJobStore:
         if (value.get('schemaVersion') != SCHEMA_VERSION or value.get('id') != job_id
                 or not isinstance(value.get('request'), dict)
                 or not isinstance(value.get('segments'), list)
-                or not isinstance(value.get('nextFrame'), int)):
+                or not isinstance(value.get('nextFrame'), int)
+                or not isinstance(value.get('scratchPath'), str)
+                or not isinstance(value.get('createdAt'), str)
+                or not isinstance(value.get('updatedAt'), str)
+                or not isinstance(value.get('state'), str)
+                or not isinstance(value['request'].get('frames'), int)):
             raise ValueError('Video export manifest has an unsupported schema')
         return path, value
 
@@ -147,65 +160,75 @@ class VideoJobStore:
         if checkpoint_seconds < 1 or checkpoint_seconds > 3600:
             raise ValueError('Checkpoint duration must be between 1 and 3,600 seconds')
 
-        with self.lock:
-            job_id = uuid.uuid4().hex
-            configured_value = request.get('scratchPath')
-            if configured_value is not None and not isinstance(configured_value, str):
-                raise ValueError('Video scratch path must be text')
-            configured = str(configured_value or '').strip()
-            scratch_base = (Path(configured).expanduser() if configured
-                            else self.videos / '.checkpoints').resolve()
-            job_dir = scratch_base / job_id
-            job_dir.mkdir(parents=True, exist_ok=False)
-            now = utc_now()
-            normalized = {
-                **request,
-                'fps': fps,
-                'frames': frames,
-                'checkpointSeconds': checkpoint_seconds,
-                'scratchPath': str(scratch_base),
-            }
-            job = {
-                'schemaVersion': SCHEMA_VERSION,
-                'id': job_id,
-                'state': 'paused',
-                'request': normalized,
-                'scratchPath': str(scratch_base),
-                'nextFrame': 0,
-                'segments': [],
-                'resumeCount': 0,
-                'error': None,
-                'createdAt': now,
-                'updatedAt': now,
-            }
-            manifest = job_dir / 'job.json'
-            try:
-                atomic_write_json(manifest, job)
+        job_id = uuid.uuid4().hex
+        configured_value = request.get('scratchPath')
+        if configured_value is not None and not isinstance(configured_value, str):
+            raise ValueError('Video scratch path must be text')
+        configured = str(configured_value or '').strip()
+        if configured:
+            supplied = Path(configured).expanduser()
+            if not supplied.is_absolute():
+                raise ValueError('Video scratch path must be absolute')
+            scratch_base = supplied.resolve()
+            if not scratch_base.is_dir():
+                raise ValueError('Video scratch path must already exist and be a directory')
+        else:
+            scratch_base = (self.videos / '.checkpoints').resolve()
+            scratch_base.mkdir(parents=True, exist_ok=True)
+        job_dir = scratch_base / job_id
+        job_dir.mkdir(exist_ok=False)
+        now = utc_now()
+        normalized = {
+            **request,
+            'fps': fps,
+            'frames': frames,
+            'checkpointSeconds': checkpoint_seconds,
+            'scratchPath': str(scratch_base),
+        }
+        job = {
+            'schemaVersion': SCHEMA_VERSION,
+            'id': job_id,
+            'state': 'paused',
+            'request': normalized,
+            'scratchPath': str(scratch_base),
+            'nextFrame': 0,
+            'segments': [],
+            'resumeCount': 0,
+            'error': None,
+            'createdAt': now,
+            'updatedAt': now,
+        }
+        manifest = job_dir / 'job.json'
+        try:
+            atomic_write_json(manifest, job)
+            with self.lock:
                 index = self._read_index()
                 index['jobs'][job_id] = {'manifest': str(manifest)}
                 self._write_index(index)
-            except Exception:
-                shutil.rmtree(job_dir, ignore_errors=True)
-                raise
-            return self._public(manifest, job)
+        except Exception:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise
+        return self._public(manifest, job)
 
     def list_jobs(self):
         with self.lock:
             index = self._read_index()
-            result = []
-            for job_id, entry in index['jobs'].items():
-                manifest = Path(entry.get('manifest', ''))
-                try:
-                    _, job = self._load(job_id)
-                    result.append(self._public(manifest, job))
-                except ValueError as error:
-                    result.append({
-                        'id': job_id,
-                        'state': 'unavailable',
-                        'reason': str(error),
-                        'manifestPath': str(manifest),
-                    })
-            return sorted(result, key=lambda item: item.get('createdAt', ''))
+        result = []
+        for job_id, entry in index['jobs'].items():
+            manifest = Path(entry.get('manifest', '')) if isinstance(entry, dict) else Path()
+            try:
+                if not isinstance(entry, dict):
+                    raise ValueError('Video job index entry is invalid')
+                _, job = self._load(job_id)
+                result.append(self._public(manifest, job))
+            except Exception as error:
+                result.append({
+                    'id': job_id,
+                    'state': 'unavailable',
+                    'reason': str(error),
+                    'manifestPath': str(manifest),
+                })
+        return sorted(result, key=lambda item: item.get('createdAt', ''))
 
     def get(self, job_id):
         with self._job_lock(job_id):
@@ -224,7 +247,13 @@ class VideoJobStore:
         timestamp = created.strftime('%Y%m%dT%H%M%SZ')
         return f"{label}-{timestamp}-{job_id[:8]}.{request.get('format', 'mp4')}"
 
-    def _verify_segments(self, manifest, job):
+    def _remove_pending_output(self, job_id):
+        if not self.videos.is_dir():
+            return
+        for path in self.videos.glob(f'.*-{job_id[:8]}.pending.*'):
+            path.unlink(missing_ok=True)
+
+    def _verify_segments(self, manifest, job, repair=False):
         job_dir = manifest.parent.resolve()
         recorded = set()
         expected_first = 0
@@ -238,15 +267,31 @@ class VideoJobStore:
             path = (job_dir / name).resolve()
             if path.parent != job_dir:
                 raise ValueError('Video checkpoint path escapes scratch storage')
-            if not path.is_file():
-                raise ValueError(f'Video checkpoint is missing: {name}')
             if segment.get('firstFrame') != expected_first:
                 raise ValueError('Video checkpoint frame sequence is invalid')
             frames = int(segment.get('frames', 0))
-            if frames < 1 or path.stat().st_size != segment.get('bytes'):
-                raise ValueError(f'Video checkpoint integrity check failed: {name}')
-            if sha256_file(path) != segment.get('sha256'):
-                raise ValueError(f'Video checkpoint integrity check failed: {name}')
+            valid = (
+                frames >= 1
+                and path.is_file()
+                and path.stat().st_size == segment.get('bytes')
+                and sha256_file(path) == segment.get('sha256')
+            )
+            if not valid:
+                if not repair:
+                    raise ValueError(f'Video checkpoint integrity check failed: {name}')
+                quarantine = job_dir / 'quarantine'
+                quarantine.mkdir(exist_ok=True)
+                for damaged in job['segments'][expected_index:]:
+                    damaged_path = job_dir / str(damaged.get('file', ''))
+                    if damaged_path.is_file() and damaged_path.parent.resolve() == job_dir:
+                        damaged_path.replace(quarantine / damaged_path.name)
+                lost = job['nextFrame'] - expected_first
+                job['segments'] = job['segments'][:expected_index]
+                job['nextFrame'] = expected_first
+                job['state'] = 'paused'
+                job['error'] = f'Checkpoint damage detected; {lost:,} frames will be rerendered'
+                self._save(manifest, job)
+                break
             expected_first += frames
             recorded.add(path)
         if expected_first != job['nextFrame']:
@@ -258,39 +303,83 @@ class VideoJobStore:
             if path.resolve() not in recorded:
                 path.unlink(missing_ok=True)
 
+    def _acquire_owner(self, manifest, job_id):
+        owner_path = manifest.parent / '.owner.lock'
+        stream = owner_path.open('a+')
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            stream.close()
+            raise ValueError('Video export is active in another server process') from error
+        stream.seek(0)
+        stream.truncate()
+        stream.write(json.dumps({'pid': os.getpid(), 'leaseOwner': job_id}) + '\n')
+        stream.flush()
+        with self.lock:
+            self.owners[job_id] = stream
+
+    def _release_owner(self, job_id):
+        with self.lock:
+            stream = self.owners.pop(job_id, None)
+        if stream:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            finally:
+                stream.close()
+
     def resume(self, job_id):
-        with self._job_lock(job_id), self.lock:
+        with self.lock:
             if job_id in self.leases:
                 raise ValueError('Video export is already active in another browser')
+        self._interrupt_active_segment(job_id)
+        with self._job_lock(job_id):
             manifest, job = self._load(job_id)
-            self._verify_segments(manifest, job)
+            self._remove_pending_output(job_id)
+            self._acquire_owner(manifest, job_id)
             lease = uuid.uuid4().hex
-            self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
-            job['state'] = 'active'
-            job['error'] = None
-            job['resumeCount'] = int(job.get('resumeCount', 0)) + 1
-            self._save(manifest, job)
-            result = self._public(manifest, job)
-            result['lease'] = lease
-            return result
+            try:
+                with self.lock:
+                    if job_id in self.leases:
+                        raise ValueError('Video export is already active in another browser')
+                    self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
+                self._verify_segments(manifest, job, repair=True)
+                job['state'] = 'active'
+                job['resumeCount'] = int(job.get('resumeCount', 0)) + 1
+                self._save(manifest, job)
+                result = self._public(manifest, job)
+                result['lease'] = lease
+                return result
+            except Exception:
+                with self.lock:
+                    self.leases.pop(job_id, None)
+                self._release_owner(job_id)
+                raise
 
     def _interrupt_active_segment(self, job_id):
         with self.lock:
             runtime = self.active.pop(job_id, None)
             self.leases.pop(job_id, None)
         if not runtime:
+            self._release_owner(job_id)
             return
         process = runtime.get('process')
+        stopped = not process or process.poll() is not None
         if process and process.poll() is None:
-            process.kill()
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-        if process and process.stdin:
-            process.stdin.close()
-        runtime['pending'].unlink(missing_ok=True)
+                stopped = True
+            except Exception:
+                pass
+        if stopped and process and process.stdin:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+        pending = runtime.get('pending')
+        if pending:
+            pending.unlink(missing_ok=True)
+        self._release_owner(job_id)
 
     def pause(self, job_id, reason=None, lease=None):
         with self.lock:
@@ -300,7 +389,7 @@ class VideoJobStore:
         # Kill the encoder before taking the per-job lock. A frame writer may be
         # blocked in the pipe, and killing ffmpeg is what wakes that writer.
         self._interrupt_active_segment(job_id)
-        with self._job_lock(job_id), self.lock:
+        with self._job_lock(job_id):
             manifest, job = self._load(job_id)
             for path in manifest.parent.glob('.segment-*.pending.mkv'):
                 path.unlink(missing_ok=True)
@@ -318,6 +407,12 @@ class VideoJobStore:
             int(request.get('width', 1280)) * int(request.get('height', 720))
             * int(request['fps']) * 0.07,
         ))
+        checkpoint_bytes = max(1, bit_rate * int(request['checkpointSeconds']) // 8)
+        free_bytes = shutil.disk_usage(manifest.parent).free
+        if checkpoint_bytes > free_bytes * 0.9:
+            raise ValueError(
+                f'Not enough scratch space for the next checkpoint ({free_bytes:,} bytes free)'
+            )
         command = [
             self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
             '-f', 'image2pipe', '-framerate', str(request['fps']),
@@ -346,18 +441,25 @@ class VideoJobStore:
 
     def _fail_active_segment(self, job_id, runtime, message):
         process = runtime['process']
+        stopped = process.poll() is not None
         if process.poll() is None:
-            process.kill()
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
                 process.kill()
-        if process.stdin:
-            process.stdin.close()
-        runtime['pending'].unlink(missing_ok=True)
+                process.wait(timeout=5)
+                stopped = True
+            except Exception:
+                pass
+        if stopped and process.stdin:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+        if runtime.get('pending'):
+            runtime['pending'].unlink(missing_ok=True)
         with self.lock:
             self.active.pop(job_id, None)
             self.leases.pop(job_id, None)
+        self._release_owner(job_id)
         job = runtime['job']
         job['state'] = 'paused'
         job['error'] = message
@@ -377,10 +479,7 @@ class VideoJobStore:
 
         try:
             with runtime['pending'].open('rb') as stream:
-                try:
-                    os.fsync(stream.fileno())
-                except OSError:
-                    pass
+                _durable_fsync(stream)
             segment_index = len(runtime['job']['segments'])
             final = runtime['manifest'].parent / f'segment-{segment_index:06d}.mkv'
             runtime['pending'].replace(final)
@@ -423,6 +522,15 @@ class VideoJobStore:
             if runtime is None:
                 manifest, job = self._load(job_id)
                 runtime = self._start_segment(manifest, job, lease)
+                with self.lock:
+                    current = self.leases.get(job_id)
+                    if not current or current['token'] != lease:
+                        invalidated = True
+                    else:
+                        invalidated = False
+                if invalidated:
+                    self._interrupt_active_segment(job_id)
+                    raise ValueError('Video export lease is no longer active')
             job = runtime['job']
             expected = job['nextFrame'] + runtime['written']
             if int(frame_index) != expected:
@@ -458,27 +566,34 @@ class VideoJobStore:
         for job_id in stale:
             try:
                 self.pause(job_id, 'Export paused after five minutes without a frame')
-            except ValueError:
+            except Exception:
                 pass
         return stale
 
     def pause_all(self):
         with self.lock:
-            job_ids = list(self.leases)
+            job_ids = set(self.leases) | set(self.active) | set(self.owners)
         for job_id in job_ids:
             try:
                 self.pause(job_id, 'Local video server stopped')
-            except (OSError, ValueError):
+            except Exception:
                 pass
 
     def discard(self, job_id):
         self._interrupt_active_segment(job_id)
-        with self._job_lock(job_id), self.lock:
-            manifest, _job = self._load(job_id)
-            shutil.rmtree(manifest.parent, ignore_errors=True)
-            index = self._read_index()
-            index['jobs'].pop(job_id, None)
-            self._write_index(index)
+        with self._job_lock(job_id):
+            if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
+                raise ValueError('Invalid video export id')
+            with self.lock:
+                index = self._read_index()
+                entry = index['jobs'].pop(job_id, None)
+                self._write_index(index)
+            if not entry:
+                raise ValueError('Video export is missing or already complete')
+            manifest = Path(entry.get('manifest', '')) if isinstance(entry, dict) else None
+            if manifest:
+                shutil.rmtree(manifest.parent, ignore_errors=True)
+            self._remove_pending_output(job_id)
 
     def finish(self, job_id):
         with self._job_lock(job_id):
@@ -521,17 +636,21 @@ class VideoJobStore:
             job['error'] = None
             self._save(manifest, job)
             try:
+                total_bytes = sum(segment['bytes'] for segment in job['segments'])
+                free_bytes = shutil.disk_usage(self.videos).free
+                if total_bytes > free_bytes * 0.9:
+                    raise ValueError(
+                        f'Not enough output space to finalize video ({free_bytes:,} bytes free)'
+                    )
                 completed = self.run(
-                    command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    timeout=3600,
+                    command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    timeout=max(3600, total_bytes // 1_000_000),
                 )
                 if completed.returncode != 0 or not pending_path.is_file():
-                    raise ValueError('ffmpeg could not finalize checkpointed video')
+                    detail = (getattr(completed, 'stderr', b'') or b'').decode(errors='replace')[-4096:].strip()
+                    raise ValueError(f'ffmpeg could not finalize checkpointed video{": " + detail if detail else ""}')
                 with pending_path.open('rb') as stream:
-                    try:
-                        os.fsync(stream.fileno())
-                    except OSError:
-                        pass
+                    _durable_fsync(stream)
                 pending_path.replace(final_path)
                 _fsync_directory(final_path.parent)
                 metadata = {
@@ -551,18 +670,20 @@ class VideoJobStore:
                 job['state'] = 'ready'
                 job['error'] = str(error)
                 self._save(manifest, job)
+                self._release_owner(job_id)
                 if isinstance(error, ValueError):
                     raise ValueError(f'Could not finalize video: {error}') from error
                 raise ValueError(f'Could not finalize video: {error}') from error
             finally:
                 concat_path.unlink(missing_ok=True)
 
-            shutil.rmtree(manifest.parent, ignore_errors=True)
             with self.lock:
                 index = self._read_index()
                 index['jobs'].pop(job_id, None)
                 self._write_index(index)
                 self.job_locks.pop(job_id, None)
+            self._release_owner(job_id)
+            shutil.rmtree(manifest.parent, ignore_errors=True)
             return {
                 'url': '/' + final_path.relative_to(self.root).as_posix(),
                 'filename': final_path.name,

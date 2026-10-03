@@ -114,7 +114,7 @@ Every video export is resumable. The default checkpoint interval is 60 seconds a
 
 Checkpoint segments ordinarily live under `videos/.checkpoints/`. The export dialog can instead use an absolute scratch folder on another local disk or a mounted SMB share. Plan scratch capacity for roughly the final encoded video size plus one active segment and the final output; free-space checks for the final output still apply to `videos/`. For network storage:
 
-- mount the share before starting or resuming and keep the mount path stable;
+- mount the share before starting or resuming, create the selected absolute scratch directory in advance, and keep the mount path stable;
 - prefer a reliable wired connection and prevent the workstation and storage from sleeping;
 - do not let two machines write the same scratch job;
 - expect a disconnected share to show the job as unavailable until the same path is mounted again.

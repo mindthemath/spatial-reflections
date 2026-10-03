@@ -162,7 +162,7 @@ window.addEventListener('pagehide', () => {
         const body = new Blob([JSON.stringify({
             id: activeVideoExportJob.id,
             lease: activeVideoExportJob.lease
-        })], { type: 'application/json' });
+        })], { type: 'text/plain' });
         navigator.sendBeacon('/api/video/pause', body);
     }
 });
@@ -1639,16 +1639,17 @@ async function loadVideoResumeJobs() {
             const request = job.request || {};
             const sourceMatches = request.sourceUrl === location.pathname + location.search;
             const settingsMatch = request.renderSignature === videoRenderSignature();
-            const available = job.state !== 'unavailable' && sourceMatches && settingsMatch;
+            const fullyRendered = job.nextFrame === job.frames;
+            const available = job.state !== 'unavailable' && (fullyRendered || (sourceMatches && settingsMatch));
             const reason = job.state === 'unavailable'
                 ? job.reason
-                : !sourceMatches || !settingsMatch ? 'Current source or render settings do not match.' : '';
+                : !fullyRendered && (!sourceMatches || !settingsMatch) ? 'Current source or render settings do not match.' : '';
             const description = document.createElement('span');
             description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}`;
             const resume = document.createElement('button');
             resume.type = 'button';
             resume.className = 'resume-video-export';
-            resume.textContent = 'Resume';
+            resume.textContent = fullyRendered ? 'Finalize' : 'Resume';
             resume.disabled = !available;
             resume.addEventListener('click', () => {
                 const plan = videoExportPlanFromRequest(request);
@@ -1671,7 +1672,27 @@ async function loadVideoResumeJobs() {
                 });
                 await loadVideoResumeJobs();
             });
-            card.append(description, resume, discard);
+            card.append(description, resume);
+            if (job.state !== 'unavailable' && sourceMatches && !settingsMatch && !fullyRendered && request.viewerState) {
+                const restore = document.createElement('button');
+                restore.type = 'button';
+                restore.className = 'restore-video-export';
+                restore.textContent = 'Restore export settings';
+                restore.addEventListener('click', async () => {
+                    applyViewerSettings(request.viewerState);
+                    camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
+                    controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
+                    controls.update();
+                    vertices.forEach(vertex => { vertex.visible = showVertices; });
+                    updateMaterials();
+                    refreshLoopTiming();
+                    persistViewerSettings();
+                    videoExportDialog.dataset.renderSignature = videoRenderSignature();
+                    await loadVideoResumeJobs();
+                });
+                card.append(restore);
+            }
+            card.append(discard);
             list.appendChild(card);
         }
         section.hidden = !list.children.length;
@@ -1887,7 +1908,7 @@ async function runVideoExport(plan, resumableJob = null) {
             const now = performance.now();
             if (now - lastProgressUpdate > 150 || frame + 1 === plan.frames) {
                 const elapsedSeconds = Math.max(0.001, (now - exportStartedAt) / 1000);
-                const renderRate = (frame + 1) / elapsedSeconds;
+                const renderRate = (frame - firstFrame + 1) / elapsedSeconds;
                 const remainingSeconds = (plan.frames - frame - 1) / renderRate;
                 status.textContent = `Rendering + encoding ${(frame + 1).toLocaleString()} / ${plan.frames.toLocaleString()} frames · ${Math.round((frame + 1) / plan.frames * 100)}% · checkpoint ${frameResult.durableFrame.toLocaleString()} · ${renderRate.toFixed(1)} fps · ETA ${formatDuration(remainingSeconds)}`;
                 lastProgressUpdate = now;

@@ -1,7 +1,9 @@
 import hashlib
 import io
 import json
+import shutil
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -34,6 +36,7 @@ class VideoJobStoreTest(unittest.TestCase):
         self.store = VideoJobStore(self.root, '/fake/ffmpeg')
 
     def tearDown(self):
+        self.store.pause_all()
         self.temp.cleanup()
 
     def manifest(self, job):
@@ -78,6 +81,7 @@ class VideoJobStoreTest(unittest.TestCase):
 
     def test_custom_scratch_job_survives_store_recreation(self):
         scratch = self.root / 'mounted-share' / 'scratch'
+        scratch.mkdir(parents=True)
         created = self.store.create(request(scratchPath=str(scratch)))
         recreated = VideoJobStore(self.root, '/fake/ffmpeg')
         jobs = recreated.list_jobs()
@@ -87,6 +91,7 @@ class VideoJobStoreTest(unittest.TestCase):
 
     def test_missing_custom_scratch_is_reported_unavailable(self):
         scratch = self.root / 'mounted-share'
+        scratch.mkdir()
         created = self.store.create(request(scratchPath=str(scratch)))
         manifest = self.manifest(created)
         for path in manifest.parent.iterdir():
@@ -97,7 +102,7 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(jobs[0]['state'], 'unavailable')
         self.assertIn('not available', jobs[0]['reason'])
 
-    def test_resume_rejects_missing_recorded_segment(self):
+    def test_resume_rolls_back_missing_recorded_segment(self):
         job = self.store.create(request())
         manifest = json.loads(self.manifest(job).read_text())
         manifest['segments'] = [{
@@ -106,10 +111,11 @@ class VideoJobStoreTest(unittest.TestCase):
         }]
         manifest['nextFrame'] = 1800
         self.write_manifest(job, manifest)
-        with self.assertRaisesRegex(ValueError, 'missing'):
-            self.store.resume(job['id'])
+        resumed = self.store.resume(job['id'])
+        self.assertEqual(resumed['nextFrame'], 0)
+        self.assertEqual(resumed['segments'], [])
 
-    def test_resume_rejects_hash_mismatched_segment(self):
+    def test_resume_rolls_back_hash_mismatched_segment(self):
         job = self.store.create(request())
         segment = self.manifest(job).parent / 'segment-000000.mkv'
         segment.write_bytes(b'actual')
@@ -121,8 +127,123 @@ class VideoJobStoreTest(unittest.TestCase):
         }]
         manifest['nextFrame'] = 1800
         self.write_manifest(job, manifest)
-        with self.assertRaisesRegex(ValueError, 'integrity'):
-            self.store.resume(job['id'])
+        resumed = self.store.resume(job['id'])
+        self.assertEqual(resumed['nextFrame'], 0)
+        self.assertFalse(segment.exists())
+        self.assertTrue((self.manifest(job).parent / 'quarantine' / segment.name).exists())
+
+    def test_custom_scratch_must_be_existing_absolute_directory(self):
+        with self.assertRaisesRegex(ValueError, 'absolute'):
+            self.store.create(request(scratchPath='relative/scratch'))
+        missing = self.root / 'not-mounted'
+        with self.assertRaisesRegex(ValueError, 'already exist'):
+            self.store.create(request(scratchPath=str(missing)))
+
+    def test_malformed_job_does_not_hide_healthy_jobs(self):
+        healthy = self.store.create(request())
+        malformed_id = 'f' * 32
+        index = json.loads(self.store.index_path.read_text())
+        index['jobs'][malformed_id] = 'not-an-object'
+        self.store.index_path.write_text(json.dumps(index))
+        jobs = self.store.list_jobs()
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(next(job for job in jobs if job['id'] == healthy['id'])['state'], 'paused')
+        self.assertEqual(next(job for job in jobs if job['id'] == malformed_id)['state'], 'unavailable')
+
+    def test_discard_removes_unavailable_job_from_index(self):
+        scratch = self.root / 'mounted'
+        scratch.mkdir()
+        job = self.store.create(request(scratchPath=str(scratch)))
+        shutil.rmtree(scratch)
+        self.store.discard(job['id'])
+        self.assertEqual(self.store.list_jobs(), [])
+
+    def test_second_store_cannot_claim_same_job(self):
+        job = self.store.create(request())
+        first = self.store.resume(job['id'])
+        other = VideoJobStore(self.root, '/fake/ffmpeg')
+        with self.assertRaisesRegex(ValueError, 'another server'):
+            other.resume(job['id'])
+        self.store.pause(job['id'], lease=first['lease'])
+        claimed = other.resume(job['id'])
+        other.pause(job['id'], lease=claimed['lease'])
+
+    def test_resume_cleans_orphaned_active_encoder(self):
+        class Orphan:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.killed = False
+            def poll(self):
+                return None
+            def kill(self):
+                self.killed = True
+            def wait(self, timeout=None):
+                return 0
+
+        job = self.store.create(request())
+        process = Orphan()
+        pending = self.manifest(job).parent / '.segment-000000.pending.mkv'
+        pending.write_bytes(b'partial')
+        self.store.active[job['id']] = {'process': process, 'pending': pending}
+        resumed = self.store.resume(job['id'])
+        self.assertTrue(process.killed)
+        self.assertFalse(pending.exists())
+        self.store.pause(job['id'], lease=resumed['lease'])
+
+    def test_pause_racing_first_frame_does_not_leave_encoder(self):
+        registered = threading.Event()
+        continue_write = threading.Event()
+        killed = threading.Event()
+
+        class WaitingProcess:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.returncode = None
+                self.output = Path(command[-1])
+            def poll(self):
+                return self.returncode
+            def kill(self):
+                self.returncode = -9
+                killed.set()
+            def wait(self, timeout=None):
+                return self.returncode
+
+        self.store.popen = WaitingProcess
+        original_start = self.store._start_segment
+
+        def delayed_start(*args):
+            runtime = original_start(*args)
+            registered.set()
+            continue_write.wait(2)
+            return runtime
+
+        self.store._start_segment = delayed_start
+        job = self.store.create(request())
+        active = self.store.resume(job['id'])
+        write_errors = []
+        writer = threading.Thread(target=lambda: self._capture_error(
+            write_errors,
+            lambda: self.store.write_frame(job['id'], 0, b'png', active['lease'])))
+        writer.start()
+        self.assertTrue(registered.wait(2))
+        pauser = threading.Thread(target=lambda: self.store.pause(
+            job['id'], 'navigation', active['lease']))
+        pauser.start()
+        self.assertTrue(killed.wait(2))
+        continue_write.set()
+        writer.join(2)
+        pauser.join(2)
+        self.assertFalse(writer.is_alive())
+        self.assertFalse(pauser.is_alive())
+        self.assertRegex(str(write_errors[0]), 'lease')
+        self.assertNotIn(job['id'], self.store.active)
+
+    @staticmethod
+    def _capture_error(errors, action):
+        try:
+            action()
+        except Exception as error:
+            errors.append(error)
 
     def test_resume_removes_unrecorded_and_pending_segments(self):
         job = self.store.create(request())

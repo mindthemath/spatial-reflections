@@ -219,6 +219,8 @@ def video_store():
         raise ValueError('Video export requires ffmpeg on the local server PATH')
     root = ROOT.resolve()
     if VIDEO_STORE is None or VIDEO_STORE.root != root or VIDEO_STORE.ffmpeg != str(ffmpeg):
+        if VIDEO_STORE is not None:
+            VIDEO_STORE.pause_all()
         VIDEO_STORE = VideoJobStore(root, ffmpeg)
     # Keep dependency injection and unittest patches applied to subprocess.
     VIDEO_STORE.popen = subprocess.Popen
@@ -262,9 +264,22 @@ def start_video(request):
     }
     parent = ROOT / 'videos'
     parent.mkdir(exist_ok=True)
-    free_bytes = shutil.disk_usage(parent).free
-    if estimate > free_bytes * 0.9:
-        raise ValueError(f'Estimated video size exceeds available disk space ({free_bytes:,} bytes free)')
+    configured_scratch = request.get('scratchPath')
+    if configured_scratch is not None and not isinstance(configured_scratch, str):
+        raise ValueError('Video scratch path must be text')
+    scratch = (Path(configured_scratch).expanduser() if str(configured_scratch or '').strip()
+               else parent / '.checkpoints')
+    if configured_scratch and (not scratch.is_absolute() or not scratch.is_dir()):
+        raise ValueError('Video scratch path must be an existing absolute directory')
+    scratch.mkdir(parents=True, exist_ok=True)
+    output_free = shutil.disk_usage(parent).free
+    scratch_free = shutil.disk_usage(scratch).free
+    same_storage = parent.stat().st_dev == scratch.stat().st_dev
+    output_required = estimate * (2 if same_storage else 1)
+    if output_required > output_free * 0.9:
+        raise ValueError(f'Estimated video and checkpoints exceed output disk space ({output_free:,} bytes free)')
+    if not same_storage and estimate > scratch_free * 0.9:
+        raise ValueError(f'Estimated checkpoints exceed scratch disk space ({scratch_free:,} bytes free)')
     store = video_store()
     created = store.create(request)
     try:
@@ -566,7 +581,7 @@ class StudioHTTPServer(ThreadingHTTPServer):
         try:
             if VIDEO_STORE is not None:
                 VIDEO_STORE.pause_stale_jobs()
-        except (OSError, ValueError):
+        except Exception:
             pass
 
 

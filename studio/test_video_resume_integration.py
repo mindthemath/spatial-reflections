@@ -73,6 +73,7 @@ class VideoResumeIntegrationTest(unittest.TestCase):
         for video_format in ('mp4', 'mkv'):
             with self.subTest(video_format=video_format):
                 scratch = self.root / f'scratch-{video_format}'
+                scratch.mkdir()
                 store = VideoJobStore(self.root, self.ffmpeg)
                 created = store.create(self.request(video_format, scratch))
                 lease = store.resume(created['id'])['lease']
