@@ -39,6 +39,73 @@ let loopInfoDisplay;
 let timelineSlider;
 let timelineFrameDisplay;
 let exportFpsSelect;
+let panelExpanded = true;
+let videoTimingExpanded = false;
+let savedCameraPosition = { x: 3, y: 3, z: 3 };
+let savedCameraTarget = { x: 0, y: 0, z: 0 };
+const VIEWER_SETTINGS_KEY = 'tesseract.viewer-settings.v1';
+
+function loadViewerSettings() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(VIEWER_SETTINGS_KEY));
+        if (!saved || typeof saved !== 'object') return;
+        const clamp = (value, min, max, fallback) => {
+            const number = Number(value);
+            return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+        };
+        rotationSpeed = clamp(saved.rotationSpeed, 0, 0.01, rotationSpeed);
+        lightDistance = clamp(saved.lightDistance, 0.1, 20, lightDistance);
+        for (const axis of ['xw', 'yw', 'zw']) {
+            rotationCoefficients[axis] = clamp(saved.rotationCoefficients?.[axis], -1, 1, rotationCoefficients[axis]);
+        }
+        if (['rough', 'iridescent', 'chrome'].includes(saved.shader)) currentShader = saved.shader;
+        if (['diagonal', 'topdown', 'quad'].includes(saved.lighting)) currentLighting = saved.lighting;
+        if ([24, 25, 30, 50, 60].includes(Number(saved.exportFps))) exportFps = Number(saved.exportFps);
+        if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
+        if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
+        if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
+        if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
+        const vector = (value, fallback) => {
+            if (!value || !['x', 'y', 'z'].every(axis => Number.isFinite(Number(value[axis])))) return fallback;
+            return { x: Number(value.x), y: Number(value.y), z: Number(value.z) };
+        };
+        savedCameraPosition = vector(saved.camera?.position, savedCameraPosition);
+        savedCameraTarget = vector(saved.camera?.target, savedCameraTarget);
+        timelineFrame = Math.max(0, Math.trunc(Number(saved.timelineFrame) || 0));
+    } catch {
+        // Keep defaults when local storage is unavailable or contains invalid data.
+    }
+}
+
+function persistViewerSettings() {
+    try {
+        localStorage.setItem(VIEWER_SETTINGS_KEY, JSON.stringify({
+            rotationSpeed,
+            rotationCoefficients,
+            shader: currentShader,
+            lighting: currentLighting,
+            lightDistance,
+            showVertices,
+            animationPaused,
+            exportFps,
+            timelineFrame,
+            panelExpanded,
+            videoTimingExpanded,
+            camera: {
+                position: camera ? { x: camera.position.x, y: camera.position.y, z: camera.position.z } : savedCameraPosition,
+                target: controls ? { x: controls.target.x, y: controls.target.y, z: controls.target.z } : savedCameraTarget
+            }
+        }));
+    } catch {
+        // The viewer remains usable when local storage is blocked or full.
+    }
+}
+
+loadViewerSettings();
+window.addEventListener('pagehide', persistViewerSettings);
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') persistViewerSettings();
+});
 // File drop zone
 let dropZone;
 let dropZoneVisible = false;
@@ -55,9 +122,7 @@ function init() {
     
     // Create camera
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.x = 3;
-    camera.position.y = 3;
-    camera.position.z = 3;
+    camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
     
     // Create renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -68,6 +133,8 @@ function init() {
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
+    controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
+    controls.addEventListener('end', persistViewerSettings);
     
     // Create the tesseract
     createTesseract();
@@ -112,7 +179,7 @@ function createEnvironmentMap() {
         onSwitchChrome: () => {
             const select = document.getElementById('viewer-shader');
             select.value = 'chrome';
-            select.dispatchEvent(new Event('change'));
+            select.dispatchEvent(new Event('change', { bubbles: true }));
         }
     });
 }
@@ -469,6 +536,7 @@ function applyViewSettings(metadata) {
         
         // Pause animation when a view is restored
         animationPaused = true;
+        persistViewerSettings();
         
         console.log("Successfully applied view settings");
         return true;
@@ -811,16 +879,30 @@ function createControls() {
     rotationControls.id = 'rotationControls';
     rotationControls.innerHTML = `
         <h3>4D Rotation</h3>
-        <div>
-            XW: <span>0.00</span> <input type="range" min="-20" max="20" value="0" step="1"> 
+        <div class="rotation-row">
+            <label for="rotation-xw">XW: <span>${rotationCoefficients.xw.toFixed(2)}</span></label>
+            <input id="rotation-xw" type="range" min="-20" max="20" value="${rotationCoefficients.xw * 20}" step="1">
         </div>
-        <div>
-            YW: <span>0.00</span> <input type="range" min="-20" max="20" value="0" step="1">
+        <div class="rotation-row">
+            <label for="rotation-yw">YW: <span>${rotationCoefficients.yw.toFixed(2)}</span></label>
+            <input id="rotation-yw" type="range" min="-20" max="20" value="${rotationCoefficients.yw * 20}" step="1">
         </div>
-        <div>
-            ZW: <span>0.00</span> <input type="range" min="-20" max="20" value="0" step="1">
+        <div class="rotation-row">
+            <label for="rotation-zw">ZW: <span>${rotationCoefficients.zw.toFixed(2)}</span></label>
+            <input id="rotation-zw" type="range" min="-20" max="20" value="${rotationCoefficients.zw * 20}" step="1">
         </div>
     `;
+    rotationControls.querySelectorAll('.rotation-row').forEach(row => {
+        Object.assign(row.style, {
+            display: 'grid',
+            gridTemplateColumns: '7.5em minmax(0, 1fr)',
+            alignItems: 'center',
+            gap: '6px'
+        });
+        row.querySelector('label').style.fontVariantNumeric = 'tabular-nums';
+        row.querySelector('input').style.width = '100%';
+        row.querySelector('input').style.minWidth = '0';
+    });
     
     // Update rotation coefficient when sliders change
     const rotationSliders = rotationControls.querySelectorAll('input[type="range"]');
@@ -848,6 +930,11 @@ function createControls() {
 
     // Keep video-oriented controls collapsed until they are needed.
     const videoTimingDetails = document.createElement('details');
+    videoTimingDetails.open = videoTimingExpanded;
+    videoTimingDetails.addEventListener('toggle', () => {
+        videoTimingExpanded = videoTimingDetails.open;
+        persistViewerSettings();
+    });
     videoTimingDetails.style.marginTop = '10px';
     videoTimingDetails.style.paddingTop = '8px';
     videoTimingDetails.style.borderTop = '1px solid #555';
@@ -925,6 +1012,7 @@ function createControls() {
         button.addEventListener('click', () => {
             animationPaused = true;
             setTimelineFrame(timelineFrame + direction);
+            persistViewerSettings();
         });
         frameButtons.appendChild(button);
     });
@@ -961,6 +1049,7 @@ function createControls() {
         animationPaused = !animationPaused;
         lastAnimationTimestamp = null;
         frameAccumulator = 0;
+        persistViewerSettings();
     });
     
     // Reset Time button
@@ -971,6 +1060,7 @@ function createControls() {
     resetTimeButton.addEventListener('click', function() {
         setTimelineFrame(0);
         updateCameraInfo();
+        persistViewerSettings();
     });
     
     buttonRow1.appendChild(playPauseButton);
@@ -994,6 +1084,7 @@ function createControls() {
         camera.position.set(3, 3, 3);
         updateCameraInfo();
         controls.update();
+        persistViewerSettings();
     });
     
     // Reset Target button
@@ -1006,6 +1097,7 @@ function createControls() {
         controls.target.set(0, 0, 0);
         updateCameraInfo();
         controls.update();
+        persistViewerSettings();
     });
     
     buttonRow2.appendChild(resetPositionButton);
@@ -1052,7 +1144,8 @@ function createControls() {
     const panelToggle = document.createElement('button');
     panelToggle.type = 'button';
     panelToggle.textContent = '▾ Controls';
-    panelToggle.setAttribute('aria-expanded', 'true');
+    panelContent.hidden = !panelExpanded;
+    panelToggle.setAttribute('aria-expanded', String(panelExpanded));
     panelToggle.setAttribute('aria-controls', panelContent.id);
     Object.assign(panelToggle.style, {
         width: '100%',
@@ -1064,19 +1157,28 @@ function createControls() {
         font: 'inherit',
         fontWeight: 'bold',
         cursor: 'pointer',
-        marginBottom: '10px'
+        marginBottom: panelExpanded ? '10px' : '0'
     });
+    panelToggle.textContent = panelExpanded ? '▾ Controls' : '▸ Controls';
     panelToggle.addEventListener('click', () => {
         panelContent.hidden = !panelContent.hidden;
-        panelToggle.setAttribute('aria-expanded', String(!panelContent.hidden));
-        panelToggle.textContent = panelContent.hidden ? '▸ Controls' : '▾ Controls';
-        panelToggle.style.marginBottom = panelContent.hidden ? '0' : '10px';
+        panelExpanded = !panelContent.hidden;
+        panelToggle.setAttribute('aria-expanded', String(panelExpanded));
+        panelToggle.textContent = panelExpanded ? '▾ Controls' : '▸ Controls';
+        panelToggle.style.marginBottom = panelExpanded ? '10px' : '0';
+        persistViewerSettings();
     });
     controlPanel.append(panelToggle, panelContent);
     document.body.appendChild(controlPanel);
+
+    // Input handlers update the application state first; bubbling then saves it.
+    controlPanel.addEventListener('input', persistViewerSettings);
+    controlPanel.addEventListener('change', persistViewerSettings);
     
     // Initialize the exact loop timeline and camera display.
+    const restoredTimelineFrame = timelineFrame;
     refreshLoopTiming({ preserveTime: false });
+    setTimelineFrame(restoredTimelineFrame);
     updateCameraInfo();
 }
 
@@ -1455,10 +1557,12 @@ function onKeyDown(event) {
             animationPaused = !animationPaused;
             lastAnimationTimestamp = null;
             frameAccumulator = 0;
+            persistViewerSettings();
             break;
         case 'KeyR':
             // Reset animation time
             setTimelineFrame(0);
+            persistViewerSettings();
             break;
         case 'KeyO':
             // Toggle overlay visibility
@@ -1471,6 +1575,9 @@ function onKeyDown(event) {
             vertices.forEach(vertex => {
                 vertex.visible = showVertices;
             });
+            const vertexToggle = document.getElementById('vertexToggle');
+            if (vertexToggle) vertexToggle.checked = showVertices;
+            persistViewerSettings();
             break;
         case 'KeyS':
             // Save screenshot
