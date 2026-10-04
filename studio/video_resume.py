@@ -533,7 +533,7 @@ class VideoJobStore:
             finally:
                 stream.close()
 
-    def resume(self, job_id):
+    def resume(self, job_id, render_context=None):
         with self.lock:
             if job_id in self.leases:
                 raise ValueError('Video export is already active in another browser')
@@ -553,6 +553,16 @@ class VideoJobStore:
                         raise ValueError('Video export is already active in another browser')
                     self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
                 self._verify_segments(manifest, job, repair=True)
+                if job['nextFrame'] < job['request']['frames'] and render_context is not None:
+                    source_url = render_context.get('sourceUrl')
+                    render_signature = render_context.get('renderSignature')
+                    if (not isinstance(source_url, str) or not source_url
+                            or not isinstance(render_signature, str) or not render_signature
+                            or source_url != job['request'].get('sourceUrl')
+                            or render_signature != job['request'].get('renderSignature')):
+                        raise ValueError(
+                            'Current source URL and render settings do not match this export'
+                        )
                 job['state'] = 'active'
                 job['resumeCount'] = int(job.get('resumeCount', 0)) + 1
                 self._save(manifest, job)

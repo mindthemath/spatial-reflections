@@ -607,7 +607,7 @@ class Handler(SimpleHTTPRequestHandler):
                     request.get('id'), reason or 'Browser paused the export', request.get('lease'))
                 return self.send_json(200, paused)
             if route.path == '/api/video/resume':
-                return self.send_json(200, video_store().resume(request.get('id')))
+                return self.send_json(200, video_store().resume(request.get('id'), request))
             if route.path == '/api/publish':
                 return self.send_json(201, publish_work(request))
             if route.path == '/api/export/start':

@@ -1990,7 +1990,11 @@ async function runVideoExport(plan, resumableJob = null) {
         if (resumableJob) {
             activeVideoExportJob = await videoApi('/api/video/resume', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: resumableJob.id })
+                body: JSON.stringify({
+                    id: resumableJob.id,
+                    sourceUrl: location.pathname + location.search,
+                    renderSignature: videoRenderSignature()
+                })
             });
         } else {
             const name = document.getElementById('video-export-name').value.trim() || 'tesseract';

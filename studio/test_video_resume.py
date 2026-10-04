@@ -606,6 +606,33 @@ class VideoJobStoreTest(unittest.TestCase):
         replacement = self.store.resume(job['id'])
         self.assertNotEqual(replacement['lease'], active['lease'])
 
+    def test_partial_resume_requires_matching_render_context(self):
+        job = self.store.create(request())
+        with self.assertRaisesRegex(ValueError, 'source URL and render settings'):
+            self.store.resume(job['id'], {
+                'sourceUrl': '/different',
+                'renderSignature': 'render-v1',
+            })
+        self.assertNotIn(job['id'], self.store.leases)
+
+        resumed = self.store.resume(job['id'], {
+            'sourceUrl': '/?skybox=exports%2Ftest',
+            'renderSignature': 'render-v1',
+        })
+        self.assertEqual(resumed['nextFrame'], 0)
+        self.store.pause(job['id'], lease=resumed['lease'])
+
+    def test_fully_rendered_resume_allows_finalize_from_changed_viewer(self):
+        job = self.ready_job()
+
+        resumed = self.store.resume(job['id'], {
+            'sourceUrl': '/different',
+            'renderSignature': 'different-render',
+        })
+
+        self.assertEqual(resumed['nextFrame'], resumed['frames'])
+        self.store.pause(job['id'], lease=resumed['lease'])
+
     def test_finish_concats_segments_in_order_for_mp4_and_mkv(self):
         for video_format in ('mp4', 'mkv'):
             with self.subTest(video_format=video_format):

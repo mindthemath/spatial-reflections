@@ -319,7 +319,16 @@ class StudioAPITest(unittest.TestCase):
             code, jobs = self.request('GET', '/api/video/jobs')
             self.assertEqual(code, 200)
             self.assertEqual(jobs['jobs'][0]['nextFrame'], 24)
-            code, resumed = self.request('POST', '/api/video/resume', {'id': started['id']})
+            code, mismatch = self.request('POST', '/api/video/resume', {
+                'id': started['id'], 'sourceUrl': '/different',
+                'renderSignature': 'same-render',
+            })
+            self.assertEqual(code, 400)
+            self.assertIn('render settings', mismatch['error'])
+            code, resumed = self.request('POST', '/api/video/resume', {
+                'id': started['id'], 'sourceUrl': request['sourceUrl'],
+                'renderSignature': request['renderSignature'],
+            })
             self.assertEqual(code, 200)
             self.assertNotEqual(resumed['lease'], started['lease'])
             code, progress = self.raw_request(
