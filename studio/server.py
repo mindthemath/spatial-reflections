@@ -472,7 +472,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         route = urlparse(self.path)
         if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish',
-                              '/api/video/start', '/api/video/frame', '/api/video/finish', '/api/video/cancel',
+                              '/api/video/start', '/api/video/poster', '/api/video/frame', '/api/video/finish', '/api/video/cancel',
                               '/api/video/pause', '/api/video/resume'):
             self.close_connection = True
             return self.send_json(404, {'error': 'Unknown endpoint'})
@@ -481,6 +481,45 @@ class Handler(SimpleHTTPRequestHandler):
             self.close_connection = True
             return self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
         try:
+            if route.path == '/api/video/poster':
+                query = parse_qs(route.query)
+                job_id = query.get('id', [''])[0]
+                lease = query.get('lease', [''])[0]
+                store = video_store()
+                job = store.get(job_id)
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 24 <= length <= MAX_VIDEO_FRAME_BYTES:
+                    raise ValueError('PNG resume frame has an invalid size')
+                previous_timeout = self.connection.gettimeout()
+                self.connection.settimeout(VIDEO_FRAME_READ_TIMEOUT)
+                try:
+                    data = self.rfile.read(length)
+                except TimeoutError:
+                    try:
+                        store.pause(job_id, 'Resume frame upload was interrupted', lease)
+                    except (OSError, ValueError):
+                        pass
+                    raise ValueError('Resume frame upload was interrupted')
+                finally:
+                    try:
+                        self.connection.settimeout(previous_timeout)
+                    except OSError:
+                        pass
+                if len(data) != length:
+                    try:
+                        store.pause(job_id, 'Incomplete PNG resume frame upload', lease)
+                    except (OSError, ValueError):
+                        pass
+                    raise ValueError('Incomplete PNG resume frame upload')
+                header = data[:24]
+                if header[:8] != PNG_SIGNATURE or header[12:16] != b'IHDR':
+                    raise ValueError('Resume frame must be a PNG image')
+                width = int.from_bytes(header[16:20], 'big')
+                height = int.from_bytes(header[20:24], 'big')
+                request = job['request']
+                if (width, height) != (request['width'], request['height']):
+                    raise ValueError(f"Resume frame must be {request['width']}×{request['height']} pixels")
+                return self.send_json(201, store.write_poster(job_id, data, lease))
             if route.path == '/api/video/frame':
                 query = parse_qs(route.query)
                 job_id = query.get('id', [''])[0]

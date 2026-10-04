@@ -1833,16 +1833,101 @@ async function videoApi(path, options = {}) {
     return value;
 }
 
-function canvasPNG(canvas) {
-    // Synchronous read. toBlob's callback is deferred, and dropped, while the
-    // document is hidden — that left the export and the encoder waiting on each other.
-    const url = canvas.toDataURL('image/png');
-    const comma = url.indexOf(',');
+function dataUrlToBlob(dataUrl) {
+    const comma = dataUrl.indexOf(',');
     if (comma < 0) throw new Error('Could not capture the WebGL frame');
-    const binary = atob(url.slice(comma + 1));
+    const binary = atob(dataUrl.slice(comma + 1));
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return new Blob([bytes], { type: 'image/png' });
+}
+
+function canvasPNG(canvas) {
+    // Synchronous read. toBlob's callback is deferred, and dropped, while the
+    // document is hidden — that left the export and the encoder waiting on each other.
+    return dataUrlToBlob(canvas.toDataURL('image/png'));
+}
+
+function screenshotMetadata() {
+    return {
+        camera: {
+            position: {
+                x: camera.position.x,
+                y: camera.position.y,
+                z: camera.position.z
+            }
+        },
+        rotation: {
+            xw: rotationCoefficients.xw,
+            yw: rotationCoefficients.yw,
+            zw: rotationCoefficients.zw
+        },
+        time: time,
+        animation: {
+            frame: timelineFrame,
+            frameCount: loopTiming.frameCount,
+            fps: exportFps,
+            motionStep: rotationSpeed
+        },
+        target: {
+            x: controls.target.x,
+            y: controls.target.y,
+            z: controls.target.z
+        }
+    };
+}
+
+function embedMetadataInPngDataUrl(imageData) {
+    const metadataStr = JSON.stringify(screenshotMetadata());
+    return new Promise((resolve, reject) => {
+        const canvas = document.createElement('canvas');
+        const img = new Image();
+        img.onload = function() {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            try {
+                const imgData = ctx.getImageData(0, 0, canvas.width, 1);
+                const pixelData = imgData.data;
+                pixelData[0] = 254;
+                pixelData[1] = 0;
+                pixelData[2] = 254;
+                pixelData[3] = 255;
+                const marker = 'tESSdata=';
+                const fullData = marker + metadataStr;
+                for (let i = 0; i < fullData.length; i++) {
+                    const charCode = fullData.charCodeAt(i);
+                    const pixelIndex = (i + 1) * 4;
+                    if (pixelIndex < pixelData.length) {
+                        pixelData[pixelIndex] = charCode;
+                        pixelData[pixelIndex + 1] = 0;
+                        pixelData[pixelIndex + 2] = 0;
+                        pixelData[pixelIndex + 3] = 255;
+                    }
+                }
+                ctx.putImageData(imgData, 0, 0);
+                resolve(canvas.toDataURL('image/png'));
+            } catch (error) {
+                reject(error);
+            }
+        };
+        img.onerror = () => reject(new Error('Could not prepare screenshot metadata'));
+        img.src = imageData;
+    });
+}
+
+async function saveVideoExportPoster(plan, job) {
+    const overlayWasVisible = showOverlay;
+    if (overlayWasVisible) controlPanel.style.display = 'none';
+    setTimelineFrame(plan.startFrame);
+    updateTesseractProjection();
+    renderer.render(scene, camera);
+    const png = dataUrlToBlob(await embedMetadataInPngDataUrl(renderer.domElement.toDataURL('image/png')));
+    if (overlayWasVisible) controlPanel.style.display = 'block';
+    return videoApi(`/api/video/poster?id=${job.id}&lease=${job.lease}`, {
+        method: 'POST', headers: { 'Content-Type': 'image/png' }, body: png, signal: videoExportAbort.signal
+    });
 }
 
 async function runVideoExport(plan, resumableJob = null) {
@@ -1906,6 +1991,10 @@ async function runVideoExport(plan, resumableJob = null) {
         camera.updateProjectionMatrix();
 
         const firstFrame = activeVideoExportJob.nextFrame || 0;
+        if (firstFrame === 0) {
+            status.textContent = 'Saving resume frame…';
+            await saveVideoExportPoster(plan, activeVideoExportJob);
+        }
         for (let frame = firstFrame; frame < plan.frames; frame++) {
             await new Promise(resolve => setTimeout(resolve, 0));
             if (cancelVideoExportRequested) throw new DOMException('Video export cancelled', 'AbortError');
@@ -2110,115 +2199,11 @@ function createRotationSliders() {
 
 // Save screenshot with embedded metadata
 function saveScreenshot() {
-    // Temporarily hide the overlay
     const overlayWasVisible = showOverlay;
-    if (overlayWasVisible) {
-        controlPanel.style.display = 'none';
-    }
-    
-    // Render the scene
+    if (overlayWasVisible) controlPanel.style.display = 'none';
     renderer.render(scene, camera);
-    
-    // Get metadata for saving
-    const metadata = {
-        camera: {
-            position: {
-                x: camera.position.x,
-                y: camera.position.y,
-                z: camera.position.z
-            }
-        },
-        rotation: {
-            xw: rotationCoefficients.xw,
-            yw: rotationCoefficients.yw,
-            zw: rotationCoefficients.zw
-        },
-        time: time, // Include the current animation time for backward compatibility
-        animation: {
-            frame: timelineFrame,
-            frameCount: loopTiming.frameCount,
-            fps: exportFps,
-            motionStep: rotationSpeed
-        },
-        target: {
-            x: controls.target.x,
-            y: controls.target.y,
-            z: controls.target.z
-        }
-    };
-    
-    // Convert canvas to data URL
-    let imageData = renderer.domElement.toDataURL('image/png');
-    
-    // Create a canvas to embed metadata in the PNG
-    const canvas = document.createElement('canvas');
-    const img = new Image();
-    
-    img.onload = function() {
-        canvas.width = img.width;
-        canvas.height = img.height;
-        
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        
-        // Store metadata in tEXt chunk using a hidden canvas trick
-        // We'll create a special metadata tag in the canvas
-        const metadataStr = JSON.stringify(metadata);
-        console.log("Embedding metadata:", metadataStr);
-        
-        // Encode metadata in the canvas
-        // We use a data URI with Base64 encoding of metadata
-        const dataURI = canvas.toDataURL('image/png');
-        
-        // Add metadata as a custom attribute to the canvas
-        // This is a hack that some browsers support - metadata is stored in the PNG chunks
-        canvas.setAttribute('tESSdata', metadataStr);
-        
-        // Get the PNG with metadata
-        let modifiedImageData;
-        try {
-            // Try the modern approach with custom attributes
-            modifiedImageData = canvas.toDataURL('image/png');
-            
-            // As a fallback, embed metadata in first row of pixels
-            // Some browsers don't properly encode custom attributes in PNG chunks
-            const imgData = ctx.getImageData(0, 0, canvas.width, 1);
-            const pixelData = imgData.data;
-            
-            // First pixel is the marker (magenta)
-            pixelData[0] = 254; // Almost full red
-            pixelData[1] = 0;   // No green
-            pixelData[2] = 254; // Almost full blue
-            pixelData[3] = 255; // Full alpha
-            
-            // Add metadata marker
-            const marker = "tESSdata=";
-            const fullData = marker + metadataStr;
-            
-            // Encode the string in subsequent pixels
-            for (let i = 0; i < fullData.length; i++) {
-                const charCode = fullData.charCodeAt(i);
-                const pixelIndex = (i + 1) * 4; // Start at second pixel
-                
-                if (pixelIndex < pixelData.length) {
-                    pixelData[pixelIndex] = charCode; // Store in red channel
-                    pixelData[pixelIndex + 1] = 0;    // Green is 0
-                    pixelData[pixelIndex + 2] = 0;    // Blue is 0
-                    pixelData[pixelIndex + 3] = 255;  // Full alpha
-                }
-            }
-            
-            // Write the modified pixel data back to the canvas
-            ctx.putImageData(imgData, 0, 0);
-            
-            // Get the modified image with both methods applied
-            modifiedImageData = canvas.toDataURL('image/png');
-        } catch (e) {
-            console.error("Error embedding metadata, falling back to basic method:", e);
-            modifiedImageData = dataURI;
-        }
-        
-        // Create a filename with metadata in it as fallback
+    const imageData = renderer.domElement.toDataURL('image/png');
+    embedMetadataInPngDataUrl(imageData).then(modifiedImageData => {
         const pos = camera.position;
         const target = controls.target;
         const posStr = `pos_${pos.x.toFixed(2)}_${pos.y.toFixed(2)}_${pos.z.toFixed(2)}`;
@@ -2227,20 +2212,19 @@ function saveScreenshot() {
         const targetStr = `target_${target.x.toFixed(2)}_${target.y.toFixed(2)}_${target.z.toFixed(2)}`;
         const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
         const filename = `tesseract_${timestamp}_${posStr}_${rotStr}_${timeStr}_${targetStr}.png`;
-        
-        // Create a download link
         const link = document.createElement('a');
         link.href = modifiedImageData;
         link.download = filename;
         link.click();
-        
-        // Restore the overlay if it was visible
-        if (overlayWasVisible) {
-            controlPanel.style.display = 'block';
-        }
-    };
-    
-    img.src = imageData;
+        if (overlayWasVisible) controlPanel.style.display = 'block';
+    }).catch(error => {
+        console.error('Error embedding metadata, falling back to basic screenshot:', error);
+        const link = document.createElement('a');
+        link.href = imageData;
+        link.download = 'tesseract.png';
+        link.click();
+        if (overlayWasVisible) controlPanel.style.display = 'block';
+    });
 }
 
 // Handle keyboard input without stealing keystrokes from dialogs or focused controls.

@@ -741,6 +741,40 @@ class VideoJobStore:
             self._fail_active_segment(job_id, runtime, f'Could not save checkpoint: {error}')
             raise ValueError(f'Could not save checkpoint: {error}') from error
 
+    def write_poster(self, job_id, png, lease):
+        with self._job_lock(job_id):
+            with self.lock:
+                lease_state = self.leases.get(job_id)
+                if not lease_state or lease_state['token'] != lease:
+                    raise ValueError('Video export lease is no longer active')
+                lease_state['lastActivity'] = self.clock()
+                runtime = self.active.get(job_id)
+            manifest, job = self._load(job_id)
+            if job['nextFrame'] != 0 or job['segments']:
+                raise ValueError('Resume frame can only be saved before rendering starts')
+            if runtime and int(runtime.get('written', 0)) > 0:
+                raise ValueError('Resume frame can only be saved before rendering starts')
+            request = job['request']
+            self.videos.mkdir(parents=True, exist_ok=True)
+            final_path = self.videos / Path(self.output_filename(job_id)).with_suffix('.png')
+            pending_path = self.videos / f'.{final_path.name}.pending'
+            try:
+                with pending_path.open('wb') as stream:
+                    stream.write(png)
+                    _durable_fsync(stream)
+                pending_path.replace(final_path)
+                _fsync_directory(final_path.parent)
+            except OSError as error:
+                pending_path.unlink(missing_ok=True)
+                raise ValueError(f'Could not save resume frame: {error}') from error
+            return {
+                'url': '/' + final_path.relative_to(self.root).as_posix(),
+                'filename': final_path.name,
+                'bytes': final_path.stat().st_size,
+                'width': request['width'],
+                'height': request['height'],
+            }
+
     def write_frame(self, job_id, frame_index, png, lease):
         with self._job_lock(job_id):
             with self.lock:

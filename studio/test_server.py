@@ -200,6 +200,11 @@ class StudioAPITest(unittest.TestCase):
             code, started = self.request('POST', '/api/video/start', request)
             self.assertEqual(code, 201)
             frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+            code, poster = self.raw_request(
+                'POST', f"/api/video/poster?id={started['id']}&lease={started['lease']}", frame,
+                {'Content-Type': 'image/png'})
+            self.assertEqual(code, 201)
+            self.assertEqual(poster['filename'], started['filename'].rsplit('.', 1)[0] + '.png')
             for index in range(2):
                 code, progress = self.raw_request('POST', f"/api/video/frame?id={started['id']}&frame={index}&lease={started['lease']}", frame,
                                                   {'Content-Type': 'image/png'})
@@ -209,6 +214,7 @@ class StudioAPITest(unittest.TestCase):
             self.assertEqual(code, 201)
         video = server.ROOT / completed['url'].lstrip('/')
         self.assertEqual(video.read_bytes(), b'fake mp4')
+        self.assertTrue((video.with_suffix('.png')).is_file())
         metadata = json.loads(video.with_suffix('.json').read_text())
         self.assertEqual(metadata['frames'], 2)
         self.assertEqual(metadata['viewerState']['shader'], 'chrome')
