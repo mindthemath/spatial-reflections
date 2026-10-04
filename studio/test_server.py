@@ -218,6 +218,8 @@ class StudioAPITest(unittest.TestCase):
         metadata = json.loads(video.with_suffix('.json').read_text())
         self.assertEqual(metadata['frames'], 2)
         self.assertEqual(metadata['viewerState']['shader'], 'chrome')
+        self.assertEqual(metadata['poster']['file'], video.with_suffix('.png').name)
+        self.assertEqual(metadata['poster']['sha256'], hashlib.sha256(frame).hexdigest())
         self.assertNotIn('..', completed['filename'])
         self.assertIn('mirror-clip', server.video_clip_labels())
 

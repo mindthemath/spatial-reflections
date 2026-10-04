@@ -458,6 +458,26 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertRegex(str(write_errors[0]), 'lease')
         self.assertNotIn(job['id'], self.store.active)
 
+    def test_poster_is_durable_provenance_and_discard_removes_it(self):
+        job = self.store.create(request())
+        active = self.store.resume(job['id'])
+        png = b'\x89PNG\r\n\x1a\nposter'
+
+        poster = self.store.write_poster(job['id'], png, active['lease'])
+
+        poster_path = self.root / poster['url'].lstrip('/')
+        self.assertEqual(poster_path.read_bytes(), png)
+        persisted = json.loads(self.manifest(job).read_text())
+        self.assertEqual(persisted['poster'], {
+            'file': poster['filename'],
+            'bytes': len(png),
+            'sha256': hashlib.sha256(png).hexdigest(),
+            'width': 1280,
+            'height': 720,
+        })
+        self.store.discard(job['id'])
+        self.assertFalse(poster_path.exists())
+
     @staticmethod
     def _capture_error(errors, action):
         try:

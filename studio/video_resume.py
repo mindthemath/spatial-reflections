@@ -439,6 +439,10 @@ class VideoJobStore:
 
     def output_filename(self, job_id):
         manifest, job = self._load(job_id)
+        return self._output_filename(job_id, job)
+
+    @staticmethod
+    def _output_filename(job_id, job):
         request = job['request']
         label = re.sub(r'[^a-zA-Z0-9_-]+', '-', str(request.get('name', 'tesseract')))
         label = label[:60].strip('-') or 'tesseract'
@@ -766,13 +770,20 @@ class VideoJobStore:
                 _fsync_directory(final_path.parent)
             except OSError as error:
                 pending_path.unlink(missing_ok=True)
-                raise ValueError(f'Could not save resume frame: {error}') from error
+                raise ValueError(f'Could not save export poster: {error}') from error
+            poster = {
+                'file': final_path.name,
+                'bytes': final_path.stat().st_size,
+                'sha256': sha256_file(final_path),
+                'width': request['width'],
+                'height': request['height'],
+            }
+            job['poster'] = poster
+            self._save(manifest, job)
             return {
                 'url': '/' + final_path.relative_to(self.root).as_posix(),
                 'filename': final_path.name,
-                'bytes': final_path.stat().st_size,
-                'width': request['width'],
-                'height': request['height'],
+                **{key: value for key, value in poster.items() if key != 'file'},
             }
 
     def write_frame(self, job_id, frame_index, png, lease):
@@ -848,6 +859,14 @@ class VideoJobStore:
         with self._job_lock(job_id):
             if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
                 raise ValueError('Invalid video export id')
+            poster_path = None
+            try:
+                _, job = self._load(job_id)
+                poster_path = self.videos / Path(
+                    self._output_filename(job_id, job)
+                ).with_suffix('.png')
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                pass
             with self.lock:
                 index = self._read_index()
                 entry = index['jobs'].pop(job_id, None)
@@ -857,6 +876,9 @@ class VideoJobStore:
             manifest = Path(entry.get('manifest', '')) if isinstance(entry, dict) else None
             if manifest:
                 shutil.rmtree(manifest.parent, ignore_errors=True)
+            if poster_path:
+                poster_path.unlink(missing_ok=True)
+                poster_path.with_name(f'.{poster_path.name}.pending').unlink(missing_ok=True)
             self._remove_pending_output(job_id)
 
     def finish(self, job_id):
@@ -931,6 +953,7 @@ class VideoJobStore:
                     'checkpointSeconds': request['checkpointSeconds'],
                     'resumeCount': job.get('resumeCount', 0),
                     'segments': job['segments'],
+                    **({'poster': job['poster']} if job.get('poster') else {}),
                 }
                 atomic_write_json(final_path.with_suffix('.json'), metadata)
             except (OSError, subprocess.SubprocessError, ValueError) as error:

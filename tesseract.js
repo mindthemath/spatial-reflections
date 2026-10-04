@@ -1848,7 +1848,7 @@ function canvasPNG(canvas) {
     return dataUrlToBlob(canvas.toDataURL('image/png'));
 }
 
-function screenshotMetadata() {
+function screenshotMetadata(extra = {}) {
     return {
         camera: {
             position: {
@@ -1873,12 +1873,13 @@ function screenshotMetadata() {
             x: controls.target.x,
             y: controls.target.y,
             z: controls.target.z
-        }
+        },
+        ...extra
     };
 }
 
-function embedMetadataInPngDataUrl(imageData) {
-    const metadataStr = JSON.stringify(screenshotMetadata());
+function embedMetadataInPngDataUrl(imageData, metadata = {}) {
+    const metadataStr = JSON.stringify(screenshotMetadata(metadata));
     return new Promise((resolve, reject) => {
         const canvas = document.createElement('canvas');
         const img = new Image();
@@ -1896,15 +1897,16 @@ function embedMetadataInPngDataUrl(imageData) {
                 pixelData[3] = 255;
                 const marker = 'tESSdata=';
                 const fullData = marker + metadataStr;
+                if (fullData.length + 1 > canvas.width) {
+                    throw new Error('Screenshot metadata is too large for the image');
+                }
                 for (let i = 0; i < fullData.length; i++) {
                     const charCode = fullData.charCodeAt(i);
                     const pixelIndex = (i + 1) * 4;
-                    if (pixelIndex < pixelData.length) {
-                        pixelData[pixelIndex] = charCode;
-                        pixelData[pixelIndex + 1] = 0;
-                        pixelData[pixelIndex + 2] = 0;
-                        pixelData[pixelIndex + 3] = 255;
-                    }
+                    pixelData[pixelIndex] = charCode;
+                    pixelData[pixelIndex + 1] = 0;
+                    pixelData[pixelIndex + 2] = 0;
+                    pixelData[pixelIndex + 3] = 255;
                 }
                 ctx.putImageData(imgData, 0, 0);
                 resolve(canvas.toDataURL('image/png'));
@@ -1919,12 +1921,32 @@ function embedMetadataInPngDataUrl(imageData) {
 
 async function saveVideoExportPoster(plan, job) {
     const overlayWasVisible = showOverlay;
-    if (overlayWasVisible) controlPanel.style.display = 'none';
-    setTimelineFrame(plan.startFrame);
-    updateTesseractProjection();
-    renderer.render(scene, camera);
-    const png = dataUrlToBlob(await embedMetadataInPngDataUrl(renderer.domElement.toDataURL('image/png')));
-    if (overlayWasVisible) controlPanel.style.display = 'block';
+    const overlayDisplay = controlPanel.style.display;
+    let png;
+    try {
+        if (overlayWasVisible) controlPanel.style.display = 'none';
+        setTimelineFrame(plan.startFrame);
+        updateTesseractProjection();
+        renderer.render(scene, camera);
+        png = dataUrlToBlob(await embedMetadataInPngDataUrl(
+            renderer.domElement.toDataURL('image/png'),
+            {
+                kind: 'video-export-poster',
+                render: JSON.parse(videoRenderSignature()),
+                video: {
+                    width: plan.width,
+                    height: plan.height,
+                    format: plan.format,
+                    quality: plan.quality,
+                    startFrame: plan.startFrame,
+                    frames: plan.frames,
+                    checkpointSeconds: plan.checkpointSeconds
+                }
+            }
+        ));
+    } finally {
+        controlPanel.style.display = overlayDisplay;
+    }
     return videoApi(`/api/video/poster?id=${job.id}&lease=${job.lease}`, {
         method: 'POST', headers: { 'Content-Type': 'image/png' }, body: png, signal: videoExportAbort.signal
     });
