@@ -76,10 +76,12 @@ class VideoJobStore:
         self.videos = self.root / 'videos'
         self.index_path = self.videos / '.video-job-index.json'
         self.lock = threading.RLock()
+        self.stop_lock = threading.RLock()
         self.job_locks = {}
         self.active = {}
         self.leases = {}
         self.owners = {}
+        self.stopping = set()
         self.server_owner = None
         self.popen = subprocess.Popen
         self.run = subprocess.run
@@ -188,14 +190,13 @@ class VideoJobStore:
             return dict(report)
 
         for job_id, entry in entries:
-            manifest_hint = (
-                Path(entry['manifest']) if isinstance(entry, dict)
-                and isinstance(entry.get('manifest'), str) else None
-            )
+            manifest_hint = None
             recovery_lock = None
             try:
-                if manifest_hint is None:
+                if (not isinstance(entry, dict)
+                        or not isinstance(entry.get('manifest'), str)):
                     raise ValueError('Video job index entry is invalid')
+                manifest_hint = self._validated_manifest_path(job_id, entry['manifest'])
                 recovery_lock = self._claim_recovery_lock(manifest_hint.parent)
                 if recovery_lock is None:
                     report['skippedActive'] += 1
@@ -309,7 +310,15 @@ class VideoJobStore:
         entry = index['jobs'].get(job_id)
         if not isinstance(entry, dict) or not isinstance(entry.get('manifest'), str):
             raise ValueError('Video export is missing or already complete')
-        return Path(entry['manifest'])
+        return self._validated_manifest_path(job_id, entry['manifest'])
+
+    @staticmethod
+    def _validated_manifest_path(job_id, value):
+        path = Path(value)
+        if (not value or not path.is_absolute() or path.name != 'job.json'
+                or path.parent.name != job_id):
+            raise ValueError('Video export index entry has an invalid manifest path')
+        return path
 
     def _load(self, job_id):
         path = self._manifest_path(job_id)
@@ -405,7 +414,10 @@ class VideoJobStore:
             atomic_write_json(manifest, job)
             with self.lock:
                 index = self._read_index()
-                index['jobs'][job_id] = {'manifest': str(manifest)}
+                index['jobs'][job_id] = {
+                    'manifest': str(manifest),
+                    'poster': Path(self._output_filename(job_id, job)).with_suffix('.png').name,
+                }
                 self._write_index(index)
         except Exception:
             shutil.rmtree(job_dir, ignore_errors=True)
@@ -458,6 +470,45 @@ class VideoJobStore:
             return
         for path in self.videos.glob(f'.*-{job_id[:8]}.pending.*'):
             path.unlink(missing_ok=True)
+
+    def _validate_job_directory(self, manifest, job_id):
+        manifest = self._validated_manifest_path(job_id, str(manifest))
+        job_dir = manifest.parent
+        if not job_dir.exists():
+            return job_dir
+        removable = re.compile(
+            r'(?:job\.json|\.owner\.lock|\.concat\.txt|'
+            r'segment-\d{6}\.mkv|\.segment-\d{6}\.pending\.mkv|'
+            r'\.job\.json\.[a-f0-9]{32}\.tmp)'
+        )
+        for path in job_dir.iterdir():
+            if path.name == 'quarantine' and path.is_dir() and not path.is_symlink():
+                for quarantined in path.iterdir():
+                    if (not SEGMENT_NAME.fullmatch(quarantined.name)
+                            or (quarantined.is_dir() and not quarantined.is_symlink())):
+                        raise ValueError(
+                            'Video export quarantine contains an unexpected entry: '
+                            f'{quarantined.name}'
+                        )
+                continue
+            if not removable.fullmatch(path.name) or (path.is_dir() and not path.is_symlink()):
+                raise ValueError(
+                    f'Video export scratch directory contains unexpected entry: {path.name}'
+                )
+        return job_dir
+
+    def _remove_job_directory(self, manifest, job_id):
+        job_dir = self._validate_job_directory(manifest, job_id)
+        if not job_dir.exists():
+            return
+        for path in job_dir.iterdir():
+            if path.name == 'quarantine' and path.is_dir() and not path.is_symlink():
+                for quarantined in path.iterdir():
+                    quarantined.unlink(missing_ok=True)
+                path.rmdir()
+            else:
+                path.unlink(missing_ok=True)
+        job_dir.rmdir()
 
     def _verify_segments(self, manifest, job, repair=False):
         job_dir = manifest.parent.resolve()
@@ -534,11 +585,17 @@ class VideoJobStore:
                 stream.close()
 
     def resume(self, job_id, render_context=None):
+        with self.stop_lock:
+            if job_id in self.stopping:
+                raise ValueError('Video export is stopping in another request')
         with self.lock:
             if job_id in self.leases:
                 raise ValueError('Video export is already active in another browser')
         self._interrupt_active_segment(job_id)
         with self._job_lock(job_id):
+            with self.stop_lock:
+                if job_id in self.stopping:
+                    raise ValueError('Video export is stopping in another request')
             manifest, job = self._load(job_id)
             self._remove_pending_output(job_id)
             if job.get('activeEncoder'):
@@ -548,10 +605,13 @@ class VideoJobStore:
             self._acquire_owner(manifest, job_id)
             lease = uuid.uuid4().hex
             try:
-                with self.lock:
-                    if job_id in self.leases:
-                        raise ValueError('Video export is already active in another browser')
-                    self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
+                with self.stop_lock:
+                    if job_id in self.stopping:
+                        raise ValueError('Video export is stopping in another request')
+                    with self.lock:
+                        if job_id in self.leases:
+                            raise ValueError('Video export is already active in another browser')
+                        self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
                 self._verify_segments(manifest, job, repair=True)
                 if job['nextFrame'] < job['request']['frames'] and render_context is not None:
                     source_url = render_context.get('sourceUrl')
@@ -615,18 +675,26 @@ class VideoJobStore:
             active_lease = self.leases.get(job_id)
             if lease is not None and (not active_lease or active_lease['token'] != lease):
                 raise ValueError('Video export lease is no longer active')
-        # Kill the encoder before taking the per-job lock. A frame writer may be
-        # blocked in the pipe, and killing ffmpeg is what wakes that writer.
-        self._interrupt_active_segment(job_id)
-        with self._job_lock(job_id):
-            manifest, job = self._load(job_id)
-            for path in manifest.parent.glob('.segment-*.pending.mkv'):
-                path.unlink(missing_ok=True)
-            job.pop('activeEncoder', None)
-            job['state'] = 'paused'
-            job['error'] = job.get('error') or (str(reason) if reason else None)
-            self._save(manifest, job)
-            return self._public(manifest, job)
+        with self.stop_lock:
+            if job_id in self.stopping:
+                raise ValueError('Video export is already stopping')
+            self.stopping.add(job_id)
+        try:
+            # Kill the encoder before taking the per-job lock. A frame writer may be
+            # blocked in the pipe, and killing ffmpeg is what wakes that writer.
+            self._interrupt_active_segment(job_id)
+            with self._job_lock(job_id):
+                manifest, job = self._load(job_id)
+                for path in manifest.parent.glob('.segment-*.pending.mkv'):
+                    path.unlink(missing_ok=True)
+                job.pop('activeEncoder', None)
+                job['state'] = 'paused'
+                job['error'] = job.get('error') or (str(reason) if reason else None)
+                self._save(manifest, job)
+                return self._public(manifest, job)
+        finally:
+            with self.stop_lock:
+                self.stopping.discard(job_id)
 
     def _start_segment(self, manifest, job, lease):
         segment_index = len(job['segments'])
@@ -866,34 +934,62 @@ class VideoJobStore:
                 pass
 
     def discard(self, job_id):
-        self._interrupt_active_segment(job_id)
-        with self._job_lock(job_id):
-            if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
-                raise ValueError('Invalid video export id')
-            poster_path = None
-            try:
-                _, job = self._load(job_id)
-                poster_path = self.videos / Path(
-                    self._output_filename(job_id, job)
-                ).with_suffix('.png')
-            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-                pass
-            with self.lock:
-                index = self._read_index()
-                entry = index['jobs'].pop(job_id, None)
-                self._write_index(index)
-            if not entry:
-                raise ValueError('Video export is missing or already complete')
-            manifest = Path(entry.get('manifest', '')) if isinstance(entry, dict) else None
-            if manifest:
-                shutil.rmtree(manifest.parent, ignore_errors=True)
-            if poster_path:
-                poster_path.unlink(missing_ok=True)
-                poster_path.with_name(f'.{poster_path.name}.pending').unlink(missing_ok=True)
-            self._remove_pending_output(job_id)
+        if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
+            raise ValueError('Invalid video export id')
+        with self.stop_lock:
+            if job_id in self.stopping:
+                raise ValueError('Video export is already stopping')
+            self.stopping.add(job_id)
+        try:
+            self._interrupt_active_segment(job_id)
+            with self._job_lock(job_id):
+                with self.lock:
+                    index = self._read_index()
+                    entry = index['jobs'].get(job_id)
+                if entry is None:
+                    raise ValueError('Video export is missing or already complete')
+                if not isinstance(entry, dict):
+                    raise ValueError('Video export index entry is invalid')
+                manifest = self._validated_manifest_path(
+                    job_id, entry.get('manifest', ''))
+                poster_name = entry.get('poster')
+                poster_path = None
+                if (isinstance(poster_name, str)
+                        and Path(poster_name).name == poster_name
+                        and poster_name.endswith(f'-{job_id[:8]}.png')):
+                    poster_path = self.videos / poster_name
+                elif poster_name is not None:
+                    raise ValueError('Video export index entry has an invalid poster path')
+                else:
+                    try:
+                        _, job = self._load(job_id)
+                        poster_path = self.videos / Path(
+                            self._output_filename(job_id, job)
+                        ).with_suffix('.png')
+                    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+                        raise ValueError(
+                            'Video export cleanup identity could not be verified'
+                        ) from error
+
+                self._remove_job_directory(manifest, job_id)
+                if poster_path is not None:
+                    poster_path.unlink(missing_ok=True)
+                    poster_path.with_name(f'.{poster_path.name}.pending').unlink(missing_ok=True)
+                self._remove_pending_output(job_id)
+                with self.lock:
+                    index = self._read_index()
+                    if index['jobs'].pop(job_id, None) is None:
+                        raise ValueError('Video export is missing or already complete')
+                    self._write_index(index)
+        finally:
+            with self.stop_lock:
+                self.stopping.discard(job_id)
 
     def finish(self, job_id):
         with self._job_lock(job_id):
+            with self.stop_lock:
+                if job_id in self.stopping:
+                    raise ValueError('Video export is being cancelled')
             with self.lock:
                 runtime = self.active.get(job_id)
                 if runtime:
@@ -917,6 +1013,7 @@ class VideoJobStore:
             filename = self.output_filename(job_id)
             self.videos.mkdir(parents=True, exist_ok=True)
             final_path = self.videos / filename
+            metadata_path = final_path.with_suffix('.json')
             pending_path = self.videos / f'.{final_path.stem}.pending{final_path.suffix}'
             concat_path = manifest.parent / '.concat.txt'
             concat_lines = []
@@ -952,6 +1049,9 @@ class VideoJobStore:
                     raise ValueError(f'ffmpeg could not finalize checkpointed video{": " + detail if detail else ""}')
                 with pending_path.open('rb') as stream:
                     _durable_fsync(stream)
+                with self.stop_lock:
+                    if job_id in self.stopping:
+                        raise ValueError('Video export was cancelled before publishing')
                 pending_path.replace(final_path)
                 _fsync_directory(final_path.parent)
                 request_metadata = dict(request)
@@ -968,9 +1068,20 @@ class VideoJobStore:
                     'segments': job['segments'],
                     **({'poster': job['poster']} if job.get('poster') else {}),
                 }
-                atomic_write_json(final_path.with_suffix('.json'), metadata)
+                atomic_write_json(metadata_path, metadata)
+                self._validate_job_directory(manifest, job_id)
+                with self.stop_lock:
+                    if job_id in self.stopping:
+                        raise ValueError('Video export was cancelled before publishing')
+                    with self.lock:
+                        index = self._read_index()
+                        index['jobs'].pop(job_id, None)
+                        self._write_index(index)
+                        self.job_locks.pop(job_id, None)
             except (OSError, subprocess.SubprocessError, ValueError) as error:
                 pending_path.unlink(missing_ok=True)
+                final_path.unlink(missing_ok=True)
+                metadata_path.unlink(missing_ok=True)
                 job['state'] = 'ready'
                 job['error'] = str(error)
                 self._save(manifest, job)
@@ -981,13 +1092,13 @@ class VideoJobStore:
             finally:
                 concat_path.unlink(missing_ok=True)
 
-            with self.lock:
-                index = self._read_index()
-                index['jobs'].pop(job_id, None)
-                self._write_index(index)
-                self.job_locks.pop(job_id, None)
             self._release_owner(job_id)
-            shutil.rmtree(manifest.parent, ignore_errors=True)
+            try:
+                self._remove_job_directory(manifest, job_id)
+            except (OSError, ValueError):
+                # The completed output is authoritative. A cleanup failure must
+                # not turn it back into a corrupt, segment-less resumable job.
+                pass
             return {
                 'url': '/' + final_path.relative_to(self.root).as_posix(),
                 'filename': final_path.name,

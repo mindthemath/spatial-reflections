@@ -51,6 +51,7 @@ let timelineFrameDisplay;
 let exportFpsSelect;
 let videoExportButton;
 let videoExportDialog;
+let videoExportDialogRequest = 0;
 let panelExpanded = true;
 let videoTimingExpanded = false;
 let savedCameraPosition = { x: 3, y: 3, z: 3 };
@@ -1594,9 +1595,13 @@ function createVideoExportDialog() {
             requestVideoExportCancellation();
         }
     });
+    videoExportDialog.addEventListener('close', () => {
+        videoExportDialogRequest += 1;
+    });
 }
 
 async function openVideoExportDialog() {
+    const requestId = ++videoExportDialogRequest;
     const fullDuration = loopTiming.frameCount / exportFps;
     const startSeconds = timelineFrame / exportFps;
     const clipSeconds = Math.min(30, Math.max(1 / exportFps, fullDuration - startSeconds));
@@ -1617,9 +1622,9 @@ async function openVideoExportDialog() {
     videoExportDialog.showModal();
     updateVideoExportSummary();
     try {
-        const response = await fetch('/api/video/capabilities', { cache: 'no-store' });
-        const value = await response.json();
-        if (!response.ok || !value.available) throw new Error(value.reason || 'Video service is unavailable');
+        const value = await videoControlApi('/api/video/capabilities', { cache: 'no-store' });
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
+        if (!value.available) throw new Error(value.reason || 'Video service is unavailable');
         videoExportDialog.dataset.serverAvailable = 'yes';
         videoExportDialog.dataset.freeBytes = String(value.freeBytes);
         videoExportDialog.dataset.clips = JSON.stringify(value.clips || []);
@@ -1630,7 +1635,9 @@ async function openVideoExportDialog() {
             });
         videoExportDialog.dataset.statusMode = 'ready';
         await loadVideoResumeJobs();
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
     } catch (error) {
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
         status.textContent = `Video export requires the local application server and ffmpeg. ${error.message}`;
         status.classList.add('error');
         videoExportDialog.dataset.statusMode = 'error';
@@ -1639,11 +1646,13 @@ async function openVideoExportDialog() {
 }
 
 async function loadVideoResumeJobs() {
+    const requestId = videoExportDialogRequest;
     const section = document.getElementById('video-resume-jobs');
     const list = document.getElementById('video-resume-job-list');
     list.replaceChildren();
     try {
         const value = await videoControlApi('/api/video/jobs', { cache: 'no-store' });
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
         for (const job of value.jobs || []) {
             const card = document.createElement('div');
             card.className = 'video-resume-job';
@@ -1711,6 +1720,7 @@ async function loadVideoResumeJobs() {
         }
         section.hidden = !list.children.length;
     } catch (error) {
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
         section.hidden = false;
         list.textContent = `Could not inspect interrupted exports: ${error.message}`;
     }
@@ -2125,7 +2135,7 @@ async function runVideoExport(plan, resumableJob = null) {
                 stopError = videoExportStopPromise ? await videoExportStopPromise : null;
             } else {
                 try {
-                    await videoApi('/api/video/pause', {
+                    await videoControlApi('/api/video/pause', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             id: activeVideoExportJob.id,

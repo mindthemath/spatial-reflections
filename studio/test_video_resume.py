@@ -7,6 +7,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from studio.video_resume import VideoJobStore
@@ -132,6 +133,9 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(resumed['nextFrame'], 0)
         self.assertFalse(segment.exists())
         self.assertTrue((self.manifest(job).parent / 'quarantine' / segment.name).exists())
+        self.store.pause(job['id'], lease=resumed['lease'])
+        self.store.discard(job['id'])
+        self.assertEqual(self.store.list_jobs(), [])
 
     def test_custom_scratch_must_be_existing_absolute_directory(self):
         with self.assertRaisesRegex(ValueError, 'absolute'):
@@ -151,6 +155,21 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(next(job for job in jobs if job['id'] == healthy['id'])['state'], 'paused')
         self.assertEqual(next(job for job in jobs if job['id'] == malformed_id)['state'], 'unavailable')
 
+    def test_claimed_server_recovery_reports_malformed_index_entry(self):
+        malformed_id = 'f' * 32
+        index = self.store._read_index()
+        index['jobs'][malformed_id] = 'not-an-object'
+        self.store._write_index(index)
+        self.store.processes_for_path = lambda _path: []
+        self.store.claim_server()
+        try:
+            report = self.store.recover_stale_encoders()
+        finally:
+            self.store.release_server()
+
+        self.assertEqual(report['failed'], 1)
+        self.assertFalse(report['indexFailed'])
+
     def test_discard_removes_unavailable_job_from_index(self):
         scratch = self.root / 'mounted'
         scratch.mkdir()
@@ -158,6 +177,47 @@ class VideoJobStoreTest(unittest.TestCase):
         shutil.rmtree(scratch)
         self.store.discard(job['id'])
         self.assertEqual(self.store.list_jobs(), [])
+
+    def test_discard_removes_poster_when_custom_scratch_is_missing(self):
+        scratch = self.root / 'mounted-with-poster'
+        scratch.mkdir()
+        job = self.store.create(request(scratchPath=str(scratch)))
+        active = self.store.resume(job['id'])
+        poster = self.store.write_poster(job['id'], b'poster', active['lease'])
+        poster_path = self.root / poster['url'].lstrip('/')
+        self.store.pause(job['id'], lease=active['lease'])
+        shutil.rmtree(scratch)
+
+        self.store.discard(job['id'])
+
+        self.assertFalse(poster_path.exists())
+
+    def test_index_manifest_path_must_identify_exact_job_directory(self):
+        job = self.store.create(request())
+        index = json.loads(self.store.index_path.read_text())
+        for invalid in ('', '.', str(self.root / 'unrelated' / 'job.json')):
+            with self.subTest(invalid=invalid):
+                index['jobs'][job['id']]['manifest'] = invalid
+                self.store._write_index(index)
+                with self.assertRaisesRegex(ValueError, 'index entry'):
+                    self.store._manifest_path(job['id'])
+
+    def test_discard_never_recursively_deletes_unverified_manifest_directory(self):
+        job = self.store.create(request())
+        unrelated = self.root / 'unrelated' / job['id']
+        unrelated.mkdir(parents=True)
+        (unrelated / 'job.json').write_text('{}')
+        marker = unrelated / 'keep.txt'
+        marker.write_text('keep')
+        index = json.loads(self.store.index_path.read_text())
+        index['jobs'][job['id']]['manifest'] = str(unrelated / 'job.json')
+        self.store._write_index(index)
+
+        with self.assertRaisesRegex(ValueError, 'unexpected entry'):
+            self.store.discard(job['id'])
+
+        self.assertEqual(marker.read_text(), 'keep')
+        self.assertEqual(len(self.store.list_jobs()), 1)
 
     def test_second_store_cannot_claim_same_job(self):
         job = self.store.create(request())
@@ -458,6 +518,34 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertRegex(str(write_errors[0]), 'lease')
         self.assertNotIn(job['id'], self.store.active)
 
+    def test_resume_cannot_race_past_pause_transition(self):
+        job = self.store.create(request())
+        active = self.store.resume(job['id'])
+        interrupted = threading.Event()
+        release_pause = threading.Event()
+        original_interrupt = self.store._interrupt_active_segment
+
+        def delayed_interrupt(job_id):
+            original_interrupt(job_id)
+            if threading.current_thread().name == 'pausing-export':
+                interrupted.set()
+                release_pause.wait(2)
+
+        self.store._interrupt_active_segment = delayed_interrupt
+        pauser = threading.Thread(
+            name='pausing-export',
+            target=lambda: self.store.pause(job['id'], 'pause', active['lease']),
+        )
+        pauser.start()
+        self.assertTrue(interrupted.wait(2))
+        try:
+            with self.assertRaisesRegex(ValueError, 'stopping'):
+                self.store.resume(job['id'])
+        finally:
+            release_pause.set()
+            pauser.join(2)
+        self.assertFalse(pauser.is_alive())
+
     def test_poster_is_durable_provenance_and_discard_removes_it(self):
         job = self.store.create(request())
         active = self.store.resume(job['id'])
@@ -675,6 +763,45 @@ class VideoJobStoreTest(unittest.TestCase):
                 self.assertFalse(self.manifest(job).parent.exists())
                 self.assertEqual(store.list_jobs(), [])
 
+    def test_discard_wins_race_with_finalization_before_publish(self):
+        job = self.ready_job('mp4')
+        output = self.root / 'videos' / self.store.output_filename(job['id'])
+        finalizer_started = threading.Event()
+        discard_started = threading.Event()
+        finish_errors = []
+        discard_errors = []
+
+        def run(command, **_kwargs):
+            finalizer_started.set()
+            discard_started.wait(2)
+            Path(command[-1]).write_bytes(b'must not publish')
+            return types.SimpleNamespace(returncode=0)
+
+        self.store.run = run
+        finisher = threading.Thread(
+            target=lambda: self._capture_error(
+                finish_errors, lambda: self.store.finish(job['id'])),
+        )
+        finisher.start()
+        self.assertTrue(finalizer_started.wait(2))
+        discarder = threading.Thread(
+            target=lambda: (
+                discard_started.set(),
+                self._capture_error(discard_errors, lambda: self.store.discard(job['id'])),
+            ),
+        )
+        discarder.start()
+        finisher.join(2)
+        discarder.join(2)
+
+        self.assertFalse(finisher.is_alive())
+        self.assertFalse(discarder.is_alive())
+        self.assertEqual(len(finish_errors), 1)
+        self.assertRegex(str(finish_errors[0]), 'cancel')
+        self.assertEqual(discard_errors, [])
+        self.assertFalse(output.exists())
+        self.assertEqual(self.store.list_jobs(), [])
+
     def test_pause_preserves_more_specific_server_error(self):
         job = self.store.create(request())
         manifest = json.loads(self.manifest(job).read_text())
@@ -713,6 +840,55 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(self.store.list_jobs()[0]['state'], 'ready')
         completed = self.store.finish(job['id'])
         self.assertTrue((self.root / completed['url'].lstrip('/')).is_file())
+
+    def test_metadata_failure_rolls_back_published_video(self):
+        job = self.ready_job('mp4')
+        output = self.root / 'videos' / self.store.output_filename(job['id'])
+
+        def run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b'complete')
+            return types.SimpleNamespace(returncode=0)
+
+        real_atomic_write = VideoJobStore.finish.__globals__['atomic_write_json']
+
+        def fail_metadata(path, value):
+            if path == output.with_suffix('.json'):
+                raise OSError('metadata disk failure')
+            return real_atomic_write(path, value)
+
+        self.store.run = run
+        with mock.patch('studio.video_resume.atomic_write_json', side_effect=fail_metadata):
+            with self.assertRaisesRegex(ValueError, 'metadata disk failure'):
+                self.store.finish(job['id'])
+
+        self.assertFalse(output.exists())
+        self.assertFalse(output.with_suffix('.json').exists())
+        self.assertEqual(self.store.list_jobs()[0]['state'], 'ready')
+
+    def test_index_failure_preserves_checkpoints_for_finalization_retry(self):
+        job = self.ready_job('mp4')
+        output = self.root / 'videos' / self.store.output_filename(job['id'])
+        checkpoints = list(self.manifest(job).parent.glob('segment-*.mkv'))
+
+        def run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b'complete')
+            return types.SimpleNamespace(returncode=0)
+
+        real_write_index = self.store._write_index
+
+        def fail_completed_index(value):
+            if job['id'] not in value['jobs']:
+                raise OSError('index disk failure')
+            return real_write_index(value)
+
+        self.store.run = run
+        self.store._write_index = fail_completed_index
+        with self.assertRaisesRegex(ValueError, 'index disk failure'):
+            self.store.finish(job['id'])
+
+        self.assertFalse(output.exists())
+        self.assertTrue(all(path.is_file() for path in checkpoints))
+        self.assertEqual(self.store.list_jobs()[0]['state'], 'ready')
 
 
 if __name__ == '__main__':
