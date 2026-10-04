@@ -613,7 +613,7 @@ class VideoJobStore:
                 path.unlink(missing_ok=True)
             job.pop('activeEncoder', None)
             job['state'] = 'paused'
-            job['error'] = str(reason) if reason else None
+            job['error'] = job.get('error') or (str(reason) if reason else None)
             self._save(manifest, job)
             return self._public(manifest, job)
 
@@ -943,8 +943,10 @@ class VideoJobStore:
                     _durable_fsync(stream)
                 pending_path.replace(final_path)
                 _fsync_directory(final_path.parent)
+                request_metadata = dict(request)
+                request_metadata.pop('scratchPath', None)
                 metadata = {
-                    **request,
+                    **request_metadata,
                     'schemaVersion': 2,
                     'createdAt': job['createdAt'],
                     'completedAt': utc_now(),

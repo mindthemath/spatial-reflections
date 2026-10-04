@@ -31,6 +31,7 @@ VIDEO_FRAME_READ_TIMEOUT = 30
 VIDEO_JOBS = {}
 VIDEO_JOBS_LOCK = threading.Lock()
 VIDEO_STORE = None
+VIDEO_STORE_LOCK = threading.Lock()
 
 
 def hash_file(path):
@@ -207,7 +208,7 @@ def video_capabilities():
     ffmpeg = shutil.which('ffmpeg')
     recovery = {
         'recovered': 0, 'alreadyExited': 0, 'refused': 0,
-        'skippedActive': 0, 'failed': 0,
+        'skippedActive': 0, 'failed': 0, 'indexFailed': False,
     }
     available = bool(ffmpeg)
     reason = None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'
@@ -237,14 +238,15 @@ def video_store():
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
     root = ROOT.resolve()
-    if VIDEO_STORE is None or VIDEO_STORE.root != root or VIDEO_STORE.ffmpeg != str(ffmpeg):
-        if VIDEO_STORE is not None:
-            VIDEO_STORE.pause_all()
-        VIDEO_STORE = VideoJobStore(root, ffmpeg)
-    # Keep dependency injection and unittest patches applied to subprocess.
-    VIDEO_STORE.popen = subprocess.Popen
-    VIDEO_STORE.run = subprocess.run
-    return VIDEO_STORE
+    with VIDEO_STORE_LOCK:
+        if VIDEO_STORE is None or VIDEO_STORE.root != root or VIDEO_STORE.ffmpeg != str(ffmpeg):
+            if VIDEO_STORE is not None:
+                VIDEO_STORE.pause_all()
+            VIDEO_STORE = VideoJobStore(root, ffmpeg)
+        # Keep dependency injection and unittest patches applied to subprocess.
+        VIDEO_STORE.popen = subprocess.Popen
+        VIDEO_STORE.run = subprocess.run
+        return VIDEO_STORE
 
 
 def validate_video_request(request):
@@ -596,8 +598,13 @@ class Handler(SimpleHTTPRequestHandler):
                 video_store().discard(request.get('id'))
                 return self.send_json(200, {'cancelled': True})
             if route.path == '/api/video/pause':
+                reason = request.get('reason')
+                if reason is not None:
+                    if not isinstance(reason, str) or len(reason) > 500:
+                        raise ValueError('Video pause reason must be text under 500 characters')
+                    reason = ' '.join(reason.split()) or None
                 paused = video_store().pause(
-                    request.get('id'), 'Browser paused the export', request.get('lease'))
+                    request.get('id'), reason or 'Browser paused the export', request.get('lease'))
                 return self.send_json(200, paused)
             if route.path == '/api/video/resume':
                 return self.send_json(200, video_store().resume(request.get('id')))

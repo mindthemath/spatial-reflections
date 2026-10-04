@@ -444,6 +444,7 @@ class StudioAPITest(unittest.TestCase):
             self.assertEqual(code, 200)
             self.assertFalse(capabilities['available'])
             self.assertEqual(capabilities['formats'], ['mp4', 'mkv'])
+            self.assertFalse(capabilities['encoderRecovery']['indexFailed'])
             code, result = self.request('POST', '/api/video/start', {
                 'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60, 'quality': 'standard'})
             self.assertEqual(code, 400)
@@ -454,6 +455,55 @@ class StudioAPITest(unittest.TestCase):
             server.validate_video_request({
                 'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60,
                 'quality': 'standard', 'format': 'avi'})
+
+    def test_video_pause_accepts_bounded_failure_reason(self):
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
+            code, started = self.request('POST', '/api/video/start', {
+                'width': 1280, 'height': 720, 'fps': 30, 'frames': 30,
+                'quality': 'standard',
+            })
+            self.assertEqual(code, 201)
+            code, paused = self.request('POST', '/api/video/pause', {
+                'id': started['id'], 'lease': started['lease'],
+                'reason': '  WebGL context\nwas lost  ',
+            })
+            self.assertEqual(code, 200)
+            self.assertEqual(paused['reason'], 'WebGL context was lost')
+
+            code, rejected = self.request('POST', '/api/video/pause', {
+                'id': started['id'], 'reason': 'x' * 501,
+            })
+            self.assertEqual(code, 400)
+            self.assertIn('reason', rejected['error'].lower())
+
+    def test_video_store_is_initialized_once_across_threads(self):
+        created = []
+        hold_constructor = threading.Event()
+
+        class FakeStore:
+            def __init__(self, root, ffmpeg):
+                created.append(self)
+                hold_constructor.wait(0.05)
+                self.root = root
+                self.ffmpeg = str(ffmpeg)
+
+            def pause_all(self):
+                pass
+
+        stores = []
+        server.VIDEO_STORE = None
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server, 'VideoJobStore', FakeStore):
+            threads = [threading.Thread(target=lambda: stores.append(server.video_store()))
+                       for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(created), 1)
+        self.assertEqual(len({id(store) for store in stores}), 1)
 
     def test_video_capabilities_reports_startup_encoder_recovery(self):
         fake_store = mock.Mock()

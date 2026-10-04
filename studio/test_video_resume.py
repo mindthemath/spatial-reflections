@@ -613,6 +613,9 @@ class VideoJobStoreTest(unittest.TestCase):
                 store = VideoJobStore(root, '/fake/ffmpeg')
                 self.store = store
                 job = self.ready_job(video_format)
+                manifest = json.loads(self.manifest(job).read_text())
+                manifest['request']['scratchPath'] = '/Volumes/private-render-scratch'
+                self.write_manifest(job, manifest)
                 commands = []
                 concat_inputs = []
 
@@ -641,8 +644,19 @@ class VideoJobStoreTest(unittest.TestCase):
                 self.assertEqual(metadata['checkpointSeconds'], 1)
                 self.assertEqual(metadata['resumeCount'], 3)
                 self.assertEqual(len(metadata['segments']), 2)
+                self.assertNotIn('scratchPath', metadata)
                 self.assertFalse(self.manifest(job).parent.exists())
                 self.assertEqual(store.list_jobs(), [])
+
+    def test_pause_preserves_more_specific_server_error(self):
+        job = self.store.create(request())
+        manifest = json.loads(self.manifest(job).read_text())
+        manifest['error'] = 'ffmpeg exited while writing checkpoint 3'
+        self.write_manifest(job, manifest)
+
+        paused = self.store.pause(job['id'], 'Browser reported a network failure')
+
+        self.assertEqual(paused['reason'], 'ffmpeg exited while writing checkpoint 3')
 
     def test_failed_finalization_preserves_segments_for_retry(self):
         job = self.ready_job('mp4')

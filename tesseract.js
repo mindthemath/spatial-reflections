@@ -2061,7 +2061,11 @@ async function runVideoExport(plan, resumableJob = null) {
                 try {
                     await videoApi('/api/video/pause', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: activeVideoExportJob.id, lease: activeVideoExportJob.lease })
+                        body: JSON.stringify({
+                            id: activeVideoExportJob.id,
+                            lease: activeVideoExportJob.lease,
+                            reason: String(error.message || error).slice(0, 500)
+                        })
                     });
                 } catch { /* The original error is more useful. */ }
             }
