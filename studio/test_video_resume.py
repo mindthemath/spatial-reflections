@@ -621,6 +621,41 @@ class VideoJobStoreTest(unittest.TestCase):
         self.store.write_frame(job['id'], 4, b'png', lease)
         self.assertEqual(len(processes), 2)
 
+    def test_zero_checkpoint_seconds_only_durably_saves_completed_export(self):
+        processes = []
+
+        class FakeProcess:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+                processes.append(self)
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.output.write_bytes(b'complete-segment')
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        self.store.popen = FakeProcess
+        job = self.store.create(request(fps=2, frames=3, checkpointSeconds=0))
+        lease = self.store.resume(job['id'])['lease']
+
+        for frame in range(2):
+            progress = self.store.write_frame(job['id'], frame, b'png', lease)
+            self.assertEqual(progress['durableFrame'], 0)
+            self.assertFalse(progress['checkpointed'])
+        progress = self.store.write_frame(job['id'], 2, b'png', lease)
+
+        self.assertEqual(progress['durableFrame'], 3)
+        self.assertTrue(progress['checkpointed'])
+        self.assertEqual(len(processes), 1)
+
     def test_encoder_failure_pauses_at_last_durable_frame(self):
         class FailingProcess:
             def __init__(self, command, **_kwargs):

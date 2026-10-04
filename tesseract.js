@@ -1534,10 +1534,10 @@ function createVideoExportDialog() {
                     <option value="high">High</option>
                 </select></label>
                 <label>Range<select id="video-export-range">
-                    <option value="full">Whole perfect loop</option>
+                    <option value="full">Whole loop</option>
                     <option value="clip">Clip window</option>
                 </select></label>
-                <label>Checkpoint every (seconds)<input id="video-export-checkpoint" type="number" min="1" max="3600" step="1" value="60"></label>
+                <label>Checkpoint every (seconds; 0 = none)<input id="video-export-checkpoint" type="number" min="0" max="3600" step="1" value="60"></label>
                 <label>Scratch folder (optional)<input id="video-export-scratch" placeholder="Default: videos/.checkpoints"></label>
             </div>
             <div id="video-export-clip-fields" class="video-export-grid" hidden style="margin-top:10px">
@@ -1740,7 +1740,8 @@ function videoExportPlanFromRequest(request) {
         startFrame: Number(request.startFrame) || 0,
         bitRate: Number(request.bitRate) || 0,
         estimatedBytes: Number(request.estimatedBytes) || 0,
-        checkpointSeconds: Number(request.checkpointSeconds) || 60,
+        checkpointSeconds: Number.isFinite(Number(request.checkpointSeconds))
+            ? Number(request.checkpointSeconds) : 60,
         scratchPath: request.scratchPath || '',
         error: ''
     };
@@ -1759,7 +1760,7 @@ function videoExportPlan() {
     const scratchPath = document.getElementById('video-export-scratch').value.trim();
 
     if (!loopTiming.exact || loopTiming.frameCount < 1) error = 'The current motion does not have an exportable timeline.';
-    if (!Number.isInteger(checkpointSeconds) || checkpointSeconds < 1 || checkpointSeconds > 3600) error = 'Checkpoint duration must be between 1 and 3,600 seconds.';
+    if (!Number.isInteger(checkpointSeconds) || checkpointSeconds < 0 || checkpointSeconds > 3600) error = 'Checkpoint duration must be between 0 and 3,600 seconds.';
     if (range === 'clip') {
         const startSeconds = parseTimeInput(document.getElementById('video-export-start').value);
         const durationSeconds = parseTimeInput(document.getElementById('video-export-duration').value);
@@ -1793,20 +1794,23 @@ function updateVideoExportSummary() {
         summary.classList.add('error');
     } else {
         const rangeText = plan.range === 'full'
-            ? `Perfect loop · frames 0–${plan.frames - 1}`
+            ? `Whole loop · frames 0–${plan.frames - 1}`
             : `Clip · frames ${plan.startFrame}–${plan.startFrame + plan.frames - 1}`;
+        const checkpointText = plan.checkpointSeconds === 0
+            ? 'No checkpoints. Pausing or interruption restarts from frame 0.'
+            : `Durable progress is saved every ${plan.checkpointSeconds} seconds.`;
         summary.innerHTML = `
             <strong>${rangeText}</strong><br>
             ${plan.width} × ${plan.height} · ${exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
             H.264 ${plan.format.toUpperCase()} · ${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target · no audio · current ${currentShader} shader<br>
             Duration ${formatDuration(plan.duration)} · estimated ${plan.format.toUpperCase()} size <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
-            <small>Saved under <code>videos/</code>. Durable progress is saved every ${plan.checkpointSeconds} seconds. Size is a bitrate-based estimate; visual complexity can change the final file size.${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
+            <small>Saved under <code>videos/</code>. ${checkpointText} Size is a bitrate-based estimate; visual complexity can change the final file size.${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
         summary.classList.remove('error');
     }
     confirm.disabled = videoExportRunning || videoExportDialog.dataset.serverAvailable !== 'yes' || !plan || Boolean(plan.error) || spaceError;
     if (!videoExportRunning && videoExportDialog.dataset.serverAvailable === 'yes' && videoExportDialog.dataset.statusMode === 'ready') {
         const selection = plan && !plan.error
-            ? `${formatDuration(plan.duration)} ${plan.range === 'full' ? 'perfect loop' : 'clip'} is selected. `
+            ? `${formatDuration(plan.duration)} ${plan.range === 'full' ? 'whole loop' : 'clip'} is selected. `
             : '';
         const recovery = JSON.parse(videoExportDialog.dataset.encoderRecovery || '{}');
         const recoveryText = recovery.recovered

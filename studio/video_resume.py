@@ -368,8 +368,8 @@ class VideoJobStore:
         checkpoint_seconds = int(request.get('checkpointSeconds', 60))
         if fps < 1 or frames < 1:
             raise ValueError('Video export requires positive fps and frame count')
-        if checkpoint_seconds < 1 or checkpoint_seconds > 3600:
-            raise ValueError('Checkpoint duration must be between 1 and 3,600 seconds')
+        if checkpoint_seconds < 0 or checkpoint_seconds > 3600:
+            raise ValueError('Checkpoint duration must be between 0 and 3,600 seconds')
 
         job_id = uuid.uuid4().hex
         configured_value = request.get('scratchPath')
@@ -705,7 +705,12 @@ class VideoJobStore:
             int(request.get('width', 1280)) * int(request.get('height', 720))
             * int(request['fps']) * 0.07,
         ))
-        checkpoint_bytes = max(1, bit_rate * int(request['checkpointSeconds']) // 8)
+        checkpoint_seconds = int(request['checkpointSeconds'])
+        checkpoint_bytes = max(
+            1,
+            bit_rate * checkpoint_seconds // 8 if checkpoint_seconds
+            else bit_rate * int(request['frames']) // int(request['fps']) // 8,
+        )
         free_bytes = shutil.disk_usage(manifest.parent).free
         if checkpoint_bytes > free_bytes * 0.9:
             raise ValueError(
@@ -898,7 +903,11 @@ class VideoJobStore:
                 self._fail_active_segment(job_id, runtime, f'Checkpoint encoder stopped: {error}')
                 raise ValueError('Checkpoint encoder stopped before the segment completed') from error
             runtime['written'] += 1
-            checkpoint_frames = job['request']['fps'] * job['request']['checkpointSeconds']
+            checkpoint_seconds = job['request']['checkpointSeconds']
+            checkpoint_frames = (
+                job['request']['fps'] * checkpoint_seconds
+                if checkpoint_seconds else job['request']['frames']
+            )
             complete = (runtime['written'] >= checkpoint_frames
                         or expected + 1 == job['request']['frames'])
             if complete:
