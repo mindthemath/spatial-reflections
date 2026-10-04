@@ -17,6 +17,9 @@ let videoExportRunning = false;
 let activeVideoExportJob = null;
 let cancelVideoExportRequested = false;
 let videoExportAbort = null;
+let videoExportStopAction = null;
+let videoExportStopPromise = null;
+let videoExportStopJobId = null;
 let loopTiming = { period: 0, frameCount: 1, timeStep: 0, exact: true };
 let lastAnimationTimestamp = null;
 let frameAccumulator = 0;
@@ -48,6 +51,7 @@ let timelineFrameDisplay;
 let exportFpsSelect;
 let videoExportButton;
 let videoExportDialog;
+let videoExportDialogRequest = 0;
 let panelExpanded = true;
 let videoTimingExpanded = false;
 let savedCameraPosition = { x: 3, y: 3, z: 3 };
@@ -157,20 +161,21 @@ window.addEventListener('beforeunload', event => {
     event.returnValue = '';
 });
 window.addEventListener('pagehide', () => {
-    persistViewerSettings();
-    if (activeVideoExportJob) {
+    if (activeVideoExportJob && videoExportStopAction !== 'discard') {
         try { sessionStorage.setItem(VIDEO_EXPORT_INTERRUPTED_KEY, 'yes'); } catch { /* Optional. */ }
-        const body = new Blob([JSON.stringify({ id: activeVideoExportJob.id })], { type: 'application/json' });
-        navigator.sendBeacon('/api/video/cancel', body);
+        const body = new Blob([JSON.stringify({
+            id: activeVideoExportJob.id,
+            lease: activeVideoExportJob.lease
+        })], { type: 'text/plain' });
+        navigator.sendBeacon('/api/video/pause', body);
     }
 });
 window.addEventListener('pageshow', event => {
-    // A back/forward-cache restore would otherwise revive a frozen progress UI
-    // whose server job was deliberately cancelled during pagehide.
+    // A back/forward-cache restore would otherwise revive a frozen progress UI.
     if (event.persisted && videoExportRunning) location.reload();
 });
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') persistViewerSettings();
+    if (document.visibilityState === 'hidden' && !videoExportRunning) persistViewerSettings();
 });
 // File drop zone
 let dropZone;
@@ -1483,6 +1488,23 @@ function parseTimeInput(value) {
     return parts.reduce((total, part) => total * 60 + Number(part), 0);
 }
 
+function videoRenderSignature() {
+    return JSON.stringify({
+        sourceUrl: location.pathname + location.search,
+        rotationSpeed,
+        rotationCoefficients,
+        shader: currentShader,
+        lighting: currentLighting,
+        lightDistance,
+        showVertices,
+        camera: {
+            position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
+            target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
+        },
+        fps: exportFps
+    });
+}
+
 function createVideoExportDialog() {
     videoExportDialog = document.createElement('dialog');
     videoExportDialog.id = 'video-export-dialog';
@@ -1512,9 +1534,11 @@ function createVideoExportDialog() {
                     <option value="high">High</option>
                 </select></label>
                 <label>Range<select id="video-export-range">
-                    <option value="full">Whole perfect loop</option>
+                    <option value="full">Whole loop</option>
                     <option value="clip">Clip window</option>
                 </select></label>
+                <label>Checkpoint every (seconds; 0 = none)<input id="video-export-checkpoint" type="number" min="0" max="3600" step="1" value="60"></label>
+                <label>Scratch folder (optional)<input id="video-export-scratch" placeholder="Default: videos/.checkpoints"></label>
             </div>
             <div id="video-export-clip-fields" class="video-export-grid" hidden style="margin-top:10px">
                 <label>Start in loop<input id="video-export-start" inputmode="decimal" placeholder="HH:MM:SS or seconds"></label>
@@ -1524,8 +1548,13 @@ function createVideoExportDialog() {
             <progress id="video-export-progress" value="0" max="1" hidden></progress>
             <p id="video-export-status" role="status"></p>
             <p id="video-export-result"></p>
+            <section id="video-resume-jobs" hidden>
+                <strong>INTERRUPTED EXPORTS</strong>
+                <div id="video-resume-job-list"></div>
+            </section>
             <div class="video-export-actions">
-                <button id="cancel-video-export" type="button" hidden>Cancel export</button>
+                <button id="cancel-video-export" type="button" hidden>Pause export</button>
+                <button id="discard-active-video-export" type="button" hidden>Cancel export</button>
                 <button id="confirm-video-export" type="submit">Start export</button>
             </div>
         </form>`;
@@ -1534,7 +1563,7 @@ function createVideoExportDialog() {
     const resolution = document.getElementById('video-export-resolution');
     resolution.value = `${videoExportWidth}x${videoExportHeight}`;
     document.getElementById('video-export-quality').value = videoExportQuality;
-    for (const id of ['video-export-resolution', 'video-export-format', 'video-export-quality', 'video-export-range', 'video-export-start', 'video-export-duration']) {
+    for (const id of ['video-export-resolution', 'video-export-format', 'video-export-quality', 'video-export-range', 'video-export-start', 'video-export-duration', 'video-export-checkpoint', 'video-export-scratch']) {
         document.getElementById(id).addEventListener('input', updateVideoExportSummary);
         document.getElementById(id).addEventListener('change', updateVideoExportSummary);
     }
@@ -1543,6 +1572,7 @@ function createVideoExportDialog() {
         else videoExportDialog.close();
     });
     document.getElementById('cancel-video-export').addEventListener('click', requestVideoExportCancellation);
+    document.getElementById('discard-active-video-export').addEventListener('click', requestVideoExportDiscard);
     document.getElementById('video-export-form').addEventListener('submit', async event => {
         event.preventDefault();
         const plan = videoExportPlan();
@@ -1565,9 +1595,13 @@ function createVideoExportDialog() {
             requestVideoExportCancellation();
         }
     });
+    videoExportDialog.addEventListener('close', () => {
+        videoExportDialogRequest += 1;
+    });
 }
 
 async function openVideoExportDialog() {
+    const requestId = ++videoExportDialogRequest;
     const fullDuration = loopTiming.frameCount / exportFps;
     const startSeconds = timelineFrame / exportFps;
     const clipSeconds = Math.min(30, Math.max(1 / exportFps, fullDuration - startSeconds));
@@ -1581,23 +1615,136 @@ async function openVideoExportDialog() {
     videoExportDialog.dataset.statusMode = 'checking';
     videoExportDialog.dataset.serverAvailable = '';
     videoExportDialog.dataset.freeBytes = '';
+    videoExportDialog.dataset.encoderRecovery = JSON.stringify({
+        recovered: 0, alreadyExited: 0, refused: 0, skippedActive: 0, failed: 0, indexFailed: false
+    });
+    videoExportDialog.dataset.renderSignature = videoRenderSignature();
     videoExportDialog.showModal();
     updateVideoExportSummary();
     try {
-        const response = await fetch('/api/video/capabilities', { cache: 'no-store' });
-        const value = await response.json();
-        if (!response.ok || !value.available) throw new Error(value.reason || 'Video service is unavailable');
+        const value = await videoControlApi('/api/video/capabilities', { cache: 'no-store' });
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
+        if (!value.available) throw new Error(value.reason || 'Video service is unavailable');
         videoExportDialog.dataset.serverAvailable = 'yes';
         videoExportDialog.dataset.freeBytes = String(value.freeBytes);
         videoExportDialog.dataset.clips = JSON.stringify(value.clips || []);
         videoExportDialog.dataset.encoder = value.encoder;
+        videoExportDialog.dataset.encoderRecovery = JSON.stringify(
+            value.encoderRecovery || {
+                recovered: 0, alreadyExited: 0, refused: 0, skippedActive: 0, failed: 0, indexFailed: false
+            });
         videoExportDialog.dataset.statusMode = 'ready';
+        await loadVideoResumeJobs();
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
     } catch (error) {
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
         status.textContent = `Video export requires the local application server and ffmpeg. ${error.message}`;
         status.classList.add('error');
         videoExportDialog.dataset.statusMode = 'error';
     }
     updateVideoExportSummary();
+}
+
+async function loadVideoResumeJobs() {
+    const requestId = videoExportDialogRequest;
+    const section = document.getElementById('video-resume-jobs');
+    const list = document.getElementById('video-resume-job-list');
+    list.replaceChildren();
+    try {
+        const value = await videoControlApi('/api/video/jobs', { cache: 'no-store' });
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
+        for (const job of value.jobs || []) {
+            const card = document.createElement('div');
+            card.className = 'video-resume-job';
+            card.dataset.jobId = job.id;
+            const request = job.request || {};
+            const sourceMatches = request.sourceUrl === location.pathname + location.search;
+            const settingsMatch = request.renderSignature === videoRenderSignature();
+            const fullyRendered = job.nextFrame === job.frames;
+            const available = !['unavailable', 'active'].includes(job.state)
+                && (fullyRendered || (sourceMatches && settingsMatch));
+            const reason = job.state === 'unavailable'
+                ? job.reason
+                : job.state === 'active' ? 'The server still marks this export active; discard it or retry after recovery.'
+                : !fullyRendered && (!sourceMatches || !settingsMatch) ? 'Current source or render settings do not match.' : '';
+            const description = document.createElement('span');
+            description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}`;
+            const resume = document.createElement('button');
+            resume.type = 'button';
+            resume.className = 'resume-video-export';
+            resume.textContent = fullyRendered ? 'Finalize' : 'Resume';
+            resume.disabled = !available;
+            resume.addEventListener('click', () => {
+                const plan = videoExportPlanFromRequest(request);
+                if (plan) runVideoExport(plan, job);
+            });
+            const discard = document.createElement('button');
+            discard.type = 'button';
+            discard.className = 'discard-video-export';
+            discard.textContent = 'Discard';
+            discard.addEventListener('click', async () => {
+                const confirmed = await confirmAction({
+                    title: 'DISCARD VIDEO EXPORT',
+                    message: 'Delete this interrupted export and all of its checkpoints?',
+                    confirmLabel: 'Discard'
+                });
+                if (!confirmed) return;
+                await videoControlApi('/api/video/cancel', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: job.id })
+                });
+                await loadVideoResumeJobs();
+            });
+            card.append(description, resume);
+            if (job.state !== 'unavailable' && sourceMatches && !settingsMatch && !fullyRendered && request.viewerState) {
+                const restore = document.createElement('button');
+                restore.type = 'button';
+                restore.className = 'restore-video-export';
+                restore.textContent = 'Restore export settings';
+                restore.addEventListener('click', async () => {
+                    applyViewerSettings(request.viewerState);
+                    camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
+                    controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
+                    controls.update();
+                    vertices.forEach(vertex => { vertex.visible = showVertices; });
+                    updateMaterials();
+                    refreshLoopTiming();
+                    persistViewerSettings();
+                    videoExportDialog.dataset.renderSignature = videoRenderSignature();
+                    await loadVideoResumeJobs();
+                });
+                card.append(restore);
+            }
+            card.append(discard);
+            list.appendChild(card);
+        }
+        section.hidden = !list.children.length;
+    } catch (error) {
+        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
+        section.hidden = false;
+        list.textContent = `Could not inspect interrupted exports: ${error.message}`;
+    }
+}
+
+function videoExportPlanFromRequest(request) {
+    const width = Number(request.width);
+    const height = Number(request.height);
+    const frames = Number(request.frames);
+    const duration = frames / Number(request.fps);
+    if (![width, height, frames, duration].every(Number.isFinite)) return null;
+    return {
+        width, height, frames, duration,
+        format: request.format,
+        quality: request.quality,
+        range: request.startFrame ? 'clip' : 'full',
+        startFrame: Number(request.startFrame) || 0,
+        bitRate: Number(request.bitRate) || 0,
+        estimatedBytes: Number(request.estimatedBytes) || 0,
+        checkpointSeconds: Number.isFinite(Number(request.checkpointSeconds))
+            ? Number(request.checkpointSeconds) : 60,
+        scratchPath: request.scratchPath || '',
+        error: ''
+    };
 }
 
 function videoExportPlan() {
@@ -1609,8 +1756,11 @@ function videoExportPlan() {
     let startFrame = 0;
     let frames = loopTiming.frameCount;
     let error = '';
+    const checkpointSeconds = Number(document.getElementById('video-export-checkpoint').value);
+    const scratchPath = document.getElementById('video-export-scratch').value.trim();
 
     if (!loopTiming.exact || loopTiming.frameCount < 1) error = 'The current motion does not have an exportable timeline.';
+    if (!Number.isInteger(checkpointSeconds) || checkpointSeconds < 0 || checkpointSeconds > 3600) error = 'Checkpoint duration must be between 0 and 3,600 seconds.';
     if (range === 'clip') {
         const startSeconds = parseTimeInput(document.getElementById('video-export-start').value);
         const durationSeconds = parseTimeInput(document.getElementById('video-export-duration').value);
@@ -1625,7 +1775,7 @@ function videoExportPlan() {
     const duration = frames / exportFps;
     const bitRate = width * height * exportFps * VIDEO_QUALITY_BITS_PER_PIXEL[quality];
     const estimatedBytes = bitRate * duration / 8 * 1.03;
-    return { width, height, format, quality, range, startFrame, frames, duration, bitRate, estimatedBytes, error };
+    return { width, height, format, quality, range, startFrame, frames, duration, bitRate, estimatedBytes, checkpointSeconds, scratchPath, error };
 }
 
 function updateVideoExportSummary() {
@@ -1644,23 +1794,34 @@ function updateVideoExportSummary() {
         summary.classList.add('error');
     } else {
         const rangeText = plan.range === 'full'
-            ? `Perfect loop · frames 0–${plan.frames - 1}`
+            ? `Whole loop · frames 0–${plan.frames - 1}`
             : `Clip · frames ${plan.startFrame}–${plan.startFrame + plan.frames - 1}`;
+        const checkpointText = plan.checkpointSeconds === 0
+            ? 'No checkpoints. Pausing or interruption restarts from frame 0.'
+            : `Durable progress is saved every ${plan.checkpointSeconds} seconds.`;
         summary.innerHTML = `
             <strong>${rangeText}</strong><br>
             ${plan.width} × ${plan.height} · ${exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
             H.264 ${plan.format.toUpperCase()} · ${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target · no audio · current ${currentShader} shader<br>
             Duration ${formatDuration(plan.duration)} · estimated ${plan.format.toUpperCase()} size <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
-            <small>Saved under <code>videos/</code>. Size is a bitrate-based estimate; visual complexity can change the final file size.${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
+            <small>Saved under <code>videos/</code>. ${checkpointText} Size is a bitrate-based estimate; visual complexity can change the final file size.${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
         summary.classList.remove('error');
     }
     confirm.disabled = videoExportRunning || videoExportDialog.dataset.serverAvailable !== 'yes' || !plan || Boolean(plan.error) || spaceError;
     if (!videoExportRunning && videoExportDialog.dataset.serverAvailable === 'yes' && videoExportDialog.dataset.statusMode === 'ready') {
         const selection = plan && !plan.error
-            ? `${formatDuration(plan.duration)} ${plan.range === 'full' ? 'perfect loop' : 'clip'} is selected. `
+            ? `${formatDuration(plan.duration)} ${plan.range === 'full' ? 'whole loop' : 'clip'} is selected. `
             : '';
+        const recovery = JSON.parse(videoExportDialog.dataset.encoderRecovery || '{}');
+        const recoveryText = recovery.recovered
+            ? `Startup safely cleaned ${recovery.recovered} interrupted encoder${recovery.recovered === 1 ? '' : 's'}. `
+            : recovery.refused
+                ? `${recovery.refused} stale PID${recovery.refused === 1 ? '' : 's'} belonged to unrelated processes and were left untouched. `
+                : recovery.failed
+                    ? `${recovery.failed} older video job${recovery.failed === 1 ? '' : 's'} could not be inspected; new exports remain available. `
+                : '';
         document.getElementById('video-export-status').textContent =
-            `${videoExportDialog.dataset.encoder} encoder ready. ${selection}This window can sit in the background; leaving the page cancels the export.`;
+            `${videoExportDialog.dataset.encoder} encoder ready. ${recoveryText}${selection}Leaving the page pauses the export at its latest checkpoint.`;
     }
 }
 
@@ -1669,20 +1830,51 @@ function videoExportLabel(name) {
     return label || 'tesseract';
 }
 
+function ensureVideoExportStopRequest() {
+    if (!activeVideoExportJob || !videoExportStopAction) return null;
+    if (videoExportStopPromise && videoExportStopJobId === activeVideoExportJob.id) {
+        return videoExportStopPromise;
+    }
+    const job = activeVideoExportJob;
+    const discard = videoExportStopAction === 'discard';
+    videoExportStopJobId = job.id;
+    videoExportStopPromise = videoControlApi(discard ? '/api/video/cancel' : '/api/video/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(discard
+            ? { id: job.id }
+            : { id: job.id, lease: job.lease })
+    }).then(() => null, error => error);
+    return videoExportStopPromise;
+}
+
 function requestVideoExportCancellation() {
-    if (!videoExportRunning) return;
+    if (!videoExportRunning || videoExportStopAction) return;
+    videoExportStopAction = 'pause';
     cancelVideoExportRequested = true;
     videoExportAbort?.abort();
-    const jobId = activeVideoExportJob?.id;
-    if (jobId) {
-        fetch('/api/video/cancel', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: jobId })
-        }).catch(() => { /* The export loop reports the outcome. */ });
-    }
+    ensureVideoExportStopRequest();
     const button = document.getElementById('cancel-video-export');
     button.disabled = true;
-    document.getElementById('video-export-status').textContent = 'Cancelling…';
+    document.getElementById('discard-active-video-export').disabled = true;
+    document.getElementById('video-export-status').textContent = 'Pausing…';
+}
+
+async function requestVideoExportDiscard() {
+    if (!videoExportRunning || videoExportStopAction) return;
+    const confirmed = await confirmAction({
+        title: 'CANCEL VIDEO EXPORT',
+        message: 'Permanently delete this export, its poster, and every saved checkpoint?',
+        confirmLabel: 'Cancel export'
+    });
+    if (!confirmed || !videoExportRunning || videoExportStopAction) return;
+    videoExportStopAction = 'discard';
+    cancelVideoExportRequested = true;
+    videoExportAbort?.abort();
+    ensureVideoExportStopRequest();
+    document.getElementById('cancel-video-export').disabled = true;
+    document.getElementById('discard-active-video-export').disabled = true;
+    document.getElementById('video-export-status').textContent = 'Cancelling and discarding…';
 }
 
 async function videoApi(path, options = {}) {
@@ -1693,23 +1885,148 @@ async function videoApi(path, options = {}) {
     return value;
 }
 
-function canvasPNG(canvas) {
-    // Synchronous read. toBlob's callback is deferred, and dropped, while the
-    // document is hidden — that left the export and the encoder waiting on each other.
-    const url = canvas.toDataURL('image/png');
-    const comma = url.indexOf(',');
+async function videoControlApi(path, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+        return await videoApi(path, { ...options, signal: controller.signal });
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            throw new Error('The local video server did not respond within 10 seconds');
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function dataUrlToBlob(dataUrl) {
+    const comma = dataUrl.indexOf(',');
     if (comma < 0) throw new Error('Could not capture the WebGL frame');
-    const binary = atob(url.slice(comma + 1));
+    const binary = atob(dataUrl.slice(comma + 1));
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return new Blob([bytes], { type: 'image/png' });
 }
 
-async function runVideoExport(plan) {
+function canvasPNG(canvas) {
+    // Synchronous read. toBlob's callback is deferred, and dropped, while the
+    // document is hidden — that left the export and the encoder waiting on each other.
+    return dataUrlToBlob(canvas.toDataURL('image/png'));
+}
+
+function screenshotMetadata(extra = {}) {
+    return {
+        camera: {
+            position: {
+                x: camera.position.x,
+                y: camera.position.y,
+                z: camera.position.z
+            }
+        },
+        rotation: {
+            xw: rotationCoefficients.xw,
+            yw: rotationCoefficients.yw,
+            zw: rotationCoefficients.zw
+        },
+        time: time,
+        animation: {
+            frame: timelineFrame,
+            frameCount: loopTiming.frameCount,
+            fps: exportFps,
+            motionStep: rotationSpeed
+        },
+        target: {
+            x: controls.target.x,
+            y: controls.target.y,
+            z: controls.target.z
+        },
+        ...extra
+    };
+}
+
+function embedMetadataInPngDataUrl(imageData, metadata = {}) {
+    const metadataStr = JSON.stringify(screenshotMetadata(metadata));
+    return new Promise((resolve, reject) => {
+        const canvas = document.createElement('canvas');
+        const img = new Image();
+        img.onload = function() {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            try {
+                const imgData = ctx.getImageData(0, 0, canvas.width, 1);
+                const pixelData = imgData.data;
+                pixelData[0] = 254;
+                pixelData[1] = 0;
+                pixelData[2] = 254;
+                pixelData[3] = 255;
+                const marker = 'tESSdata=';
+                const fullData = marker + metadataStr;
+                if (fullData.length + 1 > canvas.width) {
+                    throw new Error('Screenshot metadata is too large for the image');
+                }
+                for (let i = 0; i < fullData.length; i++) {
+                    const charCode = fullData.charCodeAt(i);
+                    const pixelIndex = (i + 1) * 4;
+                    pixelData[pixelIndex] = charCode;
+                    pixelData[pixelIndex + 1] = 0;
+                    pixelData[pixelIndex + 2] = 0;
+                    pixelData[pixelIndex + 3] = 255;
+                }
+                ctx.putImageData(imgData, 0, 0);
+                resolve(canvas.toDataURL('image/png'));
+            } catch (error) {
+                reject(error);
+            }
+        };
+        img.onerror = () => reject(new Error('Could not prepare screenshot metadata'));
+        img.src = imageData;
+    });
+}
+
+async function saveVideoExportPoster(plan, job) {
+    const overlayWasVisible = showOverlay;
+    const overlayDisplay = controlPanel.style.display;
+    let png;
+    try {
+        if (overlayWasVisible) controlPanel.style.display = 'none';
+        setTimelineFrame(plan.startFrame);
+        updateTesseractProjection();
+        renderer.render(scene, camera);
+        png = dataUrlToBlob(await embedMetadataInPngDataUrl(
+            renderer.domElement.toDataURL('image/png'),
+            {
+                kind: 'video-export-poster',
+                render: JSON.parse(videoRenderSignature()),
+                video: {
+                    width: plan.width,
+                    height: plan.height,
+                    format: plan.format,
+                    quality: plan.quality,
+                    startFrame: plan.startFrame,
+                    frames: plan.frames,
+                    checkpointSeconds: plan.checkpointSeconds
+                }
+            }
+        ));
+    } finally {
+        controlPanel.style.display = overlayDisplay;
+    }
+    return videoApi(`/api/video/poster?id=${job.id}&lease=${job.lease}`, {
+        method: 'POST', headers: { 'Content-Type': 'image/png' }, body: png, signal: videoExportAbort.signal
+    });
+}
+
+async function runVideoExport(plan, resumableJob = null) {
     if (videoExportRunning) return;
     videoExportRunning = true;
     cancelVideoExportRequested = false;
     videoExportAbort = new AbortController();
+    videoExportStopAction = null;
+    videoExportStopPromise = null;
+    videoExportStopJobId = null;
     videoExportWidth = plan.width;
     videoExportHeight = plan.height;
     videoExportQuality = plan.quality;
@@ -1718,14 +2035,17 @@ async function runVideoExport(plan) {
     const status = document.getElementById('video-export-status');
     const progress = document.getElementById('video-export-progress');
     const cancel = document.getElementById('cancel-video-export');
+    const discard = document.getElementById('discard-active-video-export');
     const result = document.getElementById('video-export-result');
     const fields = videoExportDialog.querySelectorAll('input, select');
     fields.forEach(field => { field.disabled = true; });
     cancel.hidden = false;
     cancel.disabled = false;
+    discard.hidden = false;
+    discard.disabled = false;
     progress.hidden = false;
     progress.max = plan.frames;
-    progress.value = 0;
+    progress.value = resumableJob?.nextFrame || 0;
     result.replaceChildren();
     status.classList.remove('error');
     videoExportDialog.dataset.statusMode = 'running';
@@ -1740,14 +2060,27 @@ async function runVideoExport(plan) {
     try {
         const gpuLimit = renderer.getContext().getParameter(renderer.getContext().MAX_RENDERBUFFER_SIZE);
         if (plan.width > gpuLimit || plan.height > gpuLimit) throw new Error(`This GPU can render video up to ${gpuLimit}px per side`);
-        const name = document.getElementById('video-export-name').value.trim() || 'tesseract';
-        activeVideoExportJob = await videoApi('/api/video/start', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, width: plan.width, height: plan.height, fps: exportFps,
-                frames: plan.frames, quality: plan.quality, format: plan.format, startFrame: plan.startFrame,
-                loopFrameCount: loopTiming.frameCount, loopPeriod: loopTiming.period,
-                timeStep: loopTiming.timeStep, viewerState: viewerSettings() })
-        });
+        if (resumableJob) {
+            activeVideoExportJob = await videoApi('/api/video/resume', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: resumableJob.id,
+                    sourceUrl: location.pathname + location.search,
+                    renderSignature: videoRenderSignature()
+                })
+            });
+        } else {
+            const name = document.getElementById('video-export-name').value.trim() || 'tesseract';
+            activeVideoExportJob = await videoApi('/api/video/start', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, width: plan.width, height: plan.height, fps: exportFps,
+                    frames: plan.frames, quality: plan.quality, format: plan.format, startFrame: plan.startFrame,
+                    checkpointSeconds: plan.checkpointSeconds, scratchPath: plan.scratchPath,
+                    sourceUrl: location.pathname + location.search, renderSignature: videoRenderSignature(),
+                    loopFrameCount: loopTiming.frameCount, loopPeriod: loopTiming.period,
+                    timeStep: loopTiming.timeStep, viewerState: viewerSettings() })
+            });
+        }
 
         animationPaused = true;
         exportStartedAt = performance.now();
@@ -1756,7 +2089,12 @@ async function runVideoExport(plan) {
         camera.aspect = plan.width / plan.height;
         camera.updateProjectionMatrix();
 
-        for (let frame = 0; frame < plan.frames; frame++) {
+        const firstFrame = activeVideoExportJob.nextFrame || 0;
+        if (firstFrame === 0) {
+            status.textContent = 'Saving resume frame…';
+            await saveVideoExportPoster(plan, activeVideoExportJob);
+        }
+        for (let frame = firstFrame; frame < plan.frames; frame++) {
             await new Promise(resolve => setTimeout(resolve, 0));
             if (cancelVideoExportRequested) throw new DOMException('Video export cancelled', 'AbortError');
             if (renderer.getContext().isContextLost()) throw new Error('WebGL context was lost before this frame could be captured');
@@ -1766,21 +2104,21 @@ async function runVideoExport(plan) {
             const png = canvasPNG(renderer.domElement);
             await new Promise(resolve => setTimeout(resolve, 0));
             if (cancelVideoExportRequested) throw new DOMException('Video export cancelled', 'AbortError');
-            await videoApi(`/api/video/frame?id=${activeVideoExportJob.id}&frame=${frame}`, {
+            const frameResult = await videoApi(`/api/video/frame?id=${activeVideoExportJob.id}&frame=${frame}&lease=${activeVideoExportJob.lease}`, {
                 method: 'POST', headers: { 'Content-Type': 'image/png' }, body: png, signal: videoExportAbort.signal
             });
             progress.value = frame + 1;
             const now = performance.now();
             if (now - lastProgressUpdate > 150 || frame + 1 === plan.frames) {
                 const elapsedSeconds = Math.max(0.001, (now - exportStartedAt) / 1000);
-                const renderRate = (frame + 1) / elapsedSeconds;
+                const renderRate = (frame - firstFrame + 1) / elapsedSeconds;
                 const remainingSeconds = (plan.frames - frame - 1) / renderRate;
-                status.textContent = `Rendering + encoding ${(frame + 1).toLocaleString()} / ${plan.frames.toLocaleString()} frames · ${Math.round((frame + 1) / plan.frames * 100)}% · ${renderRate.toFixed(1)} fps · ETA ${formatDuration(remainingSeconds)}`;
+                status.textContent = `Rendering + encoding ${(frame + 1).toLocaleString()} / ${plan.frames.toLocaleString()} frames · ${Math.round((frame + 1) / plan.frames * 100)}% · checkpoint ${frameResult.durableFrame.toLocaleString()} · ${renderRate.toFixed(1)} fps · ETA ${formatDuration(remainingSeconds)}`;
                 lastProgressUpdate = now;
             }
         }
 
-        status.textContent = 'Finalizing MP4…';
+        status.textContent = `Finalizing ${plan.format.toUpperCase()}…`;
         const completed = await videoApi('/api/video/finish', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: activeVideoExportJob.id })
@@ -1794,21 +2132,40 @@ async function runVideoExport(plan) {
         link.textContent = `Download ${completed.filename}`;
         result.replaceChildren(link);
     } catch (error) {
+        let stopError = null;
         if (activeVideoExportJob) {
-            // Cancel already told the server. Waiting here again is what froze the page.
-            if (!cancelVideoExportRequested) {
+            if (videoExportStopAction) {
+                ensureVideoExportStopRequest();
+                stopError = videoExportStopPromise ? await videoExportStopPromise : null;
+            } else {
                 try {
-                    await videoApi('/api/video/cancel', {
+                    await videoControlApi('/api/video/pause', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: activeVideoExportJob.id })
+                        body: JSON.stringify({
+                            id: activeVideoExportJob.id,
+                            lease: activeVideoExportJob.lease,
+                            reason: String(error.message || error).slice(0, 500)
+                        })
                     });
                 } catch { /* The original error is more useful. */ }
             }
             activeVideoExportJob = null;
         }
-        videoExportDialog.dataset.statusMode = error.name === 'AbortError' ? 'cancelled' : 'error';
-        status.textContent = error.name === 'AbortError' ? 'Video export cancelled.' : error.message;
-        status.classList.toggle('error', error.name !== 'AbortError');
+        if (videoExportStopAction === 'discard' && !stopError) {
+            videoExportDialog.dataset.statusMode = 'cancelled';
+            status.textContent = 'Export cancelled and discarded.';
+            status.classList.remove('error');
+        } else if (videoExportStopAction === 'pause' && !stopError) {
+            videoExportDialog.dataset.statusMode = 'paused';
+            status.textContent = 'Video export paused. You can resume it from its latest checkpoint.';
+            status.classList.remove('error');
+        } else {
+            videoExportDialog.dataset.statusMode = 'error';
+            status.textContent = stopError
+                ? `Could not ${videoExportStopAction === 'discard' ? 'cancel' : 'pause'} the export: ${stopError.message}. Check the interrupted export below.`
+                : `${error.message} Export paused and can be resumed.`;
+            status.classList.add('error');
+        }
     } finally {
         renderer.setPixelRatio(originalPixelRatio);
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -1821,10 +2178,15 @@ async function runVideoExport(plan) {
         videoExportRunning = false;
         cancelVideoExportRequested = false;
         videoExportAbort = null;
+        videoExportStopPromise = null;
+        videoExportStopJobId = null;
         fields.forEach(field => { field.disabled = false; });
         cancel.hidden = true;
+        discard.hidden = true;
         persistViewerSettings();
+        await loadVideoResumeJobs();
         updateVideoExportSummary();
+        videoExportStopAction = null;
     }
 }
 
@@ -1959,115 +2321,11 @@ function createRotationSliders() {
 
 // Save screenshot with embedded metadata
 function saveScreenshot() {
-    // Temporarily hide the overlay
     const overlayWasVisible = showOverlay;
-    if (overlayWasVisible) {
-        controlPanel.style.display = 'none';
-    }
-    
-    // Render the scene
+    if (overlayWasVisible) controlPanel.style.display = 'none';
     renderer.render(scene, camera);
-    
-    // Get metadata for saving
-    const metadata = {
-        camera: {
-            position: {
-                x: camera.position.x,
-                y: camera.position.y,
-                z: camera.position.z
-            }
-        },
-        rotation: {
-            xw: rotationCoefficients.xw,
-            yw: rotationCoefficients.yw,
-            zw: rotationCoefficients.zw
-        },
-        time: time, // Include the current animation time for backward compatibility
-        animation: {
-            frame: timelineFrame,
-            frameCount: loopTiming.frameCount,
-            fps: exportFps,
-            motionStep: rotationSpeed
-        },
-        target: {
-            x: controls.target.x,
-            y: controls.target.y,
-            z: controls.target.z
-        }
-    };
-    
-    // Convert canvas to data URL
-    let imageData = renderer.domElement.toDataURL('image/png');
-    
-    // Create a canvas to embed metadata in the PNG
-    const canvas = document.createElement('canvas');
-    const img = new Image();
-    
-    img.onload = function() {
-        canvas.width = img.width;
-        canvas.height = img.height;
-        
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        
-        // Store metadata in tEXt chunk using a hidden canvas trick
-        // We'll create a special metadata tag in the canvas
-        const metadataStr = JSON.stringify(metadata);
-        console.log("Embedding metadata:", metadataStr);
-        
-        // Encode metadata in the canvas
-        // We use a data URI with Base64 encoding of metadata
-        const dataURI = canvas.toDataURL('image/png');
-        
-        // Add metadata as a custom attribute to the canvas
-        // This is a hack that some browsers support - metadata is stored in the PNG chunks
-        canvas.setAttribute('tESSdata', metadataStr);
-        
-        // Get the PNG with metadata
-        let modifiedImageData;
-        try {
-            // Try the modern approach with custom attributes
-            modifiedImageData = canvas.toDataURL('image/png');
-            
-            // As a fallback, embed metadata in first row of pixels
-            // Some browsers don't properly encode custom attributes in PNG chunks
-            const imgData = ctx.getImageData(0, 0, canvas.width, 1);
-            const pixelData = imgData.data;
-            
-            // First pixel is the marker (magenta)
-            pixelData[0] = 254; // Almost full red
-            pixelData[1] = 0;   // No green
-            pixelData[2] = 254; // Almost full blue
-            pixelData[3] = 255; // Full alpha
-            
-            // Add metadata marker
-            const marker = "tESSdata=";
-            const fullData = marker + metadataStr;
-            
-            // Encode the string in subsequent pixels
-            for (let i = 0; i < fullData.length; i++) {
-                const charCode = fullData.charCodeAt(i);
-                const pixelIndex = (i + 1) * 4; // Start at second pixel
-                
-                if (pixelIndex < pixelData.length) {
-                    pixelData[pixelIndex] = charCode; // Store in red channel
-                    pixelData[pixelIndex + 1] = 0;    // Green is 0
-                    pixelData[pixelIndex + 2] = 0;    // Blue is 0
-                    pixelData[pixelIndex + 3] = 255;  // Full alpha
-                }
-            }
-            
-            // Write the modified pixel data back to the canvas
-            ctx.putImageData(imgData, 0, 0);
-            
-            // Get the modified image with both methods applied
-            modifiedImageData = canvas.toDataURL('image/png');
-        } catch (e) {
-            console.error("Error embedding metadata, falling back to basic method:", e);
-            modifiedImageData = dataURI;
-        }
-        
-        // Create a filename with metadata in it as fallback
+    const imageData = renderer.domElement.toDataURL('image/png');
+    embedMetadataInPngDataUrl(imageData).then(modifiedImageData => {
         const pos = camera.position;
         const target = controls.target;
         const posStr = `pos_${pos.x.toFixed(2)}_${pos.y.toFixed(2)}_${pos.z.toFixed(2)}`;
@@ -2076,20 +2334,19 @@ function saveScreenshot() {
         const targetStr = `target_${target.x.toFixed(2)}_${target.y.toFixed(2)}_${target.z.toFixed(2)}`;
         const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
         const filename = `tesseract_${timestamp}_${posStr}_${rotStr}_${timeStr}_${targetStr}.png`;
-        
-        // Create a download link
         const link = document.createElement('a');
         link.href = modifiedImageData;
         link.download = filename;
         link.click();
-        
-        // Restore the overlay if it was visible
-        if (overlayWasVisible) {
-            controlPanel.style.display = 'block';
-        }
-    };
-    
-    img.src = imageData;
+        if (overlayWasVisible) controlPanel.style.display = 'block';
+    }).catch(error => {
+        console.error('Error embedding metadata, falling back to basic screenshot:', error);
+        const link = document.createElement('a');
+        link.href = imageData;
+        link.download = 'tesseract.png';
+        link.click();
+        if (overlayWasVisible) controlPanel.style.display = 'block';
+    });
 }
 
 // Handle keyboard input without stealing keystrokes from dialogs or focused controls.
