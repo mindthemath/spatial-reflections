@@ -447,6 +447,49 @@ class StudioAPITest(unittest.TestCase):
                 'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60,
                 'quality': 'standard', 'format': 'avi'})
 
+    def test_video_capabilities_reports_startup_encoder_recovery(self):
+        fake_store = mock.Mock()
+        fake_store.last_recovery = {
+            'recovered': 2, 'alreadyExited': 3, 'refused': 1,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        }
+        fake_store.recovery_running = False
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server, 'video_store', return_value=fake_store):
+            code, capabilities = self.request('GET', '/api/video/capabilities')
+        self.assertEqual(code, 200)
+        self.assertEqual(capabilities['encoderRecovery'], {
+            'recovered': 2, 'alreadyExited': 3, 'refused': 1,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        })
+
+    def test_video_capabilities_waits_for_startup_recovery(self):
+        fake_store = mock.Mock()
+        fake_store.last_recovery = {
+            'recovered': 0, 'alreadyExited': 0, 'refused': 0,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        }
+        fake_store.recovery_running = True
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server, 'video_store', return_value=fake_store):
+            code, capabilities = self.request('GET', '/api/video/capabilities')
+        self.assertEqual(code, 200)
+        self.assertFalse(capabilities['available'])
+        self.assertIn('recovery', capabilities['reason'].lower())
+
+    def test_per_job_recovery_warning_does_not_disable_new_exports(self):
+        fake_store = mock.Mock()
+        fake_store.last_recovery = {
+            'recovered': 0, 'alreadyExited': 0, 'refused': 0,
+            'skippedActive': 0, 'failed': 1, 'indexFailed': False,
+        }
+        fake_store.recovery_running = False
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server, 'video_store', return_value=fake_store):
+            code, capabilities = self.request('GET', '/api/video/capabilities')
+        self.assertEqual(code, 200)
+        self.assertTrue(capabilities['available'])
+
     def test_publish_creates_standalone_work_and_catalog(self):
         payload = self.payload()
         payload['state']['name'] = 'Mirror Study'

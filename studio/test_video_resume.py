@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import shutil
+import subprocess
 import tempfile
 import threading
 import types
@@ -168,6 +169,15 @@ class VideoJobStoreTest(unittest.TestCase):
         claimed = other.resume(job['id'])
         other.pause(job['id'], lease=claimed['lease'])
 
+    def test_only_one_server_can_own_video_root(self):
+        self.store.claim_server()
+        other = VideoJobStore(self.root, '/fake/ffmpeg')
+        with self.assertRaisesRegex(ValueError, 'server'):
+            other.claim_server()
+        self.store.release_server()
+        other.claim_server()
+        other.release_server()
+
     def test_resume_cleans_orphaned_active_encoder(self):
         class Orphan:
             def __init__(self):
@@ -184,11 +194,221 @@ class VideoJobStoreTest(unittest.TestCase):
         process = Orphan()
         pending = self.manifest(job).parent / '.segment-000000.pending.mkv'
         pending.write_bytes(b'partial')
-        self.store.active[job['id']] = {'process': process, 'pending': pending}
+        manifest = json.loads(self.manifest(job).read_text())
+        manifest['activeEncoder'] = {
+            'pid': 4242, 'pendingPath': str(pending), 'firstFrame': 0,
+        }
+        self.write_manifest(job, manifest)
+        self.store.active[job['id']] = {
+            'process': process, 'pending': pending,
+            'manifest': self.manifest(job), 'job': manifest,
+        }
         resumed = self.store.resume(job['id'])
         self.assertTrue(process.killed)
         self.assertFalse(pending.exists())
+        self.assertNotIn('activeEncoder', json.loads(self.manifest(job).read_text()))
         self.store.pause(job['id'], lease=resumed['lease'])
+
+    def test_started_encoder_is_persisted_for_crash_recovery(self):
+        class Process:
+            pid = 4242
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.returncode = None
+            def poll(self):
+                return self.returncode
+            def kill(self):
+                self.returncode = -9
+            def wait(self, timeout=None):
+                return self.returncode
+
+        self.store.popen = Process
+        job = self.store.create(request())
+        active = self.store.resume(job['id'])
+        self.store.write_frame(job['id'], 0, b'png', active['lease'])
+        persisted = json.loads(self.manifest(job).read_text())
+        self.assertEqual(persisted['activeEncoder']['pid'], 4242)
+        self.assertEqual(persisted['activeEncoder']['firstFrame'], 0)
+        self.assertEqual(
+            Path(persisted['activeEncoder']['pendingPath']).name,
+            '.segment-000000.pending.mkv')
+
+    def test_startup_reaps_only_verified_job_encoder(self):
+        job = self.store.create(request())
+        manifest_path = self.manifest(job)
+        pending = manifest_path.parent / '.segment-000000.pending.mkv'
+        pending.write_bytes(b'partial')
+        manifest = json.loads(manifest_path.read_text())
+        manifest['state'] = 'active'
+        manifest['activeEncoder'] = {
+            'pid': 4242,
+            'pendingPath': str(pending),
+            'firstFrame': 0,
+        }
+        self.write_manifest(job, manifest)
+
+        recreated = VideoJobStore(self.root, '/fake/ffmpeg')
+        killed = []
+        recreated.process_command = lambda pid: f'/fake/ffmpeg -i pipe:0 {pending}'
+        recreated.kill_pid = lambda pid: killed.append(pid)
+        report = recreated.recover_stale_encoders()
+
+        self.assertEqual(killed, [4242])
+        self.assertEqual(report, {
+            'recovered': 1, 'alreadyExited': 0, 'refused': 0,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        })
+        recovered = json.loads(manifest_path.read_text())
+        self.assertNotIn('activeEncoder', recovered)
+        self.assertEqual(recovered['state'], 'paused')
+        self.assertFalse(pending.exists())
+
+    def test_startup_never_kills_reused_unrelated_pid(self):
+        job = self.store.create(request())
+        manifest_path = self.manifest(job)
+        pending = manifest_path.parent / '.segment-000000.pending.mkv'
+        pending.write_bytes(b'partial')
+        manifest = json.loads(manifest_path.read_text())
+        manifest['activeEncoder'] = {
+            'pid': 4242,
+            'pendingPath': str(pending),
+            'firstFrame': 0,
+        }
+        self.write_manifest(job, manifest)
+
+        recreated = VideoJobStore(self.root, '/fake/ffmpeg')
+        killed = []
+        recreated.process_command = lambda pid: f"/bin/bash -c '/fake/ffmpeg -i pipe:0 {pending}'"
+        recreated.kill_pid = lambda pid: killed.append(pid)
+        report = recreated.recover_stale_encoders()
+
+        self.assertEqual(killed, [])
+        self.assertEqual(report, {
+            'recovered': 0, 'alreadyExited': 0, 'refused': 1,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        })
+        recovered = json.loads(manifest_path.read_text())
+        self.assertNotIn('activeEncoder', recovered)
+        self.assertIn('PID was reused', recovered['error'])
+
+    def test_startup_reaps_pre_tracking_encoder_by_exact_pending_path(self):
+        job = self.store.create(request())
+        manifest_path = self.manifest(job)
+        pending = manifest_path.parent / '.segment-000000.pending.mkv'
+        pending.write_bytes(b'legacy partial')
+
+        recreated = VideoJobStore(self.root, '/fake/ffmpeg')
+        killed = []
+        recreated.processes_for_path = lambda path: [4242] if path == pending else []
+        recreated.kill_pid = lambda pid: killed.append(pid)
+        report = recreated.recover_stale_encoders()
+
+        self.assertEqual(killed, [4242])
+        self.assertEqual(report, {
+            'recovered': 1, 'alreadyExited': 0, 'refused': 0,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        })
+        self.assertFalse(pending.exists())
+
+    def test_startup_reaps_encoder_when_custom_scratch_is_unmounted(self):
+        scratch = self.root / 'mounted-share'
+        scratch.mkdir()
+        job = self.store.create(request(scratchPath=str(scratch)))
+        job_dir = self.manifest(job).parent
+        detached = self.root / 'detached-share'
+        scratch.rename(detached)
+
+        recreated = VideoJobStore(self.root, '/fake/ffmpeg')
+        recreated.claim_server()
+        killed = []
+        recreated.processes_for_path = lambda path: [4242] if path == job_dir else []
+        recreated.kill_pid = lambda pid: killed.append(pid)
+        report = recreated.recover_stale_encoders()
+
+        self.assertEqual(killed, [4242])
+        self.assertEqual(report, {
+            'recovered': 1, 'alreadyExited': 0, 'refused': 0,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        })
+        recreated.release_server()
+
+    def test_startup_skips_encoder_owned_by_live_store(self):
+        class Process:
+            pid = 4242
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.returncode = None
+            def poll(self):
+                return self.returncode
+            def kill(self):
+                self.returncode = -9
+            def wait(self, timeout=None):
+                return self.returncode
+
+        self.store.popen = Process
+        job = self.store.create(request())
+        active = self.store.resume(job['id'])
+        self.store.write_frame(job['id'], 0, b'png', active['lease'])
+        recreated = VideoJobStore(self.root, '/fake/ffmpeg')
+        killed = []
+        recreated.process_command = lambda pid: '/fake/ffmpeg should-not-be-inspected'
+        recreated.kill_pid = lambda pid: killed.append(pid)
+
+        report = recreated.recover_stale_encoders()
+
+        self.assertEqual(killed, [])
+        self.assertEqual(report['skippedActive'], 1)
+        self.assertIn('activeEncoder', json.loads(self.manifest(job).read_text()))
+
+    def test_startup_recovery_reports_corrupt_index_without_raising(self):
+        self.store.videos.mkdir()
+        self.store.index_path.write_text('{broken')
+        report = self.store.recover_stale_encoders()
+        self.assertEqual(report['failed'], 1)
+        self.assertTrue(report['indexFailed'])
+
+    def test_startup_recovery_keeps_marker_when_process_inspection_fails(self):
+        job = self.store.create(request())
+        manifest_path = self.manifest(job)
+        pending = manifest_path.parent / '.segment-000000.pending.mkv'
+        pending.write_bytes(b'partial')
+        manifest = json.loads(manifest_path.read_text())
+        manifest['activeEncoder'] = {
+            'pid': 4242, 'pendingPath': str(pending), 'firstFrame': 0,
+        }
+        self.write_manifest(job, manifest)
+        recreated = VideoJobStore(self.root, '/fake/ffmpeg')
+        recreated.process_command = lambda pid: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(['ps'], 5))
+
+        report = recreated.recover_stale_encoders()
+
+        self.assertEqual(report['failed'], 1)
+        self.assertIn('activeEncoder', json.loads(manifest_path.read_text()))
+        self.assertTrue(pending.exists())
+        with self.assertRaisesRegex(ValueError, 'recovery'):
+            recreated.resume(job['id'])
+
+    def test_startup_reaps_orphaned_finalizer(self):
+        job = self.ready_job('mp4')
+        manifest_path = self.manifest(job)
+        manifest = json.loads(manifest_path.read_text())
+        manifest['state'] = 'finalizing'
+        self.write_manifest(job, manifest)
+        concat = manifest_path.parent / '.concat.txt'
+        concat.write_text('stale')
+        pending_output = self.root / 'videos' / f".finished-mp4-20261003T000000Z-{job['id'][:8]}.pending.mp4"
+        pending_output.write_bytes(b'partial output')
+        killed = []
+        self.store.processes_for_path = lambda path: [4242] if path == concat else []
+        self.store.kill_pid = lambda pid: killed.append(pid)
+
+        report = self.store.recover_stale_encoders()
+
+        self.assertEqual(killed, [4242])
+        self.assertEqual(report['recovered'], 1)
+        self.assertEqual(json.loads(manifest_path.read_text())['state'], 'ready')
+        self.assertFalse(pending_output.exists())
 
     def test_pause_racing_first_frame_does_not_leave_encoder(self):
         registered = threading.Event()

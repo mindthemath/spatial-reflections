@@ -112,6 +112,8 @@ Rendering and encoding are intentionally split. The active browser renders the e
 
 Every video export is resumable. The default checkpoint interval is 60 seconds and can be changed from 1 to 3,600 seconds. A browser navigation, server shutdown, encoder failure, or five minutes without a frame pauses the job and preserves completed checkpoints. Reopen the same viewer URL with the same camera and render settings, open **Export video…**, and use **Resume**. The active incomplete checkpoint is rerendered, so an interruption loses at most one checkpoint interval—not the preceding hours. **Pause export** is recoverable; **Discard** permanently removes the checkpoints and requires confirmation.
 
+The server records the active ffmpeg PID and its exact checkpoint path in the durable job manifest. On startup it terminates only ffmpeg processes whose command matches that job-owned path, removes the incomplete checkpoint, and leaves unrelated or PID-reused processes untouched. The export preflight reports any startup cleanup. This also recognizes checkpoint encoders created before PID tracking was added; `make unstick` remains a manual diagnostic fallback.
+
 Checkpoint segments ordinarily live under `videos/.checkpoints/`. The export dialog can instead use an absolute scratch folder on another local disk or a mounted SMB share. Plan scratch capacity for roughly the final encoded video size plus one active segment and the final output; free-space checks for the final output still apply to `videos/`. For network storage:
 
 - mount the share before starting or resuming, create the selected absolute scratch directory in advance, and keep the mount path stable;

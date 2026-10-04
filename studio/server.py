@@ -205,11 +205,30 @@ def video_clip_labels():
 
 def video_capabilities():
     ffmpeg = shutil.which('ffmpeg')
-    return {'available': bool(ffmpeg), 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
+    recovery = {
+        'recovered': 0, 'alreadyExited': 0, 'refused': 0,
+        'skippedActive': 0, 'failed': 0,
+    }
+    available = bool(ffmpeg)
+    reason = None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'
+    if ffmpeg:
+        store = video_store()
+        if (not store.recovery_running and store.last_recovery['failed']
+                and not store.last_recovery['indexFailed']):
+            store.recover_stale_encoders()
+        recovery = store.last_recovery
+        if store.recovery_running:
+            available = False
+            reason = 'Encoder startup recovery is still running; retry in a moment'
+        elif recovery['indexFailed']:
+            available = False
+            reason = 'Encoder startup recovery could not inspect the durable job index'
+    return {'available': available, 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
             'qualities': list(VIDEO_QUALITIES), 'formats': list(VIDEO_FORMATS),
             'freeBytes': shutil.disk_usage(ROOT).free,
             'clips': video_clip_labels(),
-            'reason': None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'}
+            'encoderRecovery': recovery,
+            'reason': reason}
 
 
 def video_store():
@@ -254,6 +273,11 @@ def start_video(request):
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
+    store = video_store()
+    if store.recovery_running:
+        raise ValueError('Encoder startup recovery is still running')
+    if store.last_recovery['indexFailed']:
+        raise ValueError('Encoder startup recovery failed; inspect the video job index')
     width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
     checkpoint_seconds = int(request.get('checkpointSeconds', 60))
     request = {
@@ -280,7 +304,6 @@ def start_video(request):
         raise ValueError(f'Estimated video and checkpoints exceed output disk space ({output_free:,} bytes free)')
     if not same_storage and estimate > scratch_free * 0.9:
         raise ValueError(f'Estimated checkpoints exceed scratch disk space ({scratch_free:,} bytes free)')
-    store = video_store()
     created = store.create(request)
     try:
         active = store.resume(created['id'])
@@ -589,5 +612,24 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=1313)
     args = parser.parse_args()
+    http = StudioHTTPServer(('localhost', args.port), Handler)
+    if shutil.which('ffmpeg'):
+        store = video_store()
+        try:
+            store.claim_server()
+        except Exception:
+            http.server_close()
+            raise
+        store.recovery_running = True
+        threading.Thread(
+            target=store.recover_stale_encoders,
+            name='video-encoder-recovery',
+            daemon=True,
+        ).start()
     print(f'Viewer: http://localhost:{args.port}/\nStudio: http://localhost:{args.port}/studio/')
-    StudioHTTPServer(('localhost', args.port), Handler).serve_forever()
+    try:
+        http.serve_forever()
+    finally:
+        if VIDEO_STORE is not None:
+            VIDEO_STORE.release_server()
+        http.server_close()

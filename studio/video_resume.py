@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -16,6 +17,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 SEGMENT_NAME = re.compile(r'segment-(\d{6})\.mkv')
+_SYSTEM_RUN = subprocess.run
 
 
 def utc_now():
@@ -78,9 +80,209 @@ class VideoJobStore:
         self.active = {}
         self.leases = {}
         self.owners = {}
+        self.server_owner = None
         self.popen = subprocess.Popen
         self.run = subprocess.run
         self.clock = time.monotonic
+        self.process_command = self._process_command
+        self.processes_for_path = self._processes_for_path
+        self.kill_pid = self._kill_pid
+        self.last_recovery = self._empty_recovery_report()
+        self.recovery_running = False
+
+    @staticmethod
+    def _process_command(pid):
+        completed = _SYSTEM_RUN(
+            ['ps', '-p', str(pid), '-o', 'command='],
+            capture_output=True, text=True, timeout=5,
+        )
+        return completed.stdout.strip() if completed.returncode == 0 else ''
+
+    @staticmethod
+    def _kill_pid(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+
+    def _is_encoder_command(self, command, path, executable=None):
+        command = command.strip()
+        expected = str(executable or self.ffmpeg)
+        return command.startswith(expected + ' ') and str(path) in command
+
+    def _processes_for_path(self, path):
+        completed = _SYSTEM_RUN(
+            ['ps', '-axo', 'pid=,command='],
+            capture_output=True, text=True, timeout=5,
+        )
+        if completed.returncode != 0:
+            raise OSError('Could not inspect running encoder processes')
+        output = completed.stdout
+        expected_path = str(path)
+        matches = []
+        for line in output.splitlines():
+            fields = line.strip().split(None, 1)
+            if len(fields) != 2:
+                continue
+            pid, command = fields
+            if pid.isdigit() and self._is_encoder_command(command, expected_path):
+                matches.append(int(pid))
+        return matches
+
+    @staticmethod
+    def _empty_recovery_report():
+        return {
+            'recovered': 0,
+            'alreadyExited': 0,
+            'refused': 0,
+            'skippedActive': 0,
+            'failed': 0,
+            'indexFailed': False,
+        }
+
+    def claim_server(self):
+        self.videos.mkdir(parents=True, exist_ok=True)
+        stream = (self.videos / '.server.lock').open('a+')
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            stream.close()
+            raise ValueError('Another video server is already using this project') from error
+        self.server_owner = stream
+
+    def release_server(self):
+        stream, self.server_owner = self.server_owner, None
+        if stream:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            finally:
+                stream.close()
+
+    @staticmethod
+    def _claim_recovery_lock(job_dir):
+        stream = (job_dir / '.owner.lock').open('a+')
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return stream
+        except BlockingIOError:
+            stream.close()
+            return None
+
+    def recover_stale_encoders(self):
+        self.recovery_running = True
+        try:
+            return self._recover_stale_encoders()
+        finally:
+            self.recovery_running = False
+
+    def _recover_stale_encoders(self):
+        report = self._empty_recovery_report()
+        try:
+            with self.lock:
+                index = self._read_index()
+                entries = list(index['jobs'].items())
+        except Exception:
+            report['failed'] += 1
+            report['indexFailed'] = True
+            self.last_recovery = report
+            return dict(report)
+
+        for job_id, entry in entries:
+            manifest_hint = (
+                Path(entry['manifest']) if isinstance(entry, dict)
+                and isinstance(entry.get('manifest'), str) else None
+            )
+            recovery_lock = None
+            try:
+                if manifest_hint is None:
+                    raise ValueError('Video job index entry is invalid')
+                recovery_lock = self._claim_recovery_lock(manifest_hint.parent)
+                if recovery_lock is None:
+                    report['skippedActive'] += 1
+                    continue
+                with self._job_lock(job_id):
+                    manifest, job = self._load(job_id)
+                    encoder = job.get('activeEncoder')
+                    if not isinstance(encoder, dict):
+                        expected_pending = manifest.parent / f".segment-{len(job['segments']):06d}.pending.mkv"
+                        pending_files = set(manifest.parent.glob('.segment-*.pending.mkv'))
+                        pending_files.add(expected_pending)
+                        candidate_paths = set(pending_files)
+                        if job.get('state') == 'finalizing':
+                            candidate_paths.add(manifest.parent / '.concat.txt')
+                        recovered_pids = set()
+                        for path in candidate_paths:
+                            for pid in self.processes_for_path(path):
+                                if pid not in recovered_pids:
+                                    self.kill_pid(pid)
+                                    recovered_pids.add(pid)
+                        for pending in pending_files:
+                            pending.unlink(missing_ok=True)
+                        if job.get('state') == 'finalizing':
+                            (manifest.parent / '.concat.txt').unlink(missing_ok=True)
+                            self._remove_pending_output(job_id)
+                            job['state'] = 'ready'
+                        elif recovered_pids:
+                            job['state'] = 'paused'
+                        if recovered_pids:
+                            report['recovered'] += len(recovered_pids)
+                            job['error'] = 'Recovered an encoder left by an interrupted server'
+                        if recovered_pids or job.get('state') == 'ready':
+                            self._save(manifest, job)
+                        continue
+                    pid = int(encoder.get('pid', 0))
+                    pending = Path(str(encoder.get('pendingPath', ''))).resolve()
+                    expected_parent = manifest.parent.resolve()
+                    if (pid < 1 or pending.parent != expected_parent
+                            or not pending.name.startswith('.segment-')
+                            or not pending.name.endswith('.pending.mkv')):
+                        raise ValueError('Persisted encoder ownership is invalid')
+                    command = self.process_command(pid)
+                    verified = self._is_encoder_command(
+                        command, pending, encoder.get('executable'))
+                    if verified:
+                        self.kill_pid(pid)
+                        report['recovered'] += 1
+                        reason = 'Recovered a stale encoder left by an interrupted server'
+                    elif command:
+                        report['refused'] += 1
+                        reason = 'Stale encoder PID was reused; unrelated process was not stopped'
+                    else:
+                        report['alreadyExited'] += 1
+                        reason = 'Recovered an interrupted encoder that had already exited'
+                    pending.unlink(missing_ok=True)
+                    job.pop('activeEncoder', None)
+                    job['state'] = 'paused'
+                    job['error'] = reason
+                    self._save(manifest, job)
+            except Exception:
+                recovered = set()
+                if recovery_lock is None and self.server_owner and manifest_hint:
+                    try:
+                        for pid in self.processes_for_path(manifest_hint.parent):
+                            if pid not in recovered:
+                                self.kill_pid(pid)
+                                recovered.add(pid)
+                    except Exception:
+                        recovered.clear()
+                if recovered:
+                    report['recovered'] += len(recovered)
+                else:
+                    report['failed'] += 1
+                continue
+            finally:
+                if recovery_lock:
+                    try:
+                        fcntl.flock(recovery_lock.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        report['failed'] += 1
+                    finally:
+                        try:
+                            recovery_lock.close()
+                        except OSError:
+                            report['failed'] += 1
+        self.last_recovery = report
+        return dict(report)
 
     def _job_lock(self, job_id):
         with self.lock:
@@ -335,6 +537,10 @@ class VideoJobStore:
         with self._job_lock(job_id):
             manifest, job = self._load(job_id)
             self._remove_pending_output(job_id)
+            if job.get('activeEncoder'):
+                raise ValueError(
+                    'Video encoder recovery is incomplete; retry preflight before resuming'
+                )
             self._acquire_owner(manifest, job_id)
             lease = uuid.uuid4().hex
             try:
@@ -379,6 +585,14 @@ class VideoJobStore:
         pending = runtime.get('pending')
         if pending:
             pending.unlink(missing_ok=True)
+        runtime_job = runtime.get('job')
+        runtime_manifest = runtime.get('manifest')
+        if runtime_job and runtime_manifest:
+            runtime_job.pop('activeEncoder', None)
+            try:
+                self._save(runtime_manifest, runtime_job)
+            except OSError:
+                pass
         self._release_owner(job_id)
 
     def pause(self, job_id, reason=None, lease=None):
@@ -393,6 +607,7 @@ class VideoJobStore:
             manifest, job = self._load(job_id)
             for path in manifest.parent.glob('.segment-*.pending.mkv'):
                 path.unlink(missing_ok=True)
+            job.pop('activeEncoder', None)
             job['state'] = 'paused'
             job['error'] = str(reason) if reason else None
             self._save(manifest, job)
@@ -437,6 +652,19 @@ class VideoJobStore:
         }
         with self.lock:
             self.active[job['id']] = runtime
+        process_pid = getattr(process, 'pid', None)
+        if process_pid is not None:
+            job['activeEncoder'] = {
+                'pid': int(process_pid),
+                'executable': self.ffmpeg,
+                'pendingPath': str(pending),
+                'firstFrame': job['nextFrame'],
+            }
+        try:
+            self._save(manifest, job)
+        except Exception:
+            self._interrupt_active_segment(job['id'])
+            raise
         return runtime
 
     def _fail_active_segment(self, job_id, runtime, message):
@@ -461,6 +689,7 @@ class VideoJobStore:
             self.leases.pop(job_id, None)
         self._release_owner(job_id)
         job = runtime['job']
+        job.pop('activeEncoder', None)
         job['state'] = 'paused'
         job['error'] = message
         self._save(runtime['manifest'], job)
@@ -495,6 +724,7 @@ class VideoJobStore:
             job = runtime['job']
             job['segments'].append(metadata)
             job['nextFrame'] += runtime['written']
+            job.pop('activeEncoder', None)
             job['state'] = 'ready' if job['nextFrame'] == job['request']['frames'] else 'active'
             job['error'] = None
             self._save(runtime['manifest'], job)
@@ -612,6 +842,10 @@ class VideoJobStore:
             video_format = request.get('format', 'mp4')
             if video_format not in ('mp4', 'mkv'):
                 raise ValueError('Unsupported video format')
+            with self.lock:
+                owns_job = job_id in self.owners
+            if not owns_job:
+                self._acquire_owner(manifest, job_id)
 
             filename = self.output_filename(job_id)
             self.videos.mkdir(parents=True, exist_ok=True)

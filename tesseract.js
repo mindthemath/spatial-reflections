@@ -1605,6 +1605,9 @@ async function openVideoExportDialog() {
     videoExportDialog.dataset.statusMode = 'checking';
     videoExportDialog.dataset.serverAvailable = '';
     videoExportDialog.dataset.freeBytes = '';
+    videoExportDialog.dataset.encoderRecovery = JSON.stringify({
+        recovered: 0, alreadyExited: 0, refused: 0, skippedActive: 0, failed: 0, indexFailed: false
+    });
     videoExportDialog.dataset.renderSignature = videoRenderSignature();
     videoExportDialog.showModal();
     updateVideoExportSummary();
@@ -1616,6 +1619,10 @@ async function openVideoExportDialog() {
         videoExportDialog.dataset.freeBytes = String(value.freeBytes);
         videoExportDialog.dataset.clips = JSON.stringify(value.clips || []);
         videoExportDialog.dataset.encoder = value.encoder;
+        videoExportDialog.dataset.encoderRecovery = JSON.stringify(
+            value.encoderRecovery || {
+                recovered: 0, alreadyExited: 0, refused: 0, skippedActive: 0, failed: 0, indexFailed: false
+            });
         videoExportDialog.dataset.statusMode = 'ready';
         await loadVideoResumeJobs();
     } catch (error) {
@@ -1784,8 +1791,16 @@ function updateVideoExportSummary() {
         const selection = plan && !plan.error
             ? `${formatDuration(plan.duration)} ${plan.range === 'full' ? 'perfect loop' : 'clip'} is selected. `
             : '';
+        const recovery = JSON.parse(videoExportDialog.dataset.encoderRecovery || '{}');
+        const recoveryText = recovery.recovered
+            ? `Startup safely cleaned ${recovery.recovered} interrupted encoder${recovery.recovered === 1 ? '' : 's'}. `
+            : recovery.refused
+                ? `${recovery.refused} stale PID${recovery.refused === 1 ? '' : 's'} belonged to unrelated processes and were left untouched. `
+                : recovery.failed
+                    ? `${recovery.failed} older video job${recovery.failed === 1 ? '' : 's'} could not be inspected; new exports remain available. `
+                : '';
         document.getElementById('video-export-status').textContent =
-            `${videoExportDialog.dataset.encoder} encoder ready. ${selection}Leaving the page pauses the export at its latest checkpoint.`;
+            `${videoExportDialog.dataset.encoder} encoder ready. ${recoveryText}${selection}Leaving the page pauses the export at its latest checkpoint.`;
     }
 }
 
