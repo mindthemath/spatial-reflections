@@ -685,6 +685,15 @@ class VideoJobStoreTest(unittest.TestCase):
 
         self.assertEqual(paused['reason'], 'ffmpeg exited while writing checkpoint 3')
 
+    def test_resume_clears_previous_pause_reason(self):
+        job = self.store.create(request())
+        self.store.pause(job['id'], 'Browser paused the export')
+
+        resumed = self.store.resume(job['id'])
+
+        self.assertIsNone(resumed['reason'])
+        self.store.pause(job['id'], lease=resumed['lease'])
+
     def test_failed_finalization_preserves_segments_for_retry(self):
         job = self.ready_job('mp4')
         attempts = [0]

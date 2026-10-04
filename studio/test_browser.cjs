@@ -89,6 +89,32 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   if(await viewer.evaluate(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes')){
    await viewer.locator('#video-export-duration').fill('0.02');await viewer.locator('#video-export-resolution').selectOption('1280x720');await viewer.locator('#video-export-quality').selectOption('draft');
    await viewer.locator('#confirm-video-export').click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});assert.match(await viewer.locator('#video-export-status').innerText(),/^Export complete/);assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.endsWith('.mkv')));
+   let pauseAcknowledged=false;
+   await viewer.route('**/api/video/pause',async route=>{
+    await new Promise(resolve=>setTimeout(resolve,400));
+    const response=await route.fetch();
+    pauseAcknowledged=true;
+    await route.fulfill({response});
+   },{times:1});
+   await viewer.locator('#video-export-name').fill('browser-pause');
+   await viewer.locator('#video-export-duration').fill('2');
+   await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Rendering + encoding'));
+   await viewer.locator('#cancel-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('paused'));
+   assert(pauseAcknowledged,'pause UI completed before the server acknowledged it');
+   const pausedCard=viewer.locator('.video-resume-job').filter({hasText:'browser-pause'});
+   await pausedCard.waitFor();assert(!(await pausedCard.locator('.resume-video-export').isDisabled()));
+   await pausedCard.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await pausedCard.waitFor({state:'detached'});
+
+   await viewer.locator('#video-export-name').fill('browser-cancel');
+   await viewer.locator('#video-export-duration').fill('2');
+   await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Rendering + encoding'));
+   await viewer.locator('#discard-active-video-export').click();await viewer.locator('#confirm-action-accept').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('cancelled and discarded'));
+   assert.equal(await viewer.evaluate(()=>fetch('/api/video/jobs').then(response=>response.json()).then(value=>value.jobs.length)),0);
+   assert(!fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-cancel-')));
    const pausedId=await viewer.evaluate(async()=>{
     const dialog=document.querySelector('#video-export-dialog'),signature=dialog.dataset.renderSignature;
     const request={name:'browser-resume',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};

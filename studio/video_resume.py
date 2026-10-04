@@ -564,6 +564,7 @@ class VideoJobStore:
                             'Current source URL and render settings do not match this export'
                         )
                 job['state'] = 'active'
+                job['error'] = None
                 job['resumeCount'] = int(job.get('resumeCount', 0)) + 1
                 self._save(manifest, job)
                 result = self._public(manifest, job)

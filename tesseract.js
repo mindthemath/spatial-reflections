@@ -17,6 +17,9 @@ let videoExportRunning = false;
 let activeVideoExportJob = null;
 let cancelVideoExportRequested = false;
 let videoExportAbort = null;
+let videoExportStopAction = null;
+let videoExportStopPromise = null;
+let videoExportStopJobId = null;
 let loopTiming = { period: 0, frameCount: 1, timeStep: 0, exact: true };
 let lastAnimationTimestamp = null;
 let frameAccumulator = 0;
@@ -157,7 +160,7 @@ window.addEventListener('beforeunload', event => {
     event.returnValue = '';
 });
 window.addEventListener('pagehide', () => {
-    if (activeVideoExportJob) {
+    if (activeVideoExportJob && videoExportStopAction !== 'discard') {
         try { sessionStorage.setItem(VIDEO_EXPORT_INTERRUPTED_KEY, 'yes'); } catch { /* Optional. */ }
         const body = new Blob([JSON.stringify({
             id: activeVideoExportJob.id,
@@ -1550,6 +1553,7 @@ function createVideoExportDialog() {
             </section>
             <div class="video-export-actions">
                 <button id="cancel-video-export" type="button" hidden>Pause export</button>
+                <button id="discard-active-video-export" type="button" hidden>Cancel export</button>
                 <button id="confirm-video-export" type="submit">Start export</button>
             </div>
         </form>`;
@@ -1567,6 +1571,7 @@ function createVideoExportDialog() {
         else videoExportDialog.close();
     });
     document.getElementById('cancel-video-export').addEventListener('click', requestVideoExportCancellation);
+    document.getElementById('discard-active-video-export').addEventListener('click', requestVideoExportDiscard);
     document.getElementById('video-export-form').addEventListener('submit', async event => {
         event.preventDefault();
         const plan = videoExportPlan();
@@ -1638,7 +1643,7 @@ async function loadVideoResumeJobs() {
     const list = document.getElementById('video-resume-job-list');
     list.replaceChildren();
     try {
-        const value = await videoApi('/api/video/jobs', { cache: 'no-store' });
+        const value = await videoControlApi('/api/video/jobs', { cache: 'no-store' });
         for (const job of value.jobs || []) {
             const card = document.createElement('div');
             card.className = 'video-resume-job';
@@ -1647,9 +1652,11 @@ async function loadVideoResumeJobs() {
             const sourceMatches = request.sourceUrl === location.pathname + location.search;
             const settingsMatch = request.renderSignature === videoRenderSignature();
             const fullyRendered = job.nextFrame === job.frames;
-            const available = job.state !== 'unavailable' && (fullyRendered || (sourceMatches && settingsMatch));
+            const available = !['unavailable', 'active'].includes(job.state)
+                && (fullyRendered || (sourceMatches && settingsMatch));
             const reason = job.state === 'unavailable'
                 ? job.reason
+                : job.state === 'active' ? 'The server still marks this export active; discard it or retry after recovery.'
                 : !fullyRendered && (!sourceMatches || !settingsMatch) ? 'Current source or render settings do not match.' : '';
             const description = document.createElement('span');
             description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}`;
@@ -1673,7 +1680,7 @@ async function loadVideoResumeJobs() {
                     confirmLabel: 'Discard'
                 });
                 if (!confirmed) return;
-                await videoApi('/api/video/cancel', {
+                await videoControlApi('/api/video/cancel', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id: job.id })
                 });
@@ -1809,20 +1816,51 @@ function videoExportLabel(name) {
     return label || 'tesseract';
 }
 
+function ensureVideoExportStopRequest() {
+    if (!activeVideoExportJob || !videoExportStopAction) return null;
+    if (videoExportStopPromise && videoExportStopJobId === activeVideoExportJob.id) {
+        return videoExportStopPromise;
+    }
+    const job = activeVideoExportJob;
+    const discard = videoExportStopAction === 'discard';
+    videoExportStopJobId = job.id;
+    videoExportStopPromise = videoControlApi(discard ? '/api/video/cancel' : '/api/video/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(discard
+            ? { id: job.id }
+            : { id: job.id, lease: job.lease })
+    }).then(() => null, error => error);
+    return videoExportStopPromise;
+}
+
 function requestVideoExportCancellation() {
-    if (!videoExportRunning) return;
+    if (!videoExportRunning || videoExportStopAction) return;
+    videoExportStopAction = 'pause';
     cancelVideoExportRequested = true;
     videoExportAbort?.abort();
-    const jobId = activeVideoExportJob?.id;
-    if (jobId) {
-        fetch('/api/video/pause', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: jobId, lease: activeVideoExportJob.lease })
-        }).catch(() => { /* The export loop reports the outcome. */ });
-    }
+    ensureVideoExportStopRequest();
     const button = document.getElementById('cancel-video-export');
     button.disabled = true;
+    document.getElementById('discard-active-video-export').disabled = true;
     document.getElementById('video-export-status').textContent = 'Pausing…';
+}
+
+async function requestVideoExportDiscard() {
+    if (!videoExportRunning || videoExportStopAction) return;
+    const confirmed = await confirmAction({
+        title: 'CANCEL VIDEO EXPORT',
+        message: 'Permanently delete this export, its poster, and every saved checkpoint?',
+        confirmLabel: 'Cancel export'
+    });
+    if (!confirmed || !videoExportRunning || videoExportStopAction) return;
+    videoExportStopAction = 'discard';
+    cancelVideoExportRequested = true;
+    videoExportAbort?.abort();
+    ensureVideoExportStopRequest();
+    document.getElementById('cancel-video-export').disabled = true;
+    document.getElementById('discard-active-video-export').disabled = true;
+    document.getElementById('video-export-status').textContent = 'Cancelling and discarding…';
 }
 
 async function videoApi(path, options = {}) {
@@ -1831,6 +1869,21 @@ async function videoApi(path, options = {}) {
     try { value = await response.json(); } catch { /* Replace non-JSON server errors below. */ }
     if (!response.ok) throw new Error(value.error || `Video server returned HTTP ${response.status}`);
     return value;
+}
+
+async function videoControlApi(path, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+        return await videoApi(path, { ...options, signal: controller.signal });
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            throw new Error('The local video server did not respond within 10 seconds');
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
 }
 
 function dataUrlToBlob(dataUrl) {
@@ -1957,6 +2010,9 @@ async function runVideoExport(plan, resumableJob = null) {
     videoExportRunning = true;
     cancelVideoExportRequested = false;
     videoExportAbort = new AbortController();
+    videoExportStopAction = null;
+    videoExportStopPromise = null;
+    videoExportStopJobId = null;
     videoExportWidth = plan.width;
     videoExportHeight = plan.height;
     videoExportQuality = plan.quality;
@@ -1965,11 +2021,14 @@ async function runVideoExport(plan, resumableJob = null) {
     const status = document.getElementById('video-export-status');
     const progress = document.getElementById('video-export-progress');
     const cancel = document.getElementById('cancel-video-export');
+    const discard = document.getElementById('discard-active-video-export');
     const result = document.getElementById('video-export-result');
     const fields = videoExportDialog.querySelectorAll('input, select');
     fields.forEach(field => { field.disabled = true; });
     cancel.hidden = false;
     cancel.disabled = false;
+    discard.hidden = false;
+    discard.disabled = false;
     progress.hidden = false;
     progress.max = plan.frames;
     progress.value = resumableJob?.nextFrame || 0;
@@ -2059,9 +2118,12 @@ async function runVideoExport(plan, resumableJob = null) {
         link.textContent = `Download ${completed.filename}`;
         result.replaceChildren(link);
     } catch (error) {
+        let stopError = null;
         if (activeVideoExportJob) {
-            // A user pause already told the server. Other failures preserve checkpoints too.
-            if (!cancelVideoExportRequested) {
+            if (videoExportStopAction) {
+                ensureVideoExportStopRequest();
+                stopError = videoExportStopPromise ? await videoExportStopPromise : null;
+            } else {
                 try {
                     await videoApi('/api/video/pause', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2075,9 +2137,21 @@ async function runVideoExport(plan, resumableJob = null) {
             }
             activeVideoExportJob = null;
         }
-        videoExportDialog.dataset.statusMode = error.name === 'AbortError' ? 'paused' : 'error';
-        status.textContent = error.name === 'AbortError' ? 'Video export paused. You can resume it from its latest checkpoint.' : `${error.message} Export paused and can be resumed.`;
-        status.classList.toggle('error', error.name !== 'AbortError');
+        if (videoExportStopAction === 'discard' && !stopError) {
+            videoExportDialog.dataset.statusMode = 'cancelled';
+            status.textContent = 'Export cancelled and discarded.';
+            status.classList.remove('error');
+        } else if (videoExportStopAction === 'pause' && !stopError) {
+            videoExportDialog.dataset.statusMode = 'paused';
+            status.textContent = 'Video export paused. You can resume it from its latest checkpoint.';
+            status.classList.remove('error');
+        } else {
+            videoExportDialog.dataset.statusMode = 'error';
+            status.textContent = stopError
+                ? `Could not ${videoExportStopAction === 'discard' ? 'cancel' : 'pause'} the export: ${stopError.message}. Check the interrupted export below.`
+                : `${error.message} Export paused and can be resumed.`;
+            status.classList.add('error');
+        }
     } finally {
         renderer.setPixelRatio(originalPixelRatio);
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -2090,11 +2164,15 @@ async function runVideoExport(plan, resumableJob = null) {
         videoExportRunning = false;
         cancelVideoExportRequested = false;
         videoExportAbort = null;
+        videoExportStopPromise = null;
+        videoExportStopJobId = null;
         fields.forEach(field => { field.disabled = false; });
         cancel.hidden = true;
+        discard.hidden = true;
         persistViewerSettings();
         await loadVideoResumeJobs();
         updateVideoExportSummary();
+        videoExportStopAction = null;
     }
 }
 
