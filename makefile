@@ -1,7 +1,11 @@
-.PHONY: serve static install sync update test test-browser
+.PHONY: serve static install sync update test test-python test-browser unstick
 
 serve:
 	python3 studio/server.py --port 1313
+
+# When localhost:1313 spins and the server logs nothing, stop the wedged process.
+unstick:
+	scripts/unstick-server.sh
 
 static:
 	python3 -m http.server --directory site 1315
@@ -27,6 +31,9 @@ update:
 
 test:
 	bun run test
+
+test-python:
+	python3 -m unittest discover -s studio -p 'test_*.py'
 
 test-browser:
 	bun run test:browser

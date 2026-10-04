@@ -10,6 +10,8 @@ Install the locked JavaScript tooling and Chromium once, and synchronize the ven
 make install
 ```
 
+Video export additionally requires an `ffmpeg` executable with H.264 (`libx264`) support on `PATH`. It is called as a subprocess; the Python server remains standard-library-only and does not install or import third-party Python packages.
+
 Then start the local application:
 
 ```sh
@@ -100,7 +102,33 @@ Large exports remain untouched on disk. If an image exceeds the viewer GPU's max
 
 The viewer drives animation from an integer frame index rather than repeatedly adding to a floating-point time value. For the current decimal 4D rotation coefficients, it finds a common full-rotation period, rounds the requested motion step to an integer loop length, and derives the exact time step needed to return seamlessly to frame zero.
 
-The collapsed **Video timing** section provides export FPS, loop frame count, duration, exact time step, a frame scrubber and single-frame controls. FPS controls preview cadence and reported movie duration; every frame remains deterministic for a future video encoder. Screenshots preserve the current frame and FPS while remaining backward-compatible with previously saved `time` metadata.
+The collapsed **Video timing** section provides export FPS, loop frame count, duration, exact time step, a frame scrubber and single-frame controls. FPS controls preview cadence and reported movie duration. Screenshots preserve the current frame and FPS while remaining backward-compatible with previously saved `time` metadata.
+
+**Export video…** opens a confirmation dialog for MP4 or MKV container, resolution, quality and range. The default is a 30-second MP4 clip starting at the current frame, shortened to fit when the loop is shorter than 30 seconds. Whole-loop export remains available. A clip window uses a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a bitrate-based size estimate before any work begins. If that file name already labels a clip in `videos/`, the viewer asks before adding another.
+
+Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+
+### Long-running video recovery
+
+Every video export is resumable. The default checkpoint interval is 60 seconds and can be changed from 1 to 3,600 seconds. A browser navigation, server shutdown, encoder failure, or five minutes without a frame pauses the job and preserves completed checkpoints. Reopen the same viewer URL with the same camera and render settings, open **Export video…**, and use **Resume**. The active incomplete checkpoint is rerendered, so an interruption loses at most one checkpoint interval—not the preceding hours. **Pause export** is recoverable; **Discard** permanently removes the checkpoints and requires confirmation.
+
+The server records the active ffmpeg PID and its exact checkpoint path in the durable job manifest. On startup it terminates only ffmpeg processes whose command matches that job-owned path, removes the incomplete checkpoint, and leaves unrelated or PID-reused processes untouched. The export preflight reports any startup cleanup. This also recognizes checkpoint encoders created before PID tracking was added; `make unstick` remains a manual diagnostic fallback.
+
+Checkpoint segments ordinarily live under `videos/.checkpoints/`. The export dialog can instead use an absolute scratch folder on another local disk or a mounted SMB share. Plan scratch capacity for roughly the final encoded video size plus one active segment and the final output; free-space checks for the final output still apply to `videos/`. For network storage:
+
+- mount the share before starting or resuming, create the selected absolute scratch directory in advance, and keep the mount path stable;
+- prefer a reliable wired connection and prevent the workstation and storage from sleeping;
+- do not let two machines write the same scratch job;
+- expect a disconnected share to show the job as unavailable until the same path is mounted again.
+
+The job index is `videos/.video-job-index.json`; each scratch job contains an atomic manifest and SHA-256 hashes for completed segments. Resume verifies those hashes before encoding further. If final MP4/MKV assembly fails, the checkpoints remain and **Resume** retries finalization. Restart recovery is therefore:
+
+```sh
+make serve
+# Open the original viewer URL → Export video… → Resume
+```
+
+The viewer page and machine must remain active while new frames are being rendered, but it is safe to pause, navigate away, restart the local server, and resume later. The final output currently remains under `videos/` even when scratch storage is elsewhere.
 
 ## Data and state
 

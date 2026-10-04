@@ -1,10 +1,13 @@
 import base64
 import hashlib
 import http.client
+import io
 import json
+import socket
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 
@@ -18,6 +21,9 @@ class StudioAPITest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.original_root = server.ROOT
+        self.original_video_store = getattr(server, 'VIDEO_STORE', None)
+        if hasattr(server, 'VIDEO_STORE'):
+            server.VIDEO_STORE = None
         server.ROOT = Path(self.temp.name)
         (server.ROOT / 'raw').mkdir()
         (server.ROOT / 'raw' / 'photo.png').write_bytes(PNG)
@@ -37,6 +43,12 @@ class StudioAPITest(unittest.TestCase):
         self.http.shutdown()
         self.http.server_close()
         self.thread.join()
+        if hasattr(server, 'VIDEO_STORE'):
+            try:
+                server.video_store().pause_all()
+            except (OSError, ValueError):
+                pass
+            server.VIDEO_STORE = self.original_video_store
         server.ROOT = self.original_root
         self.temp.cleanup()
 
@@ -47,6 +59,30 @@ class StudioAPITest(unittest.TestCase):
         status, data = response.status, json.loads(response.read())
         connection.close()
         return status, data
+
+    def raw_request(self, method, path, body, headers=None):
+        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection.request(method, path, body, headers or {})
+        response = connection.getresponse()
+        status, data = response.status, json.loads(response.read())
+        connection.close()
+        return status, data
+
+    def test_http_connection_is_reused_between_requests(self):
+        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection.request('GET', '/api/video/capabilities')
+        first = connection.getresponse()
+        self.assertEqual(first.status, 200)
+        first.read()
+        first_socket = connection.sock
+        self.assertIsNotNone(first_socket)
+
+        connection.request('GET', '/api/video/capabilities')
+        second = connection.getresponse()
+        self.assertEqual(second.status, 200)
+        second.read()
+        self.assertIs(connection.sock, first_socket)
+        connection.close()
 
     def payload(self):
         source = {'path': 'raw/photo.png', 'sha256': hashlib.sha256(PNG).hexdigest()}
@@ -134,6 +170,393 @@ class StudioAPITest(unittest.TestCase):
         code, _ = self.request('POST', '/api/export/finish', {'folder': folder})
         self.assertEqual(code, 400)
 
+    def test_streamed_video_export(self):
+        class FakeFFmpeg:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.output.write_bytes(b'fake mp4')
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        request = {'name': '../mirror clip', 'width': 64, 'height': 64, 'fps': 24,
+                   'frames': 2, 'quality': 'standard', 'viewerState': {'shader': 'chrome'}}
+        def fake_run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b'fake mp4')
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg), \
+             mock.patch.object(server.subprocess, 'run', fake_run):
+            code, started = self.request('POST', '/api/video/start', request)
+            self.assertEqual(code, 201)
+            frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+            code, poster = self.raw_request(
+                'POST', f"/api/video/poster?id={started['id']}&lease={started['lease']}", frame,
+                {'Content-Type': 'image/png'})
+            self.assertEqual(code, 201)
+            self.assertEqual(poster['filename'], started['filename'].rsplit('.', 1)[0] + '.png')
+            for index in range(2):
+                code, progress = self.raw_request('POST', f"/api/video/frame?id={started['id']}&frame={index}&lease={started['lease']}", frame,
+                                                  {'Content-Type': 'image/png'})
+                self.assertEqual(code, 201)
+                self.assertEqual(progress['frame'], index + 1)
+            code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
+            self.assertEqual(code, 201)
+        video = server.ROOT / completed['url'].lstrip('/')
+        self.assertEqual(video.read_bytes(), b'fake mp4')
+        self.assertTrue((video.with_suffix('.png')).is_file())
+        metadata = json.loads(video.with_suffix('.json').read_text())
+        self.assertEqual(metadata['frames'], 2)
+        self.assertEqual(metadata['viewerState']['shader'], 'chrome')
+        self.assertEqual(metadata['poster']['file'], video.with_suffix('.png').name)
+        self.assertEqual(metadata['poster']['sha256'], hashlib.sha256(frame).hexdigest())
+        self.assertNotIn('..', completed['filename'])
+        self.assertIn('mirror-clip', server.video_clip_labels())
+
+    def test_mkv_video_export_uses_matroska_container(self):
+        commands = []
+
+        class FakeFFmpeg:
+            def __init__(self, command, **_kwargs):
+                commands.append(command)
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.output.write_bytes(b'fake mkv')
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        request = {'name': 'matroska clip', 'width': 64, 'height': 64, 'fps': 24,
+                   'frames': 1, 'quality': 'standard', 'format': 'mkv'}
+        frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+        def fake_run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b'fake mkv')
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg), \
+             mock.patch.object(server.subprocess, 'run', fake_run):
+            code, started = self.request('POST', '/api/video/start', request)
+            self.assertEqual(code, 201)
+            self.assertTrue(started['filename'].endswith('.mkv'))
+            self.assertEqual(self.raw_request(
+                'POST', f"/api/video/frame?id={started['id']}&frame=0&lease={started['lease']}", frame,
+                {'Content-Type': 'image/png'})[0], 201)
+            self.assertNotIn('-movflags', commands[0])
+            self.assertEqual(commands[0][-3:-1], ['-f', 'matroska'])
+            self.assertTrue(str(commands[0][-1]).endswith('.pending.mkv'))
+            code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
+            self.assertEqual(code, 201)
+        self.assertTrue(completed['filename'].endswith('.mkv'))
+        metadata = json.loads((server.ROOT / completed['url'].lstrip('/')).with_suffix('.json').read_text())
+        self.assertEqual(metadata['format'], 'mkv')
+        self.assertIn('matroska-clip', server.video_clip_labels())
+
+    def test_resumable_video_api_survives_store_recreation(self):
+        class FakeFFmpeg:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.output = Path(command[-1])
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.output.write_bytes(b'checkpoint')
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        def fake_run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b'final video')
+            return mock.Mock(returncode=0)
+
+        request = {
+            'name': 'overnight', 'width': 64, 'height': 64, 'fps': 24,
+            'frames': 25, 'quality': 'draft', 'format': 'mkv',
+            'checkpointSeconds': 1, 'sourceUrl': '/?skybox=exports%2Ftest',
+            'renderSignature': 'same-render',
+        }
+        frame = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg), \
+             mock.patch.object(server.subprocess, 'run', fake_run):
+            code, started = self.request('POST', '/api/video/start', request)
+            self.assertEqual(code, 201)
+            self.assertIn('lease', started)
+            for index in range(24):
+                code, progress = self.raw_request(
+                    'POST',
+                    f"/api/video/frame?id={started['id']}&frame={index}&lease={started['lease']}",
+                    frame, {'Content-Type': 'image/png'})
+                self.assertEqual(code, 201)
+            self.assertEqual(progress['durableFrame'], 24)
+            self.assertEqual(self.request('POST', '/api/video/pause', {
+                'id': started['id'], 'lease': started['lease']})[0], 200)
+
+            server.VIDEO_STORE = None
+            code, jobs = self.request('GET', '/api/video/jobs')
+            self.assertEqual(code, 200)
+            self.assertEqual(jobs['jobs'][0]['nextFrame'], 24)
+            code, mismatch = self.request('POST', '/api/video/resume', {
+                'id': started['id'], 'sourceUrl': '/different',
+                'renderSignature': 'same-render',
+            })
+            self.assertEqual(code, 400)
+            self.assertIn('render settings', mismatch['error'])
+            code, resumed = self.request('POST', '/api/video/resume', {
+                'id': started['id'], 'sourceUrl': request['sourceUrl'],
+                'renderSignature': request['renderSignature'],
+            })
+            self.assertEqual(code, 200)
+            self.assertNotEqual(resumed['lease'], started['lease'])
+            code, progress = self.raw_request(
+                'POST',
+                f"/api/video/frame?id={started['id']}&frame=24&lease={resumed['lease']}",
+                frame, {'Content-Type': 'image/png'})
+            self.assertEqual(code, 201)
+            self.assertEqual(progress['durableFrame'], 25)
+            code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
+            self.assertEqual(code, 201)
+            self.assertTrue(completed['filename'].endswith('.mkv'))
+            self.assertTrue((server.ROOT / completed['url'].lstrip('/')).is_file())
+            self.assertEqual(self.request('GET', '/api/video/jobs')[1]['jobs'], [])
+
+    def test_video_cancel_discards_resumable_job(self):
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
+            code, started = self.request('POST', '/api/video/start', {
+                'name': 'discard', 'width': 64, 'height': 64, 'fps': 24,
+                'frames': 24, 'quality': 'draft', 'format': 'mp4',
+                'checkpointSeconds': 60,
+            })
+            self.assertEqual(code, 201)
+            self.assertEqual(self.request('POST', '/api/video/cancel', {'id': started['id']})[0], 200)
+            self.assertEqual(self.request('GET', '/api/video/jobs')[1]['jobs'], [])
+            code, result = self.request('POST', '/api/video/start', {
+                'name': 'bad-scratch', 'width': 64, 'height': 64, 'fps': 24,
+                'frames': 24, 'quality': 'draft', 'format': 'mp4',
+                'checkpointSeconds': 60, 'scratchPath': ['not', 'a', 'path'],
+            })
+            self.assertEqual(code, 400)
+            self.assertIn('scratch', result['error'].lower())
+
+    def test_video_cancel_does_not_wait_for_frame_lock(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.returncode = None
+                self.killed = False
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        job_id = 'a' * 32
+        frame_lock = threading.Lock()
+        frame_lock.acquire()
+        process = FakeProcess()
+        pending = server.ROOT / 'blocked.pending.mp4'
+        pending.write_bytes(b'partial')
+        with server.VIDEO_JOBS_LOCK:
+            server.VIDEO_JOBS[job_id] = {'process': process, 'lock': frame_lock, 'pending': pending}
+        cancelled = threading.Thread(target=server.cancel_video, args=(job_id,))
+        cancelled.start()
+        cancelled.join(timeout=1)
+        frame_lock.release()
+        self.assertFalse(cancelled.is_alive(), 'Cancellation waited for the blocked frame lock')
+        self.assertTrue(process.killed)
+        self.assertFalse(pending.exists())
+
+    def test_stalled_video_frame_upload_unblocks(self):
+        class FakeFFmpeg:
+            def __init__(self, command, **_kwargs):
+                self.stdin = io.BytesIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        previous = server.VIDEO_FRAME_READ_TIMEOUT
+        server.VIDEO_FRAME_READ_TIMEOUT = 0.3
+        started = None
+        try:
+            with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+                 mock.patch.object(server.subprocess, 'Popen', FakeFFmpeg):
+                code, started = self.request('POST', '/api/video/start', {
+                    'name': 'stall', 'width': 64, 'height': 64, 'fps': 24, 'frames': 2, 'quality': 'draft'})
+            self.assertEqual(code, 201)
+            sock = socket.create_connection(('localhost', self.http.server_port))
+            sock.settimeout(2)
+            header = server.PNG_SIGNATURE + (13).to_bytes(4, 'big') + b'IHDR' + (64).to_bytes(4, 'big') + (64).to_bytes(4, 'big')
+            request = (
+                f"POST /api/video/frame?id={started['id']}&frame=0 HTTP/1.1\r\n"
+                f"Host: localhost\r\nContent-Length: 5000000\r\nConnection: close\r\n\r\n"
+            ).encode() + header
+            sock.sendall(request)
+            chunks = []
+            while True:
+                part = sock.recv(4096)
+                if not part:
+                    break
+                chunks.append(part)
+                response = b''.join(chunks)
+                if b'\r\n\r\n' in response and len(response.split(b'\r\n\r\n', 1)[1]) >= 41:
+                    break
+            sock.close()
+            response = b''.join(chunks)
+            self.assertIn(b'400', response.split(b'\r\n', 1)[0])
+            self.assertTrue(b'interrupted' in response or b'Incomplete' in response)
+            code, _ = self.request('GET', '/api/video/capabilities')
+            self.assertEqual(code, 200)
+        finally:
+            server.VIDEO_FRAME_READ_TIMEOUT = previous
+            if started:
+                self.request('POST', '/api/video/cancel', {'id': started['id']})
+
+    def test_video_validation_and_capabilities(self):
+        with mock.patch.object(server.shutil, 'which', return_value=None):
+            code, capabilities = self.request('GET', '/api/video/capabilities')
+            self.assertEqual(code, 200)
+            self.assertFalse(capabilities['available'])
+            self.assertEqual(capabilities['formats'], ['mp4', 'mkv'])
+            self.assertFalse(capabilities['encoderRecovery']['indexFailed'])
+            code, result = self.request('POST', '/api/video/start', {
+                'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60, 'quality': 'standard'})
+            self.assertEqual(code, 400)
+            self.assertIn('ffmpeg', result['error'])
+        with self.assertRaises(ValueError):
+            server.validate_video_request({'width': 1919, 'height': 1080, 'fps': 60, 'frames': 60, 'quality': 'standard'})
+        with self.assertRaisesRegex(ValueError, 'format'):
+            server.validate_video_request({
+                'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60,
+                'quality': 'standard', 'format': 'avi'})
+
+    def test_video_pause_accepts_bounded_failure_reason(self):
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
+            code, started = self.request('POST', '/api/video/start', {
+                'width': 1280, 'height': 720, 'fps': 30, 'frames': 30,
+                'quality': 'standard',
+            })
+            self.assertEqual(code, 201)
+            code, paused = self.request('POST', '/api/video/pause', {
+                'id': started['id'], 'lease': started['lease'],
+                'reason': '  WebGL context\nwas lost  ',
+            })
+            self.assertEqual(code, 200)
+            self.assertEqual(paused['reason'], 'WebGL context was lost')
+
+            code, rejected = self.request('POST', '/api/video/pause', {
+                'id': started['id'], 'reason': 'x' * 501,
+            })
+            self.assertEqual(code, 400)
+            self.assertIn('reason', rejected['error'].lower())
+
+    def test_video_store_is_initialized_once_across_threads(self):
+        created = []
+        hold_constructor = threading.Event()
+
+        class FakeStore:
+            def __init__(self, root, ffmpeg):
+                created.append(self)
+                hold_constructor.wait(0.05)
+                self.root = root
+                self.ffmpeg = str(ffmpeg)
+
+            def pause_all(self):
+                pass
+
+        stores = []
+        server.VIDEO_STORE = None
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server, 'VideoJobStore', FakeStore):
+            threads = [threading.Thread(target=lambda: stores.append(server.video_store()))
+                       for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(created), 1)
+        self.assertEqual(len({id(store) for store in stores}), 1)
+
+    def test_video_capabilities_reports_startup_encoder_recovery(self):
+        fake_store = mock.Mock()
+        fake_store.last_recovery = {
+            'recovered': 2, 'alreadyExited': 3, 'refused': 1,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        }
+        fake_store.recovery_running = False
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server, 'video_store', return_value=fake_store):
+            code, capabilities = self.request('GET', '/api/video/capabilities')
+        self.assertEqual(code, 200)
+        self.assertEqual(capabilities['encoderRecovery'], {
+            'recovered': 2, 'alreadyExited': 3, 'refused': 1,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        })
+
+    def test_video_capabilities_waits_for_startup_recovery(self):
+        fake_store = mock.Mock()
+        fake_store.last_recovery = {
+            'recovered': 0, 'alreadyExited': 0, 'refused': 0,
+            'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+        }
+        fake_store.recovery_running = True
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server, 'video_store', return_value=fake_store):
+            code, capabilities = self.request('GET', '/api/video/capabilities')
+        self.assertEqual(code, 200)
+        self.assertFalse(capabilities['available'])
+        self.assertIn('recovery', capabilities['reason'].lower())
+
+    def test_per_job_recovery_warning_does_not_disable_new_exports(self):
+        fake_store = mock.Mock()
+        fake_store.last_recovery = {
+            'recovered': 0, 'alreadyExited': 0, 'refused': 0,
+            'skippedActive': 0, 'failed': 1, 'indexFailed': False,
+        }
+        fake_store.recovery_running = False
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'), \
+             mock.patch.object(server, 'video_store', return_value=fake_store):
+            code, capabilities = self.request('GET', '/api/video/capabilities')
+        self.assertEqual(code, 200)
+        self.assertTrue(capabilities['available'])
+
     def test_publish_creates_standalone_work_and_catalog(self):
         payload = self.payload()
         payload['state']['name'] = 'Mirror Study'
@@ -190,6 +613,14 @@ class StudioAPITest(unittest.TestCase):
 
     def test_cross_origin_rejected(self):
         self.assertEqual(self.request('POST', '/api/export', self.payload(), {'Origin': 'https://example.com'})[0], 403)
+
+    def test_rejected_request_with_unread_body_closes_connection(self):
+        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection.request('POST', '/api/export', json.dumps(self.payload()), {'Origin': 'https://example.com'})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 403)
+        response.read()
+        self.assertIsNone(connection.sock)
 
 
 if __name__ == '__main__':

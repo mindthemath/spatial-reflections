@@ -76,9 +76,70 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+  // Video export defaults to a 30s clip inside the loop, and still rejects an empty window before encoding.
+  await viewer.locator('#rotation-xw').fill('10');await viewer.locator('details').filter({hasText:'Video timing'}).locator('summary').click();
+  await viewer.locator('#open-video-export').click();await viewer.waitForSelector('#video-export-dialog[open]');await viewer.waitForFunction(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes'||document.querySelector('#video-export-status').classList.contains('error'));
+  assert.deepEqual(await viewer.locator('#video-export-dialog').evaluate(dialog=>JSON.parse(dialog.dataset.encoderRecovery)),{recovered:0,alreadyExited:0,refused:0,skippedActive:0,failed:0,indexFailed:false});
+  assert.equal(await viewer.locator('#video-export-checkpoint').inputValue(),'60');assert(await viewer.locator('#video-export-scratch').isVisible());
+  assert.equal(await viewer.locator('#video-export-range').inputValue(),'clip');assert.match(await viewer.locator('#video-export-summary').innerText(),/Clip/);assert.match(await viewer.locator('#video-export-summary').innerText(),/30\.00 s/);assert.match(await viewer.locator('#video-export-summary').innerText(),/estimated MP4 size/);
+  await viewer.locator('#video-export-range').selectOption('full');assert(!(await viewer.locator('#video-export-clip-fields').isVisible()));assert.equal(await viewer.locator('#video-export-range option[value="full"]').innerText(),'Whole loop');assert.doesNotMatch(await viewer.locator('#video-export-summary').innerText(),/[Pp]erfect/);
+  await viewer.locator('#video-export-checkpoint').fill('0');assert.match(await viewer.locator('#video-export-summary').innerText(),/No checkpoints/);assert.match(await viewer.locator('#video-export-summary').innerText(),/restarts from frame 0/);
+  await viewer.locator('#video-export-range').selectOption('clip');assert(await viewer.locator('#video-export-clip-fields').isVisible());await viewer.locator('#video-export-checkpoint').fill('60');
+  await viewer.locator('#video-export-duration').fill('5');assert.match(await viewer.locator('#video-export-status').innerText(),/5\.00 s clip is selected/);
+  await viewer.locator('#video-export-format').selectOption('mkv');assert.match(await viewer.locator('#video-export-summary').innerText(),/H\.264 MKV/);
+  await viewer.locator('#video-export-range').selectOption('clip');await viewer.locator('#video-export-duration').fill('0');assert.match(await viewer.locator('#video-export-summary').innerText(),/at least one frame/);
+  // Exercise the complete browser → streamed PNG → ffmpeg path when ffmpeg is available on the test host.
+  if(await viewer.evaluate(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes')){
+   await viewer.locator('#video-export-duration').fill('0.02');await viewer.locator('#video-export-resolution').selectOption('1280x720');await viewer.locator('#video-export-quality').selectOption('draft');
+   await viewer.locator('#confirm-video-export').click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});assert.match(await viewer.locator('#video-export-status').innerText(),/^Export complete/);assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.endsWith('.mkv')));
+   let pauseAcknowledged=false;
+   await viewer.route('**/api/video/pause',async route=>{
+    await new Promise(resolve=>setTimeout(resolve,400));
+    const response=await route.fetch();
+    pauseAcknowledged=true;
+    await route.fulfill({response});
+   },{times:1});
+   await viewer.locator('#video-export-name').fill('browser-pause');
+   await viewer.locator('#video-export-duration').fill('2');
+   await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Rendering + encoding'));
+   await viewer.locator('#cancel-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('paused'));
+   assert(pauseAcknowledged,'pause UI completed before the server acknowledged it');
+   const pausedCard=viewer.locator('.video-resume-job').filter({hasText:'browser-pause'});
+   await pausedCard.waitFor();assert(!(await pausedCard.locator('.resume-video-export').isDisabled()));
+   await pausedCard.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await pausedCard.waitFor({state:'detached'});
+
+   await viewer.locator('#video-export-name').fill('browser-cancel');
+   await viewer.locator('#video-export-duration').fill('2');
+   await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Rendering + encoding'));
+   await viewer.locator('#discard-active-video-export').click();await viewer.locator('#confirm-action-accept').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('cancelled and discarded'));
+   assert.equal(await viewer.evaluate(()=>fetch('/api/video/jobs').then(response=>response.json()).then(value=>value.jobs.length)),0);
+   assert(!fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-cancel-')));
+   const pausedId=await viewer.evaluate(async()=>{
+    const dialog=document.querySelector('#video-export-dialog'),signature=dialog.dataset.renderSignature;
+    const request={name:'browser-resume',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
+    const started=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}).then(r=>r.json());
+    await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});
+    return started.id;
+   });
+   await viewer.locator('#close-video-export').click();await viewer.locator('#open-video-export').click();await viewer.waitForSelector(`.video-resume-job[data-job-id="${pausedId}"]`);
+   await viewer.locator(`.video-resume-job[data-job-id="${pausedId}"] .resume-video-export`).click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-resume-')&&file.endsWith('.mp4')));
+   const mismatchId=await viewer.evaluate(async()=>{
+    const request={name:'mismatch',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:'different-render',startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
+    const started=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}).then(r=>r.json());
+    await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});
+    return started.id;
+   });
+   await viewer.locator('#close-video-export').click();await viewer.locator('#open-video-export').click();const mismatch=viewer.locator(`.video-resume-job[data-job-id="${mismatchId}"]`);await mismatch.waitFor();assert(await mismatch.locator('.resume-video-export').isDisabled());assert.match(await mismatch.innerText(),/settings do not match/i);
+   await mismatch.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await mismatch.waitFor({state:'detached'});
+  }
+  if(await viewer.locator('#video-export-dialog').isVisible())await viewer.locator('#close-video-export').click();
   const cameraBefore=await viewer.locator('#viewer-camera-info').innerText();
   await viewer.locator('#viewer-shader').selectOption('rough');assert(await viewer.locator('#switch-to-chrome').isVisible());
-  await viewer.locator('#default-skybox').click();await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='Default skybox');
+  await viewer.locator('#default-skybox').click();await viewer.locator('#confirm-action-accept').click();await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='Default skybox');
   assert.equal(await viewer.locator('#viewer-camera-info').innerText(),cameraBefore);assert.equal(await viewer.locator('#viewer-shader').inputValue(),'rough');
   await viewer.locator('#browse-skyboxes').click();await viewer.waitForSelector('.skybox-card');
   await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'untitled'})}).getByRole('button',{name:'Load skybox'}).click();

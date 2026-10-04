@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Serve the viewer and Studio, and write collision-free local exports."""
 import argparse
+import atexit
 import base64
 import hashlib
 import json
 import re
 import shutil
+import subprocess
+import threading
 import uuid
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from video_resume import VideoJobStore
 
 ROOT = Path(__file__).resolve().parent.parent
 FACES = ('px', 'nx', 'py', 'ny', 'pz', 'nz')
@@ -18,6 +23,15 @@ EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
 MAX_BODY = 100 * 1024 * 1024  # Legacy JSON export limit; Studio uses streamed PNG uploads.
 MAX_FACE_BYTES = 512 * 1024 * 1024
 PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+VIDEO_QUALITIES = {'draft': 0.035, 'standard': 0.07, 'high': 0.12}
+VIDEO_FORMATS = ('mp4', 'mkv')
+MAX_VIDEO_FRAME_BYTES = 100 * 1024 * 1024
+MAX_VIDEO_FRAMES = 10_000_000
+VIDEO_FRAME_READ_TIMEOUT = 30
+VIDEO_JOBS = {}
+VIDEO_JOBS_LOCK = threading.Lock()
+VIDEO_STORE = None
+VIDEO_STORE_LOCK = threading.Lock()
 
 
 def hash_file(path):
@@ -175,6 +189,191 @@ def publish_work(request):
     return {'slug': slug, 'folder': destination.relative_to(ROOT).as_posix(), 'url': f'/site/work/{slug}/'}
 
 
+def video_clip_labels():
+    parent = ROOT / 'videos'
+    labels = []
+    if not parent.is_dir():
+        return labels
+    pattern = re.compile(r'^(.+)-\d{8}T\d{6}Z-[a-f0-9]{8}\.(?:mp4|mkv)$')
+    for path in sorted((*parent.glob('*.mp4'), *parent.glob('*.mkv'))):
+        if not path.is_file() or path.name.startswith('.') or not path.resolve().is_relative_to(parent.resolve()):
+            continue
+        match = pattern.fullmatch(path.name)
+        if match:
+            labels.append(match.group(1))
+    return labels
+
+
+def video_capabilities():
+    ffmpeg = shutil.which('ffmpeg')
+    recovery = {
+        'recovered': 0, 'alreadyExited': 0, 'refused': 0,
+        'skippedActive': 0, 'failed': 0, 'indexFailed': False,
+    }
+    available = bool(ffmpeg)
+    reason = None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'
+    if ffmpeg:
+        store = video_store()
+        if (not store.recovery_running and store.last_recovery['failed']
+                and not store.last_recovery['indexFailed']):
+            store.recover_stale_encoders()
+        recovery = store.last_recovery
+        if store.recovery_running:
+            available = False
+            reason = 'Encoder startup recovery is still running; retry in a moment'
+        elif recovery['indexFailed']:
+            available = False
+            reason = 'Encoder startup recovery could not inspect the durable job index'
+    return {'available': available, 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
+            'qualities': list(VIDEO_QUALITIES), 'formats': list(VIDEO_FORMATS),
+            'freeBytes': shutil.disk_usage(ROOT).free,
+            'clips': video_clip_labels(),
+            'encoderRecovery': recovery,
+            'reason': reason}
+
+
+def video_store():
+    global VIDEO_STORE
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise ValueError('Video export requires ffmpeg on the local server PATH')
+    root = ROOT.resolve()
+    with VIDEO_STORE_LOCK:
+        if VIDEO_STORE is None or VIDEO_STORE.root != root or VIDEO_STORE.ffmpeg != str(ffmpeg):
+            if VIDEO_STORE is not None:
+                VIDEO_STORE.pause_all()
+            VIDEO_STORE = VideoJobStore(root, ffmpeg)
+        # Keep dependency injection and unittest patches applied to subprocess.
+        VIDEO_STORE.popen = subprocess.Popen
+        VIDEO_STORE.run = subprocess.run
+        return VIDEO_STORE
+
+
+def validate_video_request(request):
+    width = int(request.get('width', 0))
+    height = int(request.get('height', 0))
+    fps = int(request.get('fps', 0))
+    frames = int(request.get('frames', 0))
+    quality = request.get('quality', 'standard')
+    video_format = request.get('format', 'mp4')
+    if width < 64 or height < 64 or width > 7680 or height > 4320 or width % 2 or height % 2:
+        raise ValueError('Video dimensions must be even and between 64×64 and 7680×4320')
+    if fps not in (24, 25, 30, 50, 60):
+        raise ValueError('Unsupported video frame rate')
+    if frames < 1 or frames > MAX_VIDEO_FRAMES:
+        raise ValueError(f'Video must contain between 1 and {MAX_VIDEO_FRAMES:,} frames')
+    if quality not in VIDEO_QUALITIES:
+        raise ValueError('Unsupported video quality')
+    if video_format not in VIDEO_FORMATS:
+        raise ValueError('Unsupported video format')
+    bit_rate = round(width * height * fps * VIDEO_QUALITIES[quality])
+    estimate = round(bit_rate * (frames / fps) / 8 * 1.03)
+    return width, height, fps, frames, quality, video_format, bit_rate, estimate
+
+
+def start_video(request):
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise ValueError('Video export requires ffmpeg on the local server PATH')
+    store = video_store()
+    if store.recovery_running:
+        raise ValueError('Encoder startup recovery is still running')
+    if store.last_recovery['indexFailed']:
+        raise ValueError('Encoder startup recovery failed; inspect the video job index')
+    width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
+    checkpoint_seconds = int(request.get('checkpointSeconds', 60))
+    request = {
+        **request, 'width': width, 'height': height, 'fps': fps,
+        'frames': frames, 'quality': quality, 'format': video_format,
+        'bitRate': bit_rate, 'estimatedBytes': estimate,
+        'checkpointSeconds': checkpoint_seconds,
+    }
+    parent = ROOT / 'videos'
+    parent.mkdir(exist_ok=True)
+    configured_scratch = request.get('scratchPath')
+    if configured_scratch is not None and not isinstance(configured_scratch, str):
+        raise ValueError('Video scratch path must be text')
+    scratch = (Path(configured_scratch).expanduser() if str(configured_scratch or '').strip()
+               else parent / '.checkpoints')
+    if configured_scratch and (not scratch.is_absolute() or not scratch.is_dir()):
+        raise ValueError('Video scratch path must be an existing absolute directory')
+    scratch.mkdir(parents=True, exist_ok=True)
+    output_free = shutil.disk_usage(parent).free
+    scratch_free = shutil.disk_usage(scratch).free
+    same_storage = parent.stat().st_dev == scratch.stat().st_dev
+    output_required = estimate * (2 if same_storage else 1)
+    if output_required > output_free * 0.9:
+        raise ValueError(f'Estimated video and checkpoints exceed output disk space ({output_free:,} bytes free)')
+    if not same_storage and estimate > scratch_free * 0.9:
+        raise ValueError(f'Estimated checkpoints exceed scratch disk space ({scratch_free:,} bytes free)')
+    created = store.create(request)
+    try:
+        active = store.resume(created['id'])
+    except Exception:
+        store.discard(created['id'])
+        raise
+    active.update({
+        'filename': store.output_filename(created['id']),
+        'estimatedBytes': estimate,
+        'bitRate': bit_rate,
+    })
+    return active
+
+
+def video_job(job_id):
+    if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
+        raise ValueError('Invalid video export id')
+    with VIDEO_JOBS_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+    if not job:
+        raise ValueError('Video export is missing or already complete')
+    return job
+
+
+def remove_video_job(job_id):
+    with VIDEO_JOBS_LOCK:
+        return VIDEO_JOBS.pop(job_id, None)
+
+
+def cancel_video(job_id):
+    job = remove_video_job(job_id)
+    if not job:
+        return
+    # Never wait for the frame-write lock here. A disconnected browser can leave
+    # its request thread blocked in a pipe write; killing ffmpeg must remain able
+    # to interrupt that write immediately.
+    process = job['process']
+    # Kill only. Closing stdin here deadlocks when the frame thread is blocked
+    # inside that same buffered write; the broken pipe wakes the writer instead.
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    job['pending'].unlink(missing_ok=True)
+
+
+def cancel_all_videos():
+    with VIDEO_JOBS_LOCK:
+        job_ids = list(VIDEO_JOBS)
+    for job_id in job_ids:
+        try:
+            cancel_video(job_id)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if VIDEO_STORE is not None:
+        VIDEO_STORE.pause_all()
+
+
+atexit.register(cancel_all_videos)
+
+
+def finish_video(job_id):
+    return video_store().finish(job_id)
+
+
 def finish_export(folder, analysis):
     state = json.loads((folder / '.pending.json').read_text())
     verify_pipeline(state)  # Recheck after rendering, not just when the export started.
@@ -200,6 +399,11 @@ def finish_export(folder, analysis):
 
 
 class Handler(SimpleHTTPRequestHandler):
+    # Frame uploads are sequential, so keep their HTTP/1.1 connection alive.
+    # HTTP/1.0 forced Safari to create hundreds of short-lived TCP connections
+    # during one export, eventually making localhost intermittently unreachable.
+    protocol_version = 'HTTP/1.1'
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
@@ -213,6 +417,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))
+        if self.close_connection:
+            self.send_header('Connection', 'close')
         self.end_headers()
         self.wfile.write(data)
 
@@ -228,6 +434,10 @@ class Handler(SimpleHTTPRequestHandler):
             for header in ('If-Modified-Since', 'If-None-Match'):
                 if header in self.headers:
                     del self.headers[header]
+        if path == '/api/video/capabilities':
+            return self.send_json(200, video_capabilities())
+        if path == '/api/video/jobs':
+            return self.send_json(200, {'jobs': video_store().list_jobs()})
         if path == '/api/exports':
             exports = []
             parent = ROOT / 'exports'
@@ -263,12 +473,98 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = urlparse(self.path)
-        if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish'):
+        if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish',
+                              '/api/video/start', '/api/video/poster', '/api/video/frame', '/api/video/finish', '/api/video/cancel',
+                              '/api/video/pause', '/api/video/resume'):
+            self.close_connection = True
             return self.send_json(404, {'error': 'Unknown endpoint'})
         origin = self.headers.get('Origin')
         if origin and urlparse(origin).netloc != self.headers.get('Host'):
+            self.close_connection = True
             return self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
         try:
+            if route.path == '/api/video/poster':
+                query = parse_qs(route.query)
+                job_id = query.get('id', [''])[0]
+                lease = query.get('lease', [''])[0]
+                store = video_store()
+                job = store.get(job_id)
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 24 <= length <= MAX_VIDEO_FRAME_BYTES:
+                    raise ValueError('PNG resume frame has an invalid size')
+                previous_timeout = self.connection.gettimeout()
+                self.connection.settimeout(VIDEO_FRAME_READ_TIMEOUT)
+                try:
+                    data = self.rfile.read(length)
+                except TimeoutError:
+                    try:
+                        store.pause(job_id, 'Resume frame upload was interrupted', lease)
+                    except (OSError, ValueError):
+                        pass
+                    raise ValueError('Resume frame upload was interrupted')
+                finally:
+                    try:
+                        self.connection.settimeout(previous_timeout)
+                    except OSError:
+                        pass
+                if len(data) != length:
+                    try:
+                        store.pause(job_id, 'Incomplete PNG resume frame upload', lease)
+                    except (OSError, ValueError):
+                        pass
+                    raise ValueError('Incomplete PNG resume frame upload')
+                header = data[:24]
+                if header[:8] != PNG_SIGNATURE or header[12:16] != b'IHDR':
+                    raise ValueError('Resume frame must be a PNG image')
+                width = int.from_bytes(header[16:20], 'big')
+                height = int.from_bytes(header[20:24], 'big')
+                request = job['request']
+                if (width, height) != (request['width'], request['height']):
+                    raise ValueError(f"Resume frame must be {request['width']}×{request['height']} pixels")
+                return self.send_json(201, store.write_poster(job_id, data, lease))
+            if route.path == '/api/video/frame':
+                query = parse_qs(route.query)
+                job_id = query.get('id', [''])[0]
+                lease = query.get('lease', [''])[0]
+                store = video_store()
+                job = store.get(job_id)
+                frame = int(query.get('frame', ['-1'])[0])
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 24 <= length <= MAX_VIDEO_FRAME_BYTES:
+                    raise ValueError('PNG frame has an invalid size')
+                # Read the body before taking the frame lock, and don't wait forever.
+                # A browser that leaves mid-upload otherwise pins this thread in read(),
+                # and a pipe write must not hold the lock or finish/cancel can stall.
+                previous_timeout = self.connection.gettimeout()
+                self.connection.settimeout(VIDEO_FRAME_READ_TIMEOUT)
+                try:
+                    data = self.rfile.read(length)
+                except TimeoutError:
+                    try:
+                        store.pause(job_id, 'Frame upload was interrupted', lease)
+                    except (OSError, ValueError):
+                        pass
+                    raise ValueError('Frame upload was interrupted')
+                finally:
+                    try:
+                        self.connection.settimeout(previous_timeout)
+                    except OSError:
+                        pass
+                if len(data) != length:
+                    try:
+                        store.pause(job_id, 'Incomplete PNG frame upload', lease)
+                    except (OSError, ValueError):
+                        pass
+                    raise ValueError('Incomplete PNG frame upload')
+                header = data[:24]
+                if header[:8] != PNG_SIGNATURE or header[12:16] != b'IHDR':
+                    raise ValueError('Video frame must be a PNG image')
+                width = int.from_bytes(header[16:20], 'big')
+                height = int.from_bytes(header[20:24], 'big')
+                request = job['request']
+                if (width, height) != (request['width'], request['height']):
+                    raise ValueError(f"Frame must be {request['width']}×{request['height']} pixels")
+                return self.send_json(201, store.write_frame(job_id, frame, data, lease))
             if route.path == '/api/export/face':
                 query = parse_qs(route.query)
                 folder = pending_folder(query.get('folder', [''])[0])
@@ -294,6 +590,24 @@ class Handler(SimpleHTTPRequestHandler):
                         remaining -= len(chunk)
                 return self.send_json(201, {'face': face})
             request = self.read_json()
+            if route.path == '/api/video/start':
+                return self.send_json(201, start_video(request))
+            if route.path == '/api/video/finish':
+                return self.send_json(201, finish_video(request.get('id')))
+            if route.path == '/api/video/cancel':
+                video_store().discard(request.get('id'))
+                return self.send_json(200, {'cancelled': True})
+            if route.path == '/api/video/pause':
+                reason = request.get('reason')
+                if reason is not None:
+                    if not isinstance(reason, str) or len(reason) > 500:
+                        raise ValueError('Video pause reason must be text under 500 characters')
+                    reason = ' '.join(reason.split()) or None
+                paused = video_store().pause(
+                    request.get('id'), reason or 'Browser paused the export', request.get('lease'))
+                return self.send_json(200, paused)
+            if route.path == '/api/video/resume':
+                return self.send_json(200, video_store().resume(request.get('id'), request))
             if route.path == '/api/publish':
                 return self.send_json(201, publish_work(request))
             if route.path == '/api/export/start':
@@ -316,15 +630,52 @@ class Handler(SimpleHTTPRequestHandler):
                     stream.write(data)
             finish_export(folder, request.get('analysis', {}))
             self.send_json(201, {'folder': folder.relative_to(ROOT).as_posix()})
+        except (ConnectionError, BrokenPipeError):
+            return
         except (ValueError, KeyError, TypeError, StopIteration) as error:
-            self.send_json(400, {'error': str(error)})
+            try:
+                self.send_json(400, {'error': str(error)})
+            except (ConnectionError, BrokenPipeError, OSError):
+                return
         except OSError as error:
-            self.send_json(500, {'error': str(error)})
+            try:
+                self.send_json(500, {'error': str(error)})
+            except (ConnectionError, BrokenPipeError, OSError):
+                return
+
+
+class StudioHTTPServer(ThreadingHTTPServer):
+    def service_actions(self):
+        super().service_actions()
+        try:
+            if VIDEO_STORE is not None:
+                VIDEO_STORE.pause_stale_jobs()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=1313)
     args = parser.parse_args()
+    http = StudioHTTPServer(('localhost', args.port), Handler)
+    if shutil.which('ffmpeg'):
+        store = video_store()
+        try:
+            store.claim_server()
+        except Exception:
+            http.server_close()
+            raise
+        store.recovery_running = True
+        threading.Thread(
+            target=store.recover_stale_encoders,
+            name='video-encoder-recovery',
+            daemon=True,
+        ).start()
     print(f'Viewer: http://localhost:{args.port}/\nStudio: http://localhost:{args.port}/studio/')
-    ThreadingHTTPServer(('localhost', args.port), Handler).serve_forever()
+    try:
+        http.serve_forever()
+    finally:
+        if VIDEO_STORE is not None:
+            VIDEO_STORE.release_server()
+        http.server_close()
