@@ -735,11 +735,21 @@ class VideoJobStore:
                 '-color_range', 'tv', '-colorspace', 'bt709',
                 '-color_primaries', 'bt709', '-color_trc', 'bt709',
             ]
+        # The guarded test runner constrains only test encoders. Normal exports
+        # retain their usual ffmpeg threading policy.
+        test_threads = os.environ.get('TESSERACT_TEST_ENCODER_THREADS')
+        thread_args = []
+        if test_threads:
+            count = int(test_threads)
+            if not 1 <= count <= 4:
+                raise ValueError('Test encoder threads must be between 1 and 4')
+            thread_args = ['-threads', str(count)]
         command = [
             self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+            *(['-filter_threads', '1'] if thread_args else []), *thread_args,
             '-f', 'image2pipe', '-framerate', str(request['fps']),
             '-vcodec', 'png', '-i', 'pipe:0', '-an', *color_args,
-            '-c:v', 'libx264', '-preset', 'medium',
+            '-c:v', 'libx264', '-preset', 'medium', *thread_args,
             '-b:v', str(bit_rate), '-maxrate', str(round(bit_rate * 1.5)),
             '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',
             '-f', 'matroska', str(pending),

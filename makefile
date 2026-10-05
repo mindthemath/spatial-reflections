@@ -1,4 +1,6 @@
-.PHONY: serve static install sync update test test-python test-browser test-video-capture test-video-encoder test-video-soak unstick
+.PHONY: serve static install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak _test-all _test-browser unstick
+
+TEST_GUARD = python3 scripts/test_guard.py
 
 serve:
 	python3 studio/server.py --port 1313
@@ -29,22 +31,44 @@ update:
 	$(MAKE) sync
 	$(MAKE) test
 
+# Full validation is explicit and serialized. Prefer test-fast while editing.
 test:
-	bun run test
+	$(TEST_GUARD) --network --timeout 600 -- $(MAKE) _test-all
+
+_test-all:
+	$(MAKE) test-fast
+	$(MAKE) test-python
+	$(MAKE) test-browser
+
+# No browser, network server, real encoder, or production assets.
+test-fast:
+	bun run test:vendor
+	bun run test:syntax
+	node studio/test_resolution.cjs
+	node studio/test_lifecycle_test.cjs
+	python3 -m unittest discover -s studio -p 'test_video_resume.py'
+	$(MAKE) test-guard
+
+test-guard:
+	python3 -m unittest discover -s scripts -p 'test_test_guard.py'
 
 test-python:
-	python3 -m unittest discover -s studio -p 'test_*.py'
+	$(TEST_GUARD) --network --timeout 180 -- python3 -m unittest discover -s studio -p 'test_*.py'
 
 # Opt-in production-resolution encoder test. Uses temporary storage, never overwrites source.
 VIDEO_SOAK_SECONDS ?= 6
 test-video-soak:
-	python3 studio/video_soak.py --source "$(VIDEO_SOAK_SOURCE)" --seconds "$(VIDEO_SOAK_SECONDS)"
+	$(TEST_GUARD) --timeout 7200 -- python3 studio/video_soak.py --source "$(VIDEO_SOAK_SOURCE)" --seconds "$(VIDEO_SOAK_SECONDS)"
 
 test-video-encoder:
-	python3 -m unittest studio.test_video_resume studio.test_video_resume_integration
+	$(TEST_GUARD) --timeout 90 -- python3 -m unittest studio.test_video_resume studio.test_video_resume_integration
 
 test-video-capture:
-	node studio/test_video_capture.cjs
+	$(TEST_GUARD) --timeout 60 -- node studio/test_video_capture.cjs
 
 test-browser:
-	bun run test:browser
+	$(TEST_GUARD) --network --timeout 360 -- $(MAKE) _test-browser
+
+_test-browser:
+	$(MAKE) test-video-capture
+	node studio/test_browser.cjs

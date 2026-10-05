@@ -1,4 +1,6 @@
 // Isolated capture regression: no HTTP server, skyboxes, or ffmpeg processes.
+const { ensureGuard, bounded, installCleanup } = require('./test_lifecycle.cjs');
+ensureGuard(__filename, { timeout: 60 });
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -6,8 +8,12 @@ const assert = require('assert/strict');
 (async () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'tesseract.js'), 'utf8');
   const helpers = source.slice(source.indexOf('function dataUrlToBlob('), source.indexOf('function screenshotMetadata('));
-  const browser = await chromium.launch({ headless: true });
+  let browser;
+  const cleanup = installCleanup(async () => {
+    if (browser) await bounded(browser.close(), 10000, 'Chromium shutdown');
+  });
   try {
+    browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
     await page.addScriptTag({ content: `let videoCaptureSurface=null,videoCaptureContext=null;let renderer,scene,camera;${helpers}` });
     const result = await page.evaluate(async () => {
@@ -36,5 +42,5 @@ const assert = require('assert/strict');
     assert.deepEqual(result.fallback,[0,0,255,255]);
     assert.equal(result.rerenders,1);
     console.log('PASS: offscreen capture preserves pixels, reuses surface, and redraws on fallback.');
-  } finally { await browser.close(); }
+  } finally { await cleanup(); }
 })().catch(error => { console.error(error);process.exitCode=1; });

@@ -113,6 +113,7 @@ New exports explicitly convert full-range RGB to limited-range BT.709 YUV and ta
 ### Video validation commands
 
 ```sh
+make test-fast           # routine editing: no Chromium, networking or real encoder
 make test-python         # durable store, API and real ffmpeg recovery tests
 make test-browser        # isolated capture + complete browser integration
 make test-video-capture  # pixel integrity and capture-fallback test; no HTTP server
@@ -121,6 +122,12 @@ make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4"
 # Longer encoder validation is opt-in; duration is output video seconds:
 make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4" VIDEO_SOAK_SECONDS=600
 ```
+
+Use `make test-fast` during development and select `test-video-capture` or `test-video-encoder` only for relevant changes. Run `make test-browser` once for final integration validation; do not automatically retry failed full browser suites.
+
+Resource-heavy targets share a per-user nonblocking lock across checkout directories, a wall-clock timeout, and an owned-process cleanup guard. Concurrent runs are refused rather than queued. Network-heavy targets refuse to start at 8,000 or more host `TIME_WAIT` sockets; nested stages recheck pressure before proceeding. Browser tests also use this guard when invoked directly. The guard attempts graceful cleanup, then terminates only the invocation's process group and recorded descendants whose PID/start time/command still match—not the user's server or browser. Test encoders are limited to two threads; production exports keep their normal thread policy.
+
+Browser cleanup is awaited on success, failure and SIGINT/SIGTERM. The temporary server pauses its jobs before exit, stderr is continuously drained with an 8 KB diagnostic tail, and temporary files are removed only after server exit. The API test helpers reuse an HTTP connection per test and close it during teardown. The export API already supports HTTP/1.1 keep-alive for sequential browser uploads.
 
 The soak uses three samples from an existing artwork video at 1080p/30 FPS, two store-restart/resume cycles, exact frame count and duration checks, BT.709 verification and encoder-leak checks. It uses temporary storage and does not alter the source. The default six-second run is deliberately bounded; it is not a claim of multi-hour browser endurance. Long hidden-tab/4K exports still need workload-specific endurance validation.
 

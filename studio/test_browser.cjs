@@ -1,4 +1,6 @@
 // Browser integration test. Uses the Bun-managed Playwright dependency and never touches real raw/ or exports/.
+const {ensureGuard,bounded,stopServer,installCleanup}=require('./test_lifecycle.cjs');
+ensureGuard(__filename,{network:true,timeout:300});
 const {chromium}=require('playwright');
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict'),{spawn}=require('child_process');
 (async()=>{
@@ -6,11 +8,39 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
  fs.cpSync(__dirname,path.join(root,'studio'),{recursive:true});fs.mkdirSync(path.join(root,'raw'));
  for(const file of ['index.html','tesseract.js','viewer-skyboxes.js','skybox-paths.js'])fs.copyFileSync(path.join(__dirname,'..',file),path.join(root,file));
  fs.cpSync(path.join(__dirname,'..','vendor'),path.join(root,'vendor'),{recursive:true});
- const server=spawn('python3',['-c',`import sys;sys.path.insert(0,${JSON.stringify(__dirname)});import server;from pathlib import Path;server.ROOT=Path(${JSON.stringify(root)});http=server.ThreadingHTTPServer(('localhost',0),server.Handler);print(http.server_port,flush=True);http.serve_forever()`]);
- let browser;
+ const fixture=`
+import signal,sys
+sys.path.insert(0,${JSON.stringify(__dirname)})
+import server
+from pathlib import Path
+server.ROOT=Path(${JSON.stringify(root)})
+http=server.StudioHTTPServer(('localhost',0),server.Handler)
+def stop(*_): raise KeyboardInterrupt()
+signal.signal(signal.SIGTERM,stop)
+try:
+    print(http.server_port,flush=True)
+    http.serve_forever()
+except KeyboardInterrupt:
+    pass
+finally:
+    server.pause_all_videos()
+    http.server_close()
+`;
+ const server=spawn('python3',['-c',fixture]);
+ let browser,serverErrors='';
+ // Drain stderr continuously. Per-frame HTTP logs must never fill the pipe and
+ // block the test server; retain only a small diagnostic tail.
+ server.stderr.on('data',data=>{serverErrors=(serverErrors+data.toString()).slice(-8192);});
+ const cleanup=installCleanup(async()=>{
+  try{if(browser)await bounded(browser.close(),10000,'Chromium shutdown');}
+  finally{await stopServer(server);fs.rmSync(root,{recursive:true,force:true});}
+ });
  try{
-  const port=await new Promise((resolve,reject)=>{server.stdout.once('data',data=>resolve(Number(data.toString().trim())));server.once('error',reject);});
-  browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),args:['--use-gl=angle','--use-angle=swiftshader']});
+  const port=await bounded(new Promise((resolve,reject)=>{
+   let output='';server.stdout.on('data',data=>{output+=data.toString();const line=output.split('\n')[0];if(/^\d+$/.test(line))resolve(Number(line));});
+   server.once('error',reject);server.once('exit',code=>reject(new Error(`Test server exited (${code}): ${serverErrors}`)));
+  }),10000,'Test server startup');
+  browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),timeout:15000,args:['--renderer-process-limit=2','--use-gl=angle','--use-angle=swiftshader']});
   const context=await browser.newContext({viewport:{width:1700,height:1100}});
   const page=await context.newPage(),errors=[];let starting=true,failStartup;
   const startupFailure=new Promise((_,reject)=>{failStartup=reject;});
@@ -213,5 +243,5 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   assert(fs.existsSync(path.join(root,'exports',folder,'pipeline.json')));assert(fs.existsSync(path.join(root,'raw','a.png')));
   await Promise.all([page.waitForEvent('load'),page.locator('#reload-app').click()]);await page.waitForSelector('.photo');assert.equal(await page.locator('.node').count(),1);assert.equal((await capture()).edges.length,0);
   assert.deepEqual(errors,[]);console.log('PASS: Studio graph/export, viewer gallery, publish-dialog keyboard isolation, offline vendored runtime, failure retention, persistence and Studio reopen.');
- }finally{if(browser)await browser.close();server.kill();fs.rmSync(root,{recursive:true,force:true});}
+ }finally{await cleanup();}
 })().catch(error=>{console.error(error);process.exitCode=1;});
