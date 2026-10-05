@@ -704,6 +704,8 @@ class VideoJobStoreTest(unittest.TestCase):
         paused = self.store.pause(job['id'], lease=lease)
         self.assertEqual(paused['state'], 'paused')
         self.assertNotIn('could not be stopped', paused.get('reason') or '')
+        self.assertIn('injected frame failure', paused['reason'])
+        self.assertIn('resistant encoder diagnostic', paused['reason'])
         self.assertNotIn(job['id'], self.store.active)
         self.assertFalse(log.exists())
 

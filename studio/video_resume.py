@@ -681,7 +681,8 @@ class VideoJobStore:
             if 'stopFailureMessage' in runtime:
                 runtime_job['error'] = runtime.pop('stopFailureMessage')
             if detail:
-                runtime_job['error'] = f'Checkpoint encoder diagnostic: {detail}'
+                original = runtime_job.get('error')
+                runtime_job['error'] = f'{original}: {detail}' if original else f'Checkpoint encoder diagnostic: {detail}'
             try:
                 self._save(runtime_manifest, runtime_job)
             except OSError:
