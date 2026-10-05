@@ -7,7 +7,7 @@
     "test:vendor": "node scripts/sync-vendor.mjs --check",
     "test:syntax": "node --check tesseract.js && node --check viewer-skyboxes.js && node --check studio/studio.js && node --check studio/pipeline.js",
     "test:unit": "node studio/test_resolution.cjs && make test-python",
-    "test:browser": "node studio/test_browser.cjs",
+    "test:browser": "make test-video-capture && node studio/test_browser.cjs",
     "sync:vendor": "node scripts/sync-vendor.mjs"
   },
   "dependencies": {

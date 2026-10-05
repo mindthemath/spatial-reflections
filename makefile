@@ -1,4 +1,4 @@
-.PHONY: serve static install sync update test test-python test-browser unstick
+.PHONY: serve static install sync update test test-python test-browser test-video-capture unstick
 
 serve:
 	python3 studio/server.py --port 1313
@@ -34,6 +34,9 @@ test:
 
 test-python:
 	python3 -m unittest discover -s studio -p 'test_*.py'
+
+test-video-capture:
+	node studio/test_video_capture.cjs
 
 test-browser:
 	bun run test:browser

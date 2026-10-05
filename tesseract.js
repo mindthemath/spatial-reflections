@@ -20,6 +20,8 @@ let videoExportAbort = null;
 let videoExportStopAction = null;
 let videoExportStopPromise = null;
 let videoExportStopJobId = null;
+let videoCaptureSurface = null;
+let videoCaptureContext = null;
 let loopTiming = { period: 0, frameCount: 1, timeStep: 0, exact: true };
 let lastAnimationTimestamp = null;
 let frameAccumulator = 0;
@@ -1942,9 +1944,38 @@ function dataUrlToBlob(dataUrl) {
     return new Blob([bytes], { type: 'image/png' });
 }
 
-function canvasPNG(canvas) {
-    // Synchronous read. toBlob's callback is deferred, and dropped, while the
-    // document is hidden — that left the export and the encoder waiting on each other.
+async function canvasPNG(canvas) {
+    // Snapshot synchronously into a reusable offscreen surface, then let its
+    // promise-based encoder work without creating a large Base64 string. Unlike
+    // HTMLCanvasElement.toBlob(), OffscreenCanvas.convertToBlob() does not rely on
+    // a document callback that browsers may drop while the page is hidden.
+    if (typeof OffscreenCanvas !== 'undefined') {
+        if (!videoCaptureSurface || videoCaptureSurface.width !== canvas.width || videoCaptureSurface.height !== canvas.height) {
+            videoCaptureSurface = new OffscreenCanvas(canvas.width, canvas.height);
+            videoCaptureContext = videoCaptureSurface.getContext('2d', { alpha: false });
+        }
+        if (videoCaptureContext) {
+            videoCaptureContext.drawImage(canvas, 0, 0);
+            let timeout;
+            try {
+                const blob = await Promise.race([
+                    videoCaptureSurface.convertToBlob({ type: 'image/png' }),
+                    new Promise((_, reject) => {
+                        timeout = setTimeout(() => reject(new Error('Offscreen PNG capture timed out')), 30000);
+                    })
+                ]);
+                if (blob?.size) return blob;
+                throw new Error('Offscreen PNG capture returned an empty frame');
+            } catch (error) {
+                console.warn('Offscreen video capture failed; using the compatibility path', error);
+                // The WebGL drawing buffer may have been cleared while awaiting
+                // the encoder. Re-render this same deterministic frame first.
+                renderer.render(scene, camera);
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+    }
     return dataUrlToBlob(canvas.toDataURL('image/png'));
 }
 
@@ -2136,7 +2167,7 @@ async function runVideoExport(plan, resumableJob = null) {
             setTimelineFrame(plan.startFrame + frame);
             updateTesseractProjection();
             renderer.render(scene, camera);
-            const png = canvasPNG(renderer.domElement);
+            const png = await canvasPNG(renderer.domElement);
             await new Promise(resolve => setTimeout(resolve, 0));
             if (cancelVideoExportRequested) throw new DOMException('Video export cancelled', 'AbortError');
             const frameResult = await videoApi(`/api/video/frame?id=${activeVideoExportJob.id}&frame=${frame}&lease=${activeVideoExportJob.lease}`, {
@@ -2214,6 +2245,8 @@ async function runVideoExport(plan, resumableJob = null) {
         videoExportRunning = false;
         cancelVideoExportRequested = false;
         videoExportAbort = null;
+        videoCaptureSurface = null;
+        videoCaptureContext = null;
         videoExportStopPromise = null;
         videoExportStopJobId = null;
         fields.forEach(field => { field.disabled = false; });
