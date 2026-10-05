@@ -162,8 +162,10 @@ finally:
    // finalize through the actual UI without requiring a matching environment.
    const legacyId=await viewer.evaluate(async()=>{
     const signature=JSON.parse(document.querySelector('#video-export-dialog').dataset.renderSignature);delete signature.environment;
-    const request={name:'browser-legacy-finalize',width:64,height:64,fps:1,frames:1,quality:'draft',format:'mp4',checkpointSeconds:1,sourceUrl:location.pathname+location.search,renderSignature:JSON.stringify(signature),viewerState:{}};
-    const started=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}).then(r=>r.json());
+    const request={name:'browser-legacy-finalize',width:64,height:64,fps:24,frames:1,quality:'draft',format:'mp4',checkpointSeconds:1,sourceUrl:location.pathname+location.search,renderSignature:JSON.stringify(signature),viewerState:{}};
+    const start=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    if(!start.ok)throw new Error(await start.text());
+    const started=await start.json();
     const canvas=document.createElement('canvas');canvas.width=canvas.height=64;canvas.getContext('2d').fillRect(0,0,64,64);
     const png=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
     const frame=await fetch(`/api/video/frame?id=${started.id}&frame=0&lease=${started.lease}`,{method:'POST',headers:{'Content-Type':'image/png'},body:png});
@@ -171,11 +173,16 @@ finally:
     await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});
     return started.id;
    });
-   await viewer.locator('#close-video-export').click();await viewer.locator('#open-video-export').click();
-   const legacy=viewer.locator(`.video-resume-job[data-job-id="${legacyId}"]`);await legacy.waitFor();
+   const finalizeContext=await browser.newContext({viewport:{width:800,height:600}}),finalizePage=await finalizeContext.newPage();
+   finalizePage.on('pageerror',error=>errors.push(error.message));
+   await finalizePage.goto(`http://localhost:${port}/?skybox=exports%2Fmissing-legacy-environment`);
+   await finalizePage.waitForFunction(()=>document.querySelector('#skybox-status')?.classList.contains('error'));
+   await finalizePage.locator('#open-video-export').click();
+   const legacy=finalizePage.locator(`.video-resume-job[data-job-id="${legacyId}"]`);await legacy.waitFor();
    assert.equal(await legacy.locator('.restore-video-export').count(),0);assert.equal(await legacy.locator('.resume-video-export').innerText(),'Finalize');
-   await legacy.locator('.resume-video-export').click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});
+   await legacy.locator('.resume-video-export').click();await finalizePage.waitForSelector('#video-export-result a',{timeout:30000});
    assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-legacy-finalize-')&&file.endsWith('.mp4')));
+   await finalizeContext.close();
    const mismatchId=await viewer.evaluate(async()=>{
     const signature=JSON.parse(document.querySelector('#video-export-dialog').dataset.renderSignature);signature.shader='different-render';
     const request={name:'mismatch',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:JSON.stringify(signature),startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
