@@ -395,6 +395,7 @@ class VideoJobStore:
             'frames': frames,
             'checkpointSeconds': checkpoint_seconds,
             'scratchPath': str(scratch_base),
+            'colorProfile': 'bt709-limited-v1',
         }
         job = {
             'schemaVersion': SCHEMA_VERSION,
@@ -722,18 +723,25 @@ class VideoJobStore:
             raise ValueError(
                 f'Not enough scratch space for the next checkpoint ({free_bytes:,} bytes free)'
             )
+        # Existing jobs without a profile keep their original conversion. Mixing
+        # old untagged checkpoints with new BT.709 checkpoints would change color
+        # mid-video and concat would advertise only the first segment's metadata.
+        color_args = []
+        if request.get('colorProfile') == 'bt709-limited-v1':
+            color_args = [
+                '-vf', ('scale=in_range=pc:out_range=tv:out_color_matrix=bt709,'
+                        'setparams=range=limited:color_primaries=bt709:'
+                        'color_trc=bt709:colorspace=bt709'),
+                '-color_range', 'tv', '-colorspace', 'bt709',
+                '-color_primaries', 'bt709', '-color_trc', 'bt709',
+            ]
         command = [
             self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
             '-f', 'image2pipe', '-framerate', str(request['fps']),
-            '-vcodec', 'png', '-i', 'pipe:0', '-an',
-            '-vf', ('scale=in_range=pc:out_range=tv:out_color_matrix=bt709,'
-                    'setparams=range=limited:color_primaries=bt709:'
-                    'color_trc=bt709:colorspace=bt709'),
+            '-vcodec', 'png', '-i', 'pipe:0', '-an', *color_args,
             '-c:v', 'libx264', '-preset', 'medium',
             '-b:v', str(bit_rate), '-maxrate', str(round(bit_rate * 1.5)),
             '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',
-            '-color_range', 'tv', '-colorspace', 'bt709',
-            '-color_primaries', 'bt709', '-color_trc', 'bt709',
             '-f', 'matroska', str(pending),
         ]
         stderr_path = manifest.parent / f'.segment-{segment_index:06d}.stderr.log'
