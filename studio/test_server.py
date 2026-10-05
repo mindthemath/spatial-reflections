@@ -53,7 +53,7 @@ class StudioAPITest(unittest.TestCase):
         self.temp.cleanup()
 
     def request(self, method, path, payload=None, headers=None):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
         connection.request(method, path, json.dumps(payload) if payload is not None else None, headers or {})
         response = connection.getresponse()
         status, data = response.status, json.loads(response.read())
@@ -61,7 +61,7 @@ class StudioAPITest(unittest.TestCase):
         return status, data
 
     def raw_request(self, method, path, body, headers=None):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
         connection.request(method, path, body, headers or {})
         response = connection.getresponse()
         status, data = response.status, json.loads(response.read())
@@ -69,7 +69,7 @@ class StudioAPITest(unittest.TestCase):
         return status, data
 
     def test_http_connection_is_reused_between_requests(self):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
         connection.request('GET', '/api/video/capabilities')
         first = connection.getresponse()
         self.assertEqual(first.status, 200)
@@ -155,7 +155,7 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(code, 201)
         folder = started['folder']
         for face in server.FACES:
-            connection = http.client.HTTPConnection('localhost', self.http.server_port)
+            connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
             connection.request('POST', f'/api/export/face?folder={folder}&face={face}', PNG, {'Content-Type': 'image/png'})
             response = connection.getresponse()
             self.assertEqual(response.status, 201)
@@ -569,7 +569,7 @@ class StudioAPITest(unittest.TestCase):
     def test_studio_code_bypasses_cache(self):
         (server.ROOT / 'studio').mkdir()
         (server.ROOT / 'studio' / 'app.js').write_text('const version = 3;')
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
         connection.request('GET', '/studio/app.js', headers={'If-Modified-Since': 'Wed, 01 Jan 2099 00:00:00 GMT'})
         response = connection.getresponse()
         self.assertEqual(response.status, 200)
@@ -600,7 +600,7 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(self.request('POST', '/api/export', self.payload(), {'Origin': 'https://example.com'})[0], 403)
 
     def test_rejected_request_with_unread_body_closes_connection(self):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
         connection.request('POST', '/api/export', json.dumps(self.payload()), {'Origin': 'https://example.com'})
         response = connection.getresponse()
         self.assertEqual(response.status, 403)
