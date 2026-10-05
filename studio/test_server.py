@@ -455,7 +455,12 @@ class StudioAPITest(unittest.TestCase):
                 code, capabilities = self.request('GET', '/api/video/capabilities')
                 self.assertEqual(code, 200)
                 self.assertFalse(capabilities['available'])
+                self.assertTrue(capabilities['canManage'])
                 self.assertIn('libx264', capabilities['reason'])
+                code, rejected = self.raw_request('POST', '/api/video/frame', PNG, {'Content-Type': 'image/png'})
+                self.assertEqual(code, 400)
+                self.assertIn('libx264', rejected['error'])
+                self.assertIsNone(self.connection.sock, 'Rejected unread frame body must close the connection')
         finally:
             server.FFMPEG_ENCODER_ERROR = previous
 
