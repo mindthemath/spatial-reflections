@@ -120,6 +120,34 @@ time.sleep(60)
         self.assertLess(time.monotonic() - start, 3)
         self.assertIsNotNone(launched[0].poll())
 
+    def test_interrupt_after_timeout_escalates_and_preserves_timeout_status(self):
+        real_cleanup = test_guard.cleanup
+        def cleanup(child, owned, force):
+            os.kill(os.getpid(), signal.SIGINT)
+            self.assertTrue(force())
+            try:
+                real_cleanup(child, owned, force)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
+        with mock.patch.object(test_guard, 'cleanup', side_effect=cleanup):
+            self.assertEqual(test_guard.main(['--timeout', '.01', '--', sys.executable, '-c', 'import time;time.sleep(60)']), 124)
+
+    def test_exited_group_permission_race_is_safe(self):
+        child = mock.Mock(pid=123, poll=lambda: 0)
+        with mock.patch.object(test_guard, 'process_snapshot', return_value={}), \
+             mock.patch.object(test_guard.os, 'killpg', side_effect=PermissionError('exited group')):
+            test_guard.cleanup(child, {})
+        child.wait.assert_not_called()
+
+    def test_live_group_permission_failure_is_not_hidden(self):
+        child = mock.Mock(pid=123, poll=lambda: None)
+        with mock.patch.object(test_guard, 'process_snapshot', return_value={}), \
+             mock.patch.object(test_guard.os, 'killpg', side_effect=PermissionError('live group')):
+            with self.assertRaises(PermissionError):
+                test_guard.cleanup(child, {})
+
     def test_reaped_root_does_not_adopt_unrelated_children(self):
         owned = {}
         test_guard.remember_descendants(None, owned, {456: (123, 'new time', 'unrelated child')})

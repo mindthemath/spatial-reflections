@@ -71,6 +71,11 @@ def cleanup(child, owned, force=lambda: False):
         os.killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # macOS may return EPERM rather than ESRCH after an empty group exits.
+        # Never suppress a permission failure for a still-running owned leader.
+        if child.poll() is None:
+            raise
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline and not force():
         try:
@@ -103,6 +108,9 @@ def cleanup(child, owned, force=lambda: False):
         os.killpg(child.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        if child.poll() is None:
+            raise
     if child.poll() is None:
         child.wait(timeout=5)
 
@@ -179,15 +187,17 @@ def main(argv=None):
         finally:
             try:
                 if child is not None:
-                    cleanup(child, owned, force=lambda: len(interrupted) > 1)
+                    cleanup(child, owned, force=lambda: len(interrupted) > (0 if timed_out else 1))
             finally:
                 for sig, handler in previous.items():
                     signal.signal(sig, handler)
                 lock.seek(0); lock.truncate(); lock.flush()
+        if timed_out:
+            return 124
         if interrupted:
             return 128 + interrupted[0]
         rc = child.returncode
-        return 124 if timed_out else (128 - rc if rc < 0 else rc)
+        return 128 - rc if rc < 0 else rc
 
 
 if __name__ == '__main__':
