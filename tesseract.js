@@ -250,6 +250,9 @@ function createEnvironmentMap() {
             updateMaterialsWithEnvMap();
             previous?.dispose();
         },
+        onStateChange: () => {
+            if (videoExportDialog) updateVideoExportSummary();
+        },
         confirmAction,
         onSwitchChrome: () => {
             const select = document.getElementById('viewer-shader');
@@ -1524,7 +1527,8 @@ function videoRenderSignature() {
             position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
         },
-        fps: exportFps
+        fps: exportFps,
+        environment: skyboxLibrary?.getRenderState().identity || null
     });
 }
 
@@ -1788,6 +1792,7 @@ function videoExportPlan() {
     const scratchPath = document.getElementById('video-export-scratch').value.trim();
 
     if (!loopTiming.exact || loopTiming.frameCount < 1) error = 'The current motion does not have an exportable timeline.';
+    if (!skyboxLibrary?.getRenderState().ready) error = 'Wait for the selected skybox to finish loading before exporting.';
     if (!Number.isInteger(checkpointSeconds) || checkpointSeconds < 0 || checkpointSeconds > 3600) error = 'Checkpoint duration must be between 0 and 3,600 seconds.';
     if (range === 'clip') {
         const startSeconds = parseTimeInput(document.getElementById('video-export-start').value);
@@ -2084,8 +2089,10 @@ async function runVideoExport(plan, resumableJob = null) {
     const originalPixelRatio = renderer.getPixelRatio();
     let lastProgressUpdate = 0;
     let exportStartedAt = 0;
+    let releaseEnvironmentLock = null;
 
     try {
+        releaseEnvironmentLock = skyboxLibrary.acquireRenderLock();
         const gpuLimit = renderer.getContext().getParameter(renderer.getContext().MAX_RENDERBUFFER_SIZE);
         if (plan.width > gpuLimit || plan.height > gpuLimit) throw new Error(`This GPU can render video up to ${gpuLimit}px per side`);
         if (resumableJob) {
@@ -2203,6 +2210,7 @@ async function runVideoExport(plan, resumableJob = null) {
         updateTesseractProjection();
         renderer.render(scene, camera);
         animationPaused = originalPaused;
+        releaseEnvironmentLock?.();
         videoExportRunning = false;
         cancelVideoExportRequested = false;
         videoExportAbort = null;

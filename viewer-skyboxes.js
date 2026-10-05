@@ -13,8 +13,17 @@ function diagnosticTexture() {
     });
     const texture=new THREE.CubeTexture(images);texture.needsUpdate=true;return texture;
 }
-function loadImage(url) {
-    return new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>reject(new Error(`Missing or unreadable image: ${url}`));image.src=url;});
+async function loadImageAsset(url) {
+    const response=await fetch(url,{cache:'no-store'});
+    if(!response.ok)throw new Error(`Missing or unreadable image: ${url}`);
+    const bytes=await response.arrayBuffer();
+    const digest=await crypto.subtle.digest('SHA-256',bytes);
+    const sha256=Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+    const objectURL=URL.createObjectURL(new Blob([bytes],{type:response.headers.get('Content-Type')||'image/png'}));
+    try{
+        const image=await new Promise((resolve,reject)=>{const value=new Image();value.onload=()=>resolve(value);value.onerror=()=>reject(new Error(`Missing or unreadable image: ${url}`));value.src=objectURL;});
+        return {image,sha256};
+    }finally{URL.revokeObjectURL(objectURL);}
 }
 function textureFromImages(images,renderer,expectedSize=null) {
     const side=images[0].naturalWidth;
@@ -36,21 +45,32 @@ function slugify(value) {
     return value.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,60);
 }
 
-export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitchChrome,getViewerState,publication,confirmAction}) {
+export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitchChrome,getViewerState,onStateChange=()=>{},publication,confirmAction}) {
+    let renderReady=false,renderIdentity=null,renderLocks=0;
+    const setRenderState=(ready,identity=renderIdentity)=>{renderReady=ready;renderIdentity=identity;onStateChange({ready:renderReady,identity:renderIdentity});};
+    const renderApi={
+        getRenderState(){return {ready:renderReady,identity:renderIdentity};},
+        acquireRenderLock(){
+            if(!renderReady||!renderIdentity)throw new Error('Wait for the skybox to finish loading before exporting video');
+            renderLocks+=1;let released=false;
+            return ()=>{if(!released){released=true;renderLocks=Math.max(0,renderLocks-1);}};
+        }
+    };
     if(publication?.schemaVersion===1){
         const section=document.createElement('section');section.className='viewer-skybox';
         section.innerHTML='<div class="skybox-heading">WORK</div><div id="active-skybox"></div><p id="skybox-status" role="status">Loading published environment…</p>';
         mount.prepend(section);section.querySelector('#active-skybox').textContent=publication.title||'Published work';
-        const status=section.querySelector('#skybox-status');onTexture(diagnosticTexture());
+        const status=section.querySelector('#skybox-status');onTexture(diagnosticTexture());setRenderState(false,null);
         (async()=>{
             try{
                 if(!publication.skybox||!FACES.every(face=>publication.skybox[face]===`skybox/${face}.png`))throw new Error('Published skybox configuration is invalid');
-                const images=await Promise.all(FACES.map(face=>loadImage(publication.skybox[face])));
-                const {texture,side,displaySide}=textureFromImages(images,renderer,publication.size??null);onTexture(texture);
+                const assets=await Promise.all(FACES.map(face=>loadImageAsset(publication.skybox[face])));
+                const {texture,side,displaySide}=textureFromImages(assets.map(asset=>asset.image),renderer,publication.size??null);onTexture(texture);
+                setRenderState(true,JSON.stringify({kind:'published',slug:publication.slug||'',manifestSha256:publication.source?.manifestSha256||null,faces:Object.fromEntries(FACES.map((face,index)=>[face,assets[index].sha256]))}));
                 status.textContent=`${side} × ${side}px${displaySide<side?` · display reduced to ${displaySide}px for this GPU`:''}`;
-            }catch(error){status.textContent=error.message;status.classList.add('error');}
+            }catch(error){setRenderState(false,null);status.textContent=error.message;status.classList.add('error');}
         })();
-        return {refreshShaderHint(){},loadSelection(){return false;},refreshLibrary(){}};
+        return {...renderApi,refreshShaderHint(){},loadSelection(){return false;},refreshLibrary(){}};
     }
 
     const section=document.createElement('section');section.className='viewer-skybox';
@@ -80,28 +100,33 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
         const url=new URL(location.href);url.searchParams.set('skybox',folder);history.replaceState(null,'',url);
     }
     async function loadSelection(folder,{rememberSelection=true}={}) {
-        const version=++requestId;
+        if(renderLocks)throw new Error('The skybox cannot change during video export');
+        const version=++requestId,previousIdentity=renderIdentity,hadActive=!!active;
+        setRenderState(false,previousIdentity);
         try {
             folder=folder==='default'?'default':normalizeExportFolder(folder);
             message('Loading skybox…');
-            let name='Default skybox',size=null;
+            let name='Default skybox',size=null,expectedHashes=null;
             if(folder!=='default'){
                 const response=await fetch(exportFileURL(folder,'manifest.json'),{cache:'no-store'});
                 if(!response.ok)throw new Error('Export manifest is missing. Is this export complete?');
                 const manifest=await response.json();
                 if(!manifest.outputs||!FACES.every(face=>manifest.outputs[face]?.file===`${face}.png`))throw new Error('Manifest must identify all six named PNG faces');
                 name=manifest.pipeline?.name||folder;size=manifest.pipeline?.size;
+                expectedHashes=Object.fromEntries(FACES.map(face=>[face,manifest.outputs[face].sha256||null]));
             }
             const urls=FACES.map(face=>folder==='default'?`/skybox/${face}.png`:exportFileURL(folder,`${face}.png`));
-            const images=await Promise.all(urls.map(loadImage));
-            const {texture,side,displaySide}=textureFromImages(images,renderer,size);
+            const assets=await Promise.all(urls.map(loadImageAsset));
+            if(expectedHashes&&FACES.some((face,index)=>expectedHashes[face]&&expectedHashes[face]!==assets[index].sha256))throw new Error('Skybox image content does not match the export manifest');
+            const identity=JSON.stringify({kind:folder==='default'?'default':'export',folder,faces:Object.fromEntries(FACES.map((face,index)=>[face,assets[index].sha256]))});
+            const {texture,side,displaySide}=textureFromImages(assets.map(asset=>asset.image),renderer,size);
             if(version!==requestId){texture.dispose();return false;}
-            onTexture(texture);active=folder;activeName=name;
+            onTexture(texture);active=folder;activeName=name;setRenderState(true,identity);
             $('active-skybox').textContent=name;$('active-skybox').title=folder==='default'?'skybox/':folder;
             message(`${side} × ${side}px${displaySide<side?` · display reduced to ${displaySide}px for this GPU; originals unchanged`:''}`);
             if(rememberSelection)remember(folder);
             updateLinks();renderLibrary();dialog.close();return true;
-        }catch(error){if(version===requestId)message(`${error.message}. Kept the current environment.`,true);return false;}
+        }catch(error){if(version===requestId){setRenderState(hadActive,previousIdentity);message(`${error.message}. Kept the current environment.`,true);}return false;}
     }
     function renderLibrary() {
         const list=$('skybox-export-list');list.replaceChildren();
@@ -146,9 +171,9 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
             result.replaceChildren(document.createTextNode('Published: '));const link=document.createElement('a');link.href=value.url;link.textContent=value.url;link.target='_blank';link.rel='noopener';result.append(link);
         }catch(error){result.textContent=error.message;result.classList.add('error');}finally{button.disabled=false;}
     };
-    onTexture(diagnosticTexture());refreshShaderHint();
+    onTexture(diagnosticTexture());setRenderState(false,null);refreshShaderHint();
     let desired=new URL(location.href).searchParams.get('skybox');
     if(!desired){try{desired=localStorage.getItem(STORAGE_KEY);}catch{/* Default if storage is unavailable. */}}
     loadSelection(desired||'default',{rememberSelection:!!desired});
-    return {refreshShaderHint,loadSelection,refreshLibrary};
+    return {...renderApi,refreshShaderHint,loadSelection,refreshLibrary};
 }
