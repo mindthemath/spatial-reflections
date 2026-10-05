@@ -22,6 +22,7 @@ let videoExportStopPromise = null;
 let videoExportStopJobId = null;
 let videoCaptureSurface = null;
 let videoCaptureContext = null;
+let videoCaptureFallback = false;
 let loopTiming = { period: 0, frameCount: 1, timeStep: 0, exact: true };
 let lastAnimationTimestamp = null;
 let frameAccumulator = 0;
@@ -1979,31 +1980,34 @@ async function canvasPNG(canvas) {
     // promise-based encoder work without creating a large Base64 string. Unlike
     // HTMLCanvasElement.toBlob(), OffscreenCanvas.convertToBlob() does not rely on
     // a document callback that browsers may drop while the page is hidden.
-    if (typeof OffscreenCanvas !== 'undefined') {
-        if (!videoCaptureSurface || videoCaptureSurface.width !== canvas.width || videoCaptureSurface.height !== canvas.height) {
-            videoCaptureSurface = new OffscreenCanvas(canvas.width, canvas.height);
-            videoCaptureContext = videoCaptureSurface.getContext('2d', { alpha: false });
-        }
-        if (videoCaptureContext) {
-            videoCaptureContext.drawImage(canvas, 0, 0);
-            let timeout;
-            try {
-                const blob = await Promise.race([
-                    videoCaptureSurface.convertToBlob({ type: 'image/png' }),
-                    new Promise((_, reject) => {
-                        timeout = setTimeout(() => reject(new Error('Offscreen PNG capture timed out')), 30000);
-                    })
-                ]);
-                if (blob?.size) return blob;
-                throw new Error('Offscreen PNG capture returned an empty frame');
-            } catch (error) {
-                console.warn('Offscreen video capture failed; using the compatibility path', error);
-                // The WebGL drawing buffer may have been cleared while awaiting
-                // the encoder. Re-render this same deterministic frame first.
-                renderer.render(scene, camera);
-            } finally {
-                clearTimeout(timeout);
+    if (!videoCaptureFallback && typeof OffscreenCanvas !== 'undefined') {
+        let timeout;
+        try {
+            if (!videoCaptureSurface || videoCaptureSurface.width !== canvas.width || videoCaptureSurface.height !== canvas.height) {
+                videoCaptureSurface = new OffscreenCanvas(canvas.width, canvas.height);
+                videoCaptureContext = videoCaptureSurface.getContext('2d', { alpha: false });
             }
+            if (!videoCaptureContext || typeof videoCaptureSurface.convertToBlob !== 'function') {
+                throw new Error('Offscreen PNG capture is unavailable');
+            }
+            videoCaptureContext.drawImage(canvas, 0, 0);
+            const blob = await Promise.race([
+                videoCaptureSurface.convertToBlob({ type: 'image/png' }),
+                new Promise((_, reject) => {
+                    timeout = setTimeout(() => reject(new Error('Offscreen PNG capture timed out')), 30000);
+                })
+            ]);
+            if (blob?.size) return blob;
+            throw new Error('Offscreen PNG capture returned an empty frame');
+        } catch (error) {
+            // Never accumulate timed-out full-frame encodes or repeat the 30s
+            // wait on every frame. Retry offscreen capture only in the next job.
+            videoCaptureFallback = true;
+            videoCaptureSurface = videoCaptureContext = null;
+            console.warn('Offscreen video capture failed; using the compatibility path for this export', error);
+            renderer.render(scene, camera);
+        } finally {
+            clearTimeout(timeout);
         }
     }
     return dataUrlToBlob(canvas.toDataURL('image/png'));
@@ -2291,6 +2295,7 @@ async function runVideoExport(plan, resumableJob = null) {
         videoExportAbort = null;
         videoCaptureSurface = null;
         videoCaptureContext = null;
+        videoCaptureFallback = false;
         videoExportStopPromise = null;
         videoExportStopJobId = null;
         fields.forEach(field => { field.disabled = false; });
