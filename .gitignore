@@ -9,3 +9,5 @@ videos/
 node_modules/
 test-results/
 playwright-report/
+# local generated/read-only review pages
+docs/
