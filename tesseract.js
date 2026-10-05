@@ -2153,9 +2153,14 @@ async function runVideoExport(plan, resumableJob = null) {
     let releaseEnvironmentLock = null;
 
     try {
-        releaseEnvironmentLock = skyboxLibrary.acquireRenderLock();
-        const gpuLimit = renderer.getContext().getParameter(renderer.getContext().MAX_RENDERBUFFER_SIZE);
-        if (plan.width > gpuLimit || plan.height > gpuLimit) throw new Error(`This GPU can render video up to ${gpuLimit}px per side`);
+        const prepareCapture = () => {
+            releaseEnvironmentLock = skyboxLibrary.acquireRenderLock();
+            const gpuLimit = renderer.getContext().getParameter(renderer.getContext().MAX_RENDERBUFFER_SIZE);
+            if (plan.width > gpuLimit || plan.height > gpuLimit) throw new Error(`This GPU can render video up to ${gpuLimit}px per side`);
+        };
+        // A complete checkpoint job only needs server-side concatenation, not
+        // a verified current environment or the ability to render its resolution.
+        if (!resumableJob || resumableJob.nextFrame < plan.frames) prepareCapture();
         if (resumableJob) {
             activeVideoExportJob = await videoApi('/api/video/resume', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2178,14 +2183,23 @@ async function runVideoExport(plan, resumableJob = null) {
             });
         }
 
-        animationPaused = true;
-        exportStartedAt = performance.now();
-        renderer.setPixelRatio(1);
-        renderer.setSize(plan.width, plan.height, false);
-        camera.aspect = plan.width / plan.height;
-        camera.updateProjectionMatrix();
-
         const firstFrame = activeVideoExportJob.nextFrame || 0;
+        if (firstFrame < plan.frames) {
+            // Resume re-verifies checkpoint hashes and can roll back damaged
+            // segments. Never render replacements against a changed signature.
+            if (!releaseEnvironmentLock) {
+                prepareCapture();
+                if (resumableJob?.request.renderSignature !== videoRenderSignature()) {
+                    throw new Error('Current render settings do not match the repaired export');
+                }
+            }
+            animationPaused = true;
+            exportStartedAt = performance.now();
+            renderer.setPixelRatio(1);
+            renderer.setSize(plan.width, plan.height, false);
+            camera.aspect = plan.width / plan.height;
+            camera.updateProjectionMatrix();
+        }
         if (firstFrame === 0) {
             status.textContent = 'Saving resume frame…';
             await saveVideoExportPoster(plan, activeVideoExportJob);
