@@ -844,6 +844,7 @@ function createControls() {
     
     // Lighting type selector
     const lightingSelect = document.createElement('select');
+    lightingSelect.id = 'viewer-lighting';
     lightingSelect.style.width = '100%';
     lightingSelect.style.padding = '3px';
     lightingSelect.style.backgroundColor = '#222';
@@ -872,11 +873,13 @@ function createControls() {
     
     // Light distance control
     const distanceLabel = document.createElement('div');
+    distanceLabel.id = 'viewer-light-distance-label';
     distanceLabel.textContent = `Light Distance: ${lightDistance.toFixed(1)}`;
     distanceLabel.style.marginTop = '5px';
     distanceLabel.style.marginBottom = '5px';
     
     const distanceSlider = document.createElement('input');
+    distanceSlider.id = 'viewer-light-distance';
     distanceSlider.type = 'range';
     distanceSlider.min = '0.1';
     distanceSlider.max = '20';
@@ -965,21 +968,6 @@ function createControls() {
     lightingContainer.appendChild(distanceLabel);
     lightingContainer.appendChild(distanceSlider);
     controlPanel.appendChild(lightingContainer);
-    
-    // Helper function to update all materials
-    function updateMaterials() {
-        const previousMaterials = new Set([...faces, ...vertices].map(object => object.material));
-        const newMaterial = createShaderMaterial();
-        
-        faces.forEach(face => {
-            face.material = newMaterial;
-        });
-        
-        vertices.forEach(vertex => {
-            vertex.material = newMaterial;
-        });
-        previousMaterials.forEach(material => material.dispose());
-    }
     
     // Add rotation controls
     const rotationControls = document.createElement('div');
@@ -1309,6 +1297,41 @@ function createControls() {
     refreshLoopTiming({ preserveTime: false });
     setTimelineFrame(restoredTimelineFrame);
     updateCameraInfo();
+}
+
+function updateMaterials() {
+    const previousMaterials = new Set([...faces, ...vertices].map(object => object.material).filter(Boolean));
+    const newMaterial = createShaderMaterial();
+    faces.forEach(face => { face.material = newMaterial; });
+    vertices.forEach(vertex => { vertex.material = newMaterial; });
+    previousMaterials.forEach(material => {
+        if (material !== newMaterial) material.dispose();
+    });
+}
+
+function syncViewerControlsFromState() {
+    if (motionStepSlider) motionStepSlider.value = String(rotationSpeed * 1000);
+    if (motionStepLabel) motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
+    const rotationControls = document.getElementById('rotationControls');
+    if (rotationControls) {
+        const sliders = rotationControls.querySelectorAll('input[type="range"]');
+        const values = rotationControls.querySelectorAll('span');
+        ['xw', 'yw', 'zw'].forEach((axis, index) => {
+            if (sliders[index]) sliders[index].value = String(rotationCoefficients[axis] * 20);
+            if (values[index]) values[index].textContent = rotationCoefficients[axis].toFixed(2);
+        });
+    }
+    const shader = document.getElementById('viewer-shader');
+    if (shader) shader.value = currentShader;
+    const lighting = document.getElementById('viewer-lighting');
+    if (lighting) lighting.value = currentLighting;
+    const distance = document.getElementById('viewer-light-distance');
+    if (distance) distance.value = String(lightDistance);
+    const distanceLabel = document.getElementById('viewer-light-distance-label');
+    if (distanceLabel) distanceLabel.textContent = `Light Distance: ${lightDistance.toFixed(1)}`;
+    const vertexToggle = document.getElementById('vertexToggle');
+    if (vertexToggle) vertexToggle.checked = showVertices;
+    if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
 }
 
 const COEFFICIENT_SCALE = 1000000;
@@ -1703,12 +1726,17 @@ async function loadVideoResumeJobs() {
                 restore.textContent = 'Restore export settings';
                 restore.addEventListener('click', async () => {
                     applyViewerSettings(request.viewerState);
+                    const restoredFrame = timelineFrame;
                     camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
                     controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
                     controls.update();
                     vertices.forEach(vertex => { vertex.visible = showVertices; });
+                    syncViewerControlsFromState();
                     updateMaterials();
-                    refreshLoopTiming();
+                    skyboxLibrary?.refreshShaderHint();
+                    refreshLoopTiming({ preserveTime: false });
+                    setTimelineFrame(restoredFrame);
+                    updateCameraInfo();
                     persistViewerSettings();
                     videoExportDialog.dataset.renderSignature = videoRenderSignature();
                     await loadVideoResumeJobs();
