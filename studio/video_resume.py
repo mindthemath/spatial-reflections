@@ -479,6 +479,7 @@ class VideoJobStore:
         removable = re.compile(
             r'(?:job\.json|\.owner\.lock|\.concat\.txt|'
             r'segment-\d{6}\.mkv|\.segment-\d{6}\.pending\.mkv|'
+            r'\.segment-\d{6}\.stderr\.log|'
             r'\.job\.json\.[a-f0-9]{32}\.tmp)'
         )
         for path in job_dir.iterdir():
@@ -555,6 +556,8 @@ class VideoJobStore:
             raise ValueError('Video checkpoint frame total does not match the manifest')
 
         for path in job_dir.glob('.segment-*.pending.mkv'):
+            path.unlink(missing_ok=True)
+        for path in job_dir.glob('.segment-*.stderr.log'):
             path.unlink(missing_ok=True)
         for path in job_dir.glob('segment-*.mkv'):
             if path.resolve() not in recorded:
@@ -660,10 +663,13 @@ class VideoJobStore:
         pending = runtime.get('pending')
         if pending:
             pending.unlink(missing_ok=True)
+        detail = self._consume_encoder_stderr(runtime) if stopped else ''
         runtime_job = runtime.get('job')
         runtime_manifest = runtime.get('manifest')
         if runtime_job and runtime_manifest:
             runtime_job.pop('activeEncoder', None)
+            if detail:
+                runtime_job['error'] = f'Checkpoint encoder diagnostic: {detail}'
             try:
                 self._save(runtime_manifest, runtime_job)
             except OSError:
@@ -725,16 +731,26 @@ class VideoJobStore:
             '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',
             '-f', 'matroska', str(pending),
         ]
-        process = self.popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        stderr_path = manifest.parent / f'.segment-{segment_index:06d}.stderr.log'
+        stderr_path.unlink(missing_ok=True)
+        stderr_stream = stderr_path.open('xb')
+        try:
+            process = self.popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=stderr_stream,
+            )
+        except Exception:
+            stderr_stream.close()
+            stderr_path.unlink(missing_ok=True)
+            raise
         runtime = {
             'manifest': manifest,
             'job': job,
             'lease': lease,
             'process': process,
             'pending': pending,
+            'stderrPath': stderr_path,
+            'stderrStream': stderr_stream,
             'firstFrame': job['nextFrame'],
             'written': 0,
         }
@@ -755,6 +771,27 @@ class VideoJobStore:
             raise
         return runtime
 
+    @staticmethod
+    def _consume_encoder_stderr(runtime):
+        stream = runtime.pop('stderrStream', None)
+        path = runtime.pop('stderrPath', None)
+        if stream and not stream.closed:
+            try:
+                stream.flush()
+            except OSError:
+                pass
+            stream.close()
+        detail = ''
+        if path:
+            try:
+                with path.open('rb') as error_stream:
+                    error_stream.seek(max(0, path.stat().st_size - 4096))
+                    detail = error_stream.read().decode(errors='replace').strip()
+            except OSError:
+                pass
+            path.unlink(missing_ok=True)
+        return detail
+
     def _fail_active_segment(self, job_id, runtime, message):
         process = runtime['process']
         stopped = process.poll() is not None
@@ -772,6 +809,9 @@ class VideoJobStore:
                 pass
         if runtime.get('pending'):
             runtime['pending'].unlink(missing_ok=True)
+        detail = self._consume_encoder_stderr(runtime)
+        if detail:
+            message = f'{message}: {detail}'
         with self.lock:
             self.active.pop(job_id, None)
             self.leases.pop(job_id, None)
@@ -793,6 +833,7 @@ class VideoJobStore:
         if return_code != 0 or not runtime['pending'].is_file():
             self._fail_active_segment(job_id, runtime, 'Checkpoint encoder exited before finalizing the segment')
             raise ValueError('Checkpoint encoder failed')
+        self._consume_encoder_stderr(runtime)
 
         try:
             with runtime['pending'].open('rb') as stream:

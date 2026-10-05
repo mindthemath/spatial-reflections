@@ -658,10 +658,12 @@ class VideoJobStoreTest(unittest.TestCase):
 
     def test_encoder_failure_pauses_at_last_durable_frame(self):
         class FailingProcess:
-            def __init__(self, command, **_kwargs):
+            def __init__(self, command, **kwargs):
                 self.stdin = io.BytesIO()
                 self.output = Path(command[-1])
                 self.returncode = None
+                kwargs['stderr'].write(b'libx264 test diagnostic')
+                kwargs['stderr'].flush()
 
             def poll(self):
                 return self.returncode
@@ -682,6 +684,8 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(persisted['state'], 'paused')
         self.assertEqual(persisted['nextFrame'], 0)
         self.assertEqual(persisted['segments'], [])
+        self.assertIn('libx264 test diagnostic', persisted['error'])
+        self.assertEqual(list(self.manifest(job).parent.glob('*.stderr.log')), [])
 
     def test_pause_discards_only_active_segment(self):
         class WaitingProcess:
