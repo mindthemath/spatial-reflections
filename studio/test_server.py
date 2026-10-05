@@ -465,6 +465,24 @@ class StudioAPITest(unittest.TestCase):
                 'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60,
                 'quality': 'standard', 'format': 'avi'})
 
+    def test_ffmpeg_preflight_requires_libx264(self):
+        supported = mock.Mock(returncode=0, stdout=' V....D libx264 H.264 encoder')
+        missing = mock.Mock(returncode=0, stdout=' V....D h264_videotoolbox H.264 encoder')
+        with mock.patch.object(server.subprocess, 'run', return_value=supported):
+            self.assertIsNone(server.ffmpeg_encoder_error('/fake/ffmpeg'))
+        with mock.patch.object(server.subprocess, 'run', return_value=missing):
+            self.assertIn('libx264', server.ffmpeg_encoder_error('/fake/ffmpeg'))
+        previous = server.FFMPEG_ENCODER_ERROR
+        server.FFMPEG_ENCODER_ERROR = 'ffmpeg does not provide the required libx264 H.264 encoder'
+        try:
+            with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
+                code, capabilities = self.request('GET', '/api/video/capabilities')
+                self.assertEqual(code, 200)
+                self.assertFalse(capabilities['available'])
+                self.assertIn('libx264', capabilities['reason'])
+        finally:
+            server.FFMPEG_ENCODER_ERROR = previous
+
     def test_video_pause_accepts_bounded_failure_reason(self):
         with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
             code, started = self.request('POST', '/api/video/start', {

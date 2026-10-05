@@ -32,6 +32,7 @@ VIDEO_JOBS = {}
 VIDEO_JOBS_LOCK = threading.Lock()
 VIDEO_STORE = None
 VIDEO_STORE_LOCK = threading.Lock()
+FFMPEG_ENCODER_ERROR = None
 
 
 def hash_file(path):
@@ -204,14 +205,30 @@ def video_clip_labels():
     return labels
 
 
+def ffmpeg_encoder_error(ffmpeg):
+    try:
+        completed = subprocess.run(
+            [str(ffmpeg), '-hide_banner', '-encoders'],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f'Could not inspect ffmpeg encoders: {error}'
+    if completed.returncode != 0:
+        return 'ffmpeg could not list its encoders'
+    if not re.search(r'^\s*V\S*\s+libx264\s', completed.stdout, re.MULTILINE):
+        return 'ffmpeg does not provide the required libx264 H.264 encoder'
+    return None
+
+
 def video_capabilities():
     ffmpeg = shutil.which('ffmpeg')
     recovery = {
         'recovered': 0, 'alreadyExited': 0, 'refused': 0,
         'skippedActive': 0, 'failed': 0, 'indexFailed': False,
     }
-    available = bool(ffmpeg)
-    reason = None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'
+    available = bool(ffmpeg) and not FFMPEG_ENCODER_ERROR
+    reason = (FFMPEG_ENCODER_ERROR if ffmpeg
+              else 'ffmpeg is not installed or is not on the server PATH')
     if ffmpeg:
         store = video_store()
         if (not store.recovery_running and store.last_recovery['failed']
@@ -275,6 +292,8 @@ def start_video(request):
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
+    if FFMPEG_ENCODER_ERROR:
+        raise ValueError(FFMPEG_ENCODER_ERROR)
     store = video_store()
     if store.recovery_running:
         raise ValueError('Encoder startup recovery is still running')
@@ -659,7 +678,10 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=1313)
     args = parser.parse_args()
     http = StudioHTTPServer(('localhost', args.port), Handler)
-    if shutil.which('ffmpeg'):
+    ffmpeg = shutil.which('ffmpeg')
+    if ffmpeg:
+        FFMPEG_ENCODER_ERROR = ffmpeg_encoder_error(ffmpeg)
+    if ffmpeg and not FFMPEG_ENCODER_ERROR:
         store = video_store()
         try:
             store.claim_server()
