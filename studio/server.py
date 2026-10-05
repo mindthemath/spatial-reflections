@@ -660,5 +660,8 @@ if __name__ == '__main__':
         http.serve_forever()
     finally:
         if VIDEO_STORE is not None:
-            VIDEO_STORE.release_server()
+            try:
+                VIDEO_STORE.pause_all()
+            finally:
+                VIDEO_STORE.release_server()
         http.server_close()
