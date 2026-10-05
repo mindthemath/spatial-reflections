@@ -13,12 +13,16 @@ function diagnosticTexture() {
     });
     const texture=new THREE.CubeTexture(images);texture.needsUpdate=true;return texture;
 }
-async function loadImageAsset(url) {
+async function loadImageAsset(url,{requireHash=true}={}) {
+    // Published static works may run on plain HTTP (e.g. signage players).
+    // Export-capable loads must still hash actual bytes for resume identity.
+    const subtle=globalThis.crypto?.subtle;
+    if(!subtle&&requireHash)throw new Error('Skybox verification requires HTTPS or localhost');
     const response=await fetch(url,{cache:'no-store'});
     if(!response.ok)throw new Error(`Missing or unreadable image: ${url}`);
     const bytes=await response.arrayBuffer();
-    const digest=await crypto.subtle.digest('SHA-256',bytes);
-    const sha256=Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+    const digest=subtle?await subtle.digest('SHA-256',bytes):null;
+    const sha256=digest?Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join(''):null;
     const objectURL=URL.createObjectURL(new Blob([bytes],{type:response.headers.get('Content-Type')||'image/png'}));
     try{
         const image=await new Promise((resolve,reject)=>{const value=new Image();value.onload=()=>resolve(value);value.onerror=()=>reject(new Error(`Missing or unreadable image: ${url}`));value.src=objectURL;});
@@ -64,9 +68,9 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
         (async()=>{
             try{
                 if(!publication.skybox||!FACES.every(face=>publication.skybox[face]===`skybox/${face}.png`))throw new Error('Published skybox configuration is invalid');
-                const assets=await Promise.all(FACES.map(face=>loadImageAsset(publication.skybox[face])));
+                const assets=await Promise.all(FACES.map(face=>loadImageAsset(publication.skybox[face],{requireHash:false})));
                 const {texture,side,displaySide}=textureFromImages(assets.map(asset=>asset.image),renderer,publication.size??null);onTexture(texture);
-                setRenderState(true,JSON.stringify({kind:'published',slug:publication.slug||'',manifestSha256:publication.source?.manifestSha256||null,faces:Object.fromEntries(FACES.map((face,index)=>[face,assets[index].sha256]))}));
+                setRenderState(true,assets.every(asset=>asset.sha256)?JSON.stringify({kind:'published',slug:publication.slug||'',manifestSha256:publication.source?.manifestSha256||null,faces:Object.fromEntries(FACES.map((face,index)=>[face,assets[index].sha256]))}):null);
                 status.textContent=`${side} × ${side}px${displaySide<side?` · display reduced to ${displaySide}px for this GPU`:''}`;
             }catch(error){setRenderState(false,null);status.textContent=error.message;status.classList.add('error');}
         })();
@@ -116,7 +120,7 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
                 expectedHashes=Object.fromEntries(FACES.map(face=>[face,manifest.outputs[face].sha256||null]));
             }
             const urls=FACES.map(face=>folder==='default'?`/skybox/${face}.png`:exportFileURL(folder,`${face}.png`));
-            const assets=await Promise.all(urls.map(loadImageAsset));
+            const assets=await Promise.all(urls.map(url=>loadImageAsset(url)));
             if(expectedHashes&&FACES.some((face,index)=>expectedHashes[face]&&expectedHashes[face]!==assets[index].sha256))throw new Error('Skybox image content does not match the export manifest');
             const identity=JSON.stringify({kind:folder==='default'?'default':'export',folder,faces:Object.fromEntries(FACES.map((face,index)=>[face,assets[index].sha256]))});
             const {texture,side,displaySide}=textureFromImages(assets.map(asset=>asset.image),renderer,size);

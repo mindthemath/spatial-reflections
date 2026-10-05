@@ -46,6 +46,7 @@ test-fast:
 	bun run test:syntax
 	node studio/test_resolution.cjs
 	node studio/test_lifecycle_test.cjs
+	node studio/test_skybox_hashing.cjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
 	$(MAKE) test-guard
 
