@@ -106,7 +106,23 @@ The collapsed **Video timing** section provides export FPS, loop frame count, du
 
 **Export video…** opens a confirmation dialog for MP4 or MKV container, resolution, quality and range. The default is a 30-second MP4 clip starting at the current frame, shortened to fit when the loop is shorter than 30 seconds. Whole-loop export remains available. A clip window uses a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a bitrate-based size estimate before any work begins. If that file name already labels a clip in `videos/`, the viewer asks before adding another.
 
-Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Capture uses a reusable OffscreenCanvas with promise-based PNG encoding where supported, falling back to synchronous capture for compatibility. The selected skybox must finish loading before export; its actual face hashes are part of the resume signature, and environment changes are locked during rendering. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+
+New exports explicitly convert full-range RGB to limited-range BT.709 YUV and tag BT.709 matrix, transfer and primaries in H.264 and the container. Checkpoint concatenation preserves these tags, verified with real `ffprobe` tests for MP4 and MKV. Existing checkpoint jobs without a color profile retain their original conversion rather than mixing old and new colors within one movie. Checkpoint encoder failures preserve the last 4 KB of diagnostics in the interrupted job's reason.
+
+### Video validation commands
+
+```sh
+make test-python         # durable store, API and real ffmpeg recovery tests
+make test-browser        # isolated capture + complete browser integration
+make test-video-capture  # pixel integrity and capture-fallback test; no HTTP server
+make test-video-encoder  # store + real encoder tests without localhost networking
+make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4"
+# Longer encoder validation is opt-in; duration is output video seconds:
+make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4" VIDEO_SOAK_SECONDS=600
+```
+
+The soak uses three samples from an existing artwork video at 1080p/30 FPS, two store-restart/resume cycles, exact frame count and duration checks, BT.709 verification and encoder-leak checks. It uses temporary storage and does not alter the source. The default six-second run is deliberately bounded; it is not a claim of multi-hour browser endurance. Long hidden-tab/4K exports still need workload-specific endurance validation.
 
 ### Long-running video recovery
 
