@@ -1,4 +1,4 @@
-.PHONY: serve static install sync update test test-python test-browser test-video-capture unstick
+.PHONY: serve static install sync update test test-python test-browser test-video-capture test-video-soak unstick
 
 serve:
 	python3 studio/server.py --port 1313
@@ -34,6 +34,11 @@ test:
 
 test-python:
 	python3 -m unittest discover -s studio -p 'test_*.py'
+
+# Opt-in production-resolution encoder test. Uses temporary storage, never overwrites source.
+VIDEO_SOAK_SECONDS ?= 6
+test-video-soak:
+	python3 studio/video_soak.py --source "$(VIDEO_SOAK_SOURCE)" --seconds "$(VIDEO_SOAK_SECONDS)"
 
 test-video-capture:
 	node studio/test_video_capture.cjs
