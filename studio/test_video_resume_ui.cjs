@@ -4,12 +4,12 @@ const source=fs.readFileSync(path.join(__dirname,'..','tesseract.js'),'utf8');
 const helpers=source.slice(source.indexOf('function refreshVideoEnvironmentState()'),source.indexOf('function videoExportPlanFromRequest('));
 const signature=(environment='verified',shader='chrome')=>JSON.stringify({environment,shader});
 const elements=new Map();
-function element(){return {dataset:{},children:[],append(...items){this.children.push(...items);},appendChild(item){this.children.push(item);},replaceChildren(){this.children=[];},addEventListener(){}};}
+function element(){return {classList:{add(){},remove(){}},dataset:{},children:[],append(...items){this.children.push(...items);},appendChild(item){this.children.push(item);},replaceChildren(){this.children=[];},addEventListener(){}};}
 const section=element(),list=element();elements.set('video-resume-jobs',section);elements.set('video-resume-job-list',list);
 let summaries=0,requests=[];
 const context=vm.createContext({
  document:{getElementById(id){return elements.get(id);},createElement:element},
- videoExportDialog:{open:true,dataset:{statusMode:'ready'}},videoExportRunning:false,
+ videoExportDialog:{open:true,dataset:{statusMode:'ready',serverAvailable:'yes'}},videoExportRunning:false,
  videoExportDialogRequest:1,videoResumeJobsRequest:0,
  location:{pathname:'/',search:''},videoRenderSignature:()=>signature(),
  updateVideoExportSummary(){summaries++;},
@@ -28,6 +28,25 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  assert.equal(compatibility(job(JSON.stringify({shader:'chrome'}),{nextFrame:30})).available,true,'Legacy finalization needs no new frames');
  assert.equal(compatibility(job(signature(),{state:'active'})).restore,false);
  assert.equal(compatibility(job(),signature(null)).available,false);
+ context.job=job();context.current=signature();
+ const noEncoder=vm.runInContext("videoResumeCompatibility(job,current,'/',false)",context);
+ assert.equal(noEncoder.available,false);assert.equal(noEncoder.restore,false);assert.match(noEncoder.reason,/encoding is unavailable/);
+ context.job=job(JSON.stringify({shader:'chrome'}),{nextFrame:30});
+ assert.equal(vm.runInContext("videoResumeCompatibility(job,current,'/',false).available",context),true);
+ // Restored video fields must be reflected in the visible selects.
+ elements.set('video-export-resolution',{value:'1920x1080'});elements.set('video-export-quality',{value:'draft'});
+ Object.assign(context,{motionStepSlider:null,motionStepLabel:null,rotationSpeed:.005,
+  currentShader:'chrome',currentLighting:'quad',lightDistance:5,showVertices:false,
+  exportFpsSelect:null,videoExportWidth:1280,videoExportHeight:720,videoExportQuality:'high'});
+ vm.runInContext(source.slice(source.indexOf('function syncViewerControlsFromState()'),source.indexOf('const COEFFICIENT_SCALE')),context);
+ vm.runInContext('syncViewerControlsFromState()',context);
+ assert.equal(elements.get('video-export-resolution').value,'1280x720');assert.equal(elements.get('video-export-quality').value,'high');
+ vm.runInContext(source.slice(source.indexOf('function videoExportFailureMessage('),source.indexOf('async function runVideoExport(')),context);
+ context.error=new Error('frame failure');context.stopError=new Error('encoder could not stop');
+ const failedPause=vm.runInContext('videoExportFailureMessage(error,stopError,null,true)',context);
+ assert.match(failedPause,/frame failure/);assert.match(failedPause,/Could not pause/);assert.doesNotMatch(failedPause,/Export paused/);
+ assert.match(vm.runInContext('videoExportFailureMessage(error,null,null,true)',context),/Export paused/);
+ assert.equal(vm.runInContext('videoExportFailureMessage(error,null,null,false)',context),'frame failure');
  context.videoExportDialog.open=false;
  vm.runInContext('refreshVideoEnvironmentState()',context);
  assert.equal(requests.length,0);
@@ -55,5 +74,22 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  requests[1].resolve({jobs:[job(signature(),{id:'newer'})]});await newer;
  requests[0].reject(new Error('stale failure'));await oldError;
  assert.deepEqual(list.children.map(card=>card.dataset.jobId),['newer']);
- console.log('PASS: explicit legacy policy, meaningful restore, skybox-ready refresh, and stale-response suppression.');
+ // A server lacking libx264 must still expose existing jobs for management.
+ for(const id of ['video-export-range','video-export-start','video-export-duration','video-export-result','video-export-status'])elements.set(id,element());
+ Object.assign(context,{loopTiming:{frameCount:30},exportFps:30,timelineFrame:0,formatTimeInput:String});
+ context.videoExportDialog.showModal=function(){this.open=true;};
+ vm.runInContext(source.slice(source.indexOf('async function openVideoExportDialog()'),source.indexOf('function refreshVideoEnvironmentState()')),context);
+ requests=[];
+ const opened=vm.runInContext('openVideoExportDialog()',context);
+ requests[0].resolve({available:false,canManage:true,reason:'libx264 unavailable',freeBytes:1000});
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(requests.length,2);requests[1].resolve({jobs:[]});await opened;
+ assert.equal(context.videoExportDialog.dataset.serverAvailable,'no');
+ assert.equal(context.videoExportDialog.dataset.statusMode,'ready');
+ assert.match(elements.get('video-export-status').textContent,/Completed checkpoints/);
+ requests=[];
+ const unavailable=vm.runInContext('openVideoExportDialog()',context);
+ requests[0].resolve({available:false,canManage:false,reason:'server unavailable'});await unavailable;
+ assert.equal(requests.length,1);assert.equal(context.videoExportDialog.dataset.statusMode,'error');
+ console.log('PASS: resume/restore policy, verified-state refresh, stale-response suppression, pause errors and encoder-free management.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

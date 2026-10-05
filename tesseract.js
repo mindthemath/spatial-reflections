@@ -1337,6 +1337,10 @@ function syncViewerControlsFromState() {
     const vertexToggle = document.getElementById('vertexToggle');
     if (vertexToggle) vertexToggle.checked = showVertices;
     if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
+    const resolution = document.getElementById('video-export-resolution');
+    if (resolution) resolution.value = `${videoExportWidth}x${videoExportHeight}`;
+    const quality = document.getElementById('video-export-quality');
+    if (quality) quality.value = videoExportQuality;
 }
 
 const COEFFICIENT_SCALE = 1000000;
@@ -1653,8 +1657,12 @@ async function openVideoExportDialog() {
     try {
         const value = await videoControlApi('/api/video/capabilities', { cache: 'no-store' });
         if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
-        if (!value.available) throw new Error(value.reason || 'Video service is unavailable');
-        videoExportDialog.dataset.serverAvailable = 'yes';
+        if (!value.available && !value.canManage) throw new Error(value.reason || 'Video service is unavailable');
+        videoExportDialog.dataset.serverAvailable = value.available ? 'yes' : 'no';
+        if (!value.available) {
+            status.textContent = `${value.reason || 'H.264 encoding is unavailable'}. Completed checkpoints can still be finalized or discarded.`;
+            status.classList.add('error');
+        }
         videoExportDialog.dataset.freeBytes = String(value.freeBytes);
         videoExportDialog.dataset.clips = JSON.stringify(value.clips || []);
         videoExportDialog.dataset.encoder = value.encoder;
@@ -1683,7 +1691,7 @@ function refreshVideoEnvironmentState() {
     }
 }
 
-function videoResumeCompatibility(job, currentSignature, currentSource) {
+function videoResumeCompatibility(job, currentSignature, currentSource, encodingAvailable = true) {
     const request = job.request || {};
     const sourceMatches = request.sourceUrl === currentSource;
     const settingsMatch = request.renderSignature === currentSignature;
@@ -1696,14 +1704,15 @@ function videoResumeCompatibility(job, currentSignature, currentSource) {
     let reason = '';
     if (job.state === 'unavailable') reason = job.reason;
     else if (job.state === 'active') reason = 'The server still marks this export active; discard it or retry after recovery.';
+    else if (!fullyRendered && !encodingAvailable) reason = 'H.264 encoding is unavailable; discard this job or restore the encoder to render its remaining frames.';
     else if (!fullyRendered && !verified) reason = 'This export predates verified skybox identity. Resume with the previous viewer runtime, or start a new export; settings restoration cannot verify its original environment.';
     else if (!fullyRendered && !sourceMatches) reason = 'Open the original viewer URL and load its saved skybox before resuming.';
     else if (!fullyRendered && !environmentMatches) reason = 'Load the original skybox and wait for content verification before restoring settings or resuming.';
     else if (!fullyRendered && !settingsMatch) reason = 'Current render settings do not match.';
     const usable = !['unavailable', 'active'].includes(job.state);
     return {
-        available: usable && (fullyRendered || (verified && sourceMatches && settingsMatch)),
-        restore: usable && !fullyRendered && sourceMatches && environmentMatches && !settingsMatch && Boolean(request.viewerState),
+        available: usable && (fullyRendered || (encodingAvailable && verified && sourceMatches && settingsMatch)),
+        restore: usable && encodingAvailable && !fullyRendered && sourceMatches && environmentMatches && !settingsMatch && Boolean(request.viewerState),
         fullyRendered, reason
     };
 }
@@ -1723,7 +1732,8 @@ async function loadVideoResumeJobs() {
             card.dataset.jobId = job.id;
             const request = job.request || {};
             const {available, restore: canRestore, fullyRendered, reason} = videoResumeCompatibility(
-                job, videoRenderSignature(), location.pathname + location.search
+                job, videoRenderSignature(), location.pathname + location.search,
+                videoExportDialog.dataset.serverAvailable === 'yes'
             );
             const description = document.createElement('span');
             description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}`;
@@ -2117,6 +2127,11 @@ async function saveVideoExportPoster(plan, job) {
     });
 }
 
+function videoExportFailureMessage(error, stopError, stopAction, hadJob) {
+    if (stopError) return `${error.message} Could not ${stopAction === 'discard' ? 'cancel' : 'pause'} the export: ${stopError.message}. Check the interrupted export below.`;
+    return hadJob ? `${error.message} Export paused and can be resumed.` : error.message;
+}
+
 async function runVideoExport(plan, resumableJob = null) {
     if (videoExportRunning) return;
     videoExportRunning = true;
@@ -2247,6 +2262,7 @@ async function runVideoExport(plan, resumableJob = null) {
         result.replaceChildren(link);
     } catch (error) {
         let stopError = null;
+        const hadJob = Boolean(activeVideoExportJob);
         if (activeVideoExportJob) {
             if (videoExportStopAction) {
                 ensureVideoExportStopRequest();
@@ -2261,7 +2277,7 @@ async function runVideoExport(plan, resumableJob = null) {
                             reason: String(error.message || error).slice(0, 500)
                         })
                     });
-                } catch { /* The original error is more useful. */ }
+                } catch (pauseError) { stopError = pauseError; }
             }
             activeVideoExportJob = null;
         }
@@ -2269,15 +2285,13 @@ async function runVideoExport(plan, resumableJob = null) {
             videoExportDialog.dataset.statusMode = 'cancelled';
             status.textContent = 'Export cancelled and discarded.';
             status.classList.remove('error');
-        } else if (videoExportStopAction === 'pause' && !stopError) {
+        } else if (videoExportStopAction === 'pause' && !stopError && hadJob) {
             videoExportDialog.dataset.statusMode = 'paused';
             status.textContent = 'Video export paused. You can resume it from its latest checkpoint.';
             status.classList.remove('error');
         } else {
             videoExportDialog.dataset.statusMode = 'error';
-            status.textContent = stopError
-                ? `Could not ${videoExportStopAction === 'discard' ? 'cancel' : 'pause'} the export: ${stopError.message}. Check the interrupted export below.`
-                : `${error.message} Export paused and can be resumed.`;
+            status.textContent = videoExportFailureMessage(error, stopError, videoExportStopAction, hadJob);
             status.classList.add('error');
         }
     } finally {

@@ -149,6 +149,14 @@ finally:
    await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('cancelled and discarded'));
    assert.equal(await viewer.evaluate(()=>fetch('/api/video/jobs').then(response=>response.json()).then(value=>value.jobs.length)),0);
    assert(!fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-cancel-')));
+   await viewer.route('**/api/video/frame?*',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'injected frame failure'})}),{times:1});
+   await viewer.route('**/api/video/pause',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'injected pause failure'})}),{times:1});
+   await viewer.locator('#video-export-name').fill('browser-failed-pause');await viewer.locator('#video-export-duration').fill('0.02');
+   await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Could not pause'));
+   assert.doesNotMatch(await viewer.locator('#video-export-status').innerText(),/Export paused/);
+   const failedPause=viewer.locator('.video-resume-job').filter({hasText:'browser-failed-pause'});await failedPause.waitFor();
+   await failedPause.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await failedPause.waitFor({state:'detached'});
    const pausedId=await viewer.evaluate(async()=>{
     const dialog=document.querySelector('#video-export-dialog'),signature=dialog.dataset.renderSignature;
     const request={name:'browser-resume',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
@@ -177,6 +185,10 @@ finally:
    finalizePage.on('pageerror',error=>errors.push(error.message));
    await finalizePage.goto(`http://localhost:${port}/?skybox=exports%2Fmissing-legacy-environment`);
    await finalizePage.waitForFunction(()=>document.querySelector('#skybox-status')?.classList.contains('error'));
+   await finalizePage.route('**/api/video/capabilities',async route=>{
+    const response=await route.fetch();const capabilities=await response.json();
+    await route.fulfill({json:{...capabilities,available:false,canManage:true,reason:'injected missing libx264'}});
+   });
    await finalizePage.locator('#open-video-export').click();
    const legacy=finalizePage.locator(`.video-resume-job[data-job-id="${legacyId}"]`);await legacy.waitFor();
    assert.equal(await legacy.locator('.restore-video-export').count(),0);assert.equal(await legacy.locator('.resume-video-export').innerText(),'Finalize');
@@ -200,7 +212,9 @@ finally:
    });
    await viewer.locator('#close-video-export').click();await viewer.locator('#viewer-shader').selectOption('rough');await viewer.locator('#open-video-export').click();
    const restorable=viewer.locator(`.video-resume-job[data-job-id="${restorableId}"]`);await restorable.waitFor();assert(await restorable.locator('.resume-video-export').isDisabled());
+   await viewer.locator('#video-export-resolution').selectOption('1920x1080');await viewer.locator('#video-export-quality').selectOption('high');
    await restorable.locator('.restore-video-export').click();await viewer.waitForFunction(id=>{const button=document.querySelector(`.video-resume-job[data-job-id="${id}"] .resume-video-export`);return button&&!button.disabled;},restorableId);assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+   assert.equal(await viewer.locator('#video-export-resolution').inputValue(),'1280x720');assert.equal(await viewer.locator('#video-export-quality').inputValue(),'draft');
    await restorable.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await restorable.waitFor({state:'detached'});
   }
   if(await viewer.locator('#video-export-dialog').isVisible())await viewer.locator('#close-video-export').click();
