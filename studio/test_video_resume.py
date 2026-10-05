@@ -590,6 +590,7 @@ class VideoJobStoreTest(unittest.TestCase):
             def __init__(self, command, **_kwargs):
                 self.stdin = io.BytesIO()
                 self.output = Path(command[-1])
+                self.command = command
                 self.returncode = None
                 processes.append(self)
 
@@ -614,6 +615,12 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(progress['durableFrame'], 4)
         self.assertTrue(progress['checkpointed'])
         self.assertEqual(len(processes), 1)
+        command = processes[0].command
+        color_filter = command[command.index('-vf') + 1]
+        self.assertIn('scale=in_range=pc:out_range=tv:out_color_matrix=bt709', color_filter)
+        self.assertIn('setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709', color_filter)
+        for flag in ('-color_range', '-colorspace', '-color_primaries', '-color_trc'):
+            self.assertEqual(command[command.index(flag) + 1], 'tv' if flag == '-color_range' else 'bt709')
         persisted = json.loads(self.manifest(job).read_text())
         self.assertEqual(persisted['nextFrame'], 4)
         self.assertEqual(persisted['segments'][0]['frames'], 4)

@@ -726,9 +726,14 @@ class VideoJobStore:
             self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
             '-f', 'image2pipe', '-framerate', str(request['fps']),
             '-vcodec', 'png', '-i', 'pipe:0', '-an',
+            '-vf', ('scale=in_range=pc:out_range=tv:out_color_matrix=bt709,'
+                    'setparams=range=limited:color_primaries=bt709:'
+                    'color_trc=bt709:colorspace=bt709'),
             '-c:v', 'libx264', '-preset', 'medium',
             '-b:v', str(bit_rate), '-maxrate', str(round(bit_rate * 1.5)),
             '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',
+            '-color_range', 'tv', '-colorspace', 'bt709',
+            '-color_primaries', 'bt709', '-color_trc', 'bt709',
             '-f', 'matroska', str(pending),
         ]
         stderr_path = manifest.parent / f'.segment-{segment_index:06d}.stderr.log'
