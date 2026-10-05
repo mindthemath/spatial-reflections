@@ -18,12 +18,13 @@ async function loadImageAsset(url,{requireHash=true}={}) {
     // Export-capable loads must still hash actual bytes for resume identity.
     const subtle=globalThis.crypto?.subtle;
     if(!subtle&&requireHash)throw new Error('Skybox verification requires HTTPS or localhost');
-    const response=await fetch(url,{cache:'no-store'});
+    const response=await fetch(url,{cache:requireHash?'no-store':'default'});
     if(!response.ok)throw new Error(`Missing or unreadable image: ${url}`);
-    const bytes=await response.arrayBuffer();
-    const digest=subtle?await subtle.digest('SHA-256',bytes):null;
+    const blob=await response.blob();
+    // Do not retain an ArrayBuffer plus a Blob copy throughout image decoding.
+    const digest=subtle?await subtle.digest('SHA-256',await blob.arrayBuffer()):null;
     const sha256=digest?Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join(''):null;
-    const objectURL=URL.createObjectURL(new Blob([bytes],{type:response.headers.get('Content-Type')||'image/png'}));
+    const objectURL=URL.createObjectURL(blob);
     try{
         const image=await new Promise((resolve,reject)=>{const value=new Image();value.onload=()=>resolve(value);value.onerror=()=>reject(new Error(`Missing or unreadable image: ${url}`));value.src=objectURL;});
         return {image,sha256};
@@ -105,7 +106,7 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
         const url=new URL(location.href);url.searchParams.set('skybox',folder);history.replaceState(null,'',url);
     }
     async function loadSelection(folder,{rememberSelection=true}={}) {
-        if(renderLocks)throw new Error('The skybox cannot change during video export');
+        if(renderLocks){message('The skybox cannot change during video export',true);return false;}
         const version=++requestId,previousIdentity=renderIdentity,hadActive=!!active;
         setRenderState(false,previousIdentity);
         try {

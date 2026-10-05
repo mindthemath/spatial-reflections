@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'viewer-skyboxes.js'),
   .replace(/^import .*;\n/gm, '').replace('export function installSkyboxLibrary', 'function installSkyboxLibrary');
 const faces = ['px','nx','py','ny','pz','nz'];
 function fixture(crypto) {
-  let fetches=0,created=0,revoked=0,states=0;
+  let fetches=0,created=0,revoked=0,states=0,caches=[];
   const status={textContent:'',classList:{add(){}}};
   const section={querySelector(selector){return selector==='#skybox-status'?status:{textContent:''};}};
   const canvas={getContext(){return {createLinearGradient(){return {addColorStop(){}};},fillRect(){}};}};
@@ -19,7 +19,7 @@ function fixture(crypto) {
     crypto, Blob,
     URL:{createObjectURL(){created++;return `blob:test-${created}`;},revokeObjectURL(){revoked++;}},
     Image:class {constructor(){this.naturalWidth=this.naturalHeight=16;}set src(_value){queueMicrotask(()=>this.onload());}},
-    fetch:async url=>{fetches++;return {ok:true,headers:{get(){return 'image/png';}},arrayBuffer:async()=>bytes(url).buffer};},
+    fetch:async (url,options)=>{fetches++;caches.push(options.cache);return {ok:true,blob:async()=>new Blob([bytes(url)],{type:'image/png'})};},
     document:{createElement(tag){return tag==='canvas'?canvas:section;}},
     THREE:{CubeTexture:class {constructor(images){this.images=images;}}},
     options:{
@@ -29,7 +29,7 @@ function fixture(crypto) {
     }
   });
   vm.runInContext(source,context);
-  return {context,status,done,bytes,counts:()=>({fetches,created,revoked})};
+  return {context,status,done,bytes,caches,counts:()=>({fetches,created,revoked})};
 }
 async function published(crypto) {
   const value=fixture(crypto);
@@ -50,11 +50,18 @@ async function published(crypto) {
     assert.equal(value.state.identity,null,'Unhashed assets must not get a verified render identity');
     assert.match(value.status.textContent,/16 × 16px/);
     assert.deepEqual(value.counts(),{fetches:6,created:6,revoked:6});
+    assert(value.caches.every(cache=>cache==='default'),'Immutable published playback should allow HTTP caching');
     assert.throws(()=>value.api.acquireRenderLock(),/verification requires HTTPS or localhost/);
     const strict=fixture(crypto);
     await assert.rejects(vm.runInContext("loadImageAsset('skybox/px.png')",strict.context),/HTTPS or localhost/);
     assert.equal(strict.counts().fetches,0,'Fail export-capable loads before fetching large assets');
   }
+  const loader=source.slice(source.indexOf('async function loadSelection('),source.indexOf('function renderLibrary()'));
+  let lockMessage='';
+  const locked=vm.createContext({renderLocks:1,message(text){lockMessage=text;}});
+  vm.runInContext(loader,locked);
+  assert.equal(await vm.runInContext("loadSelection('default')",locked),false);
+  assert.match(lockMessage,/cannot change during video export/);
   const secure=await published(webcrypto);
   assert.equal(secure.state.ready,true);
   const identity=JSON.parse(secure.state.identity);
@@ -65,6 +72,7 @@ async function published(crypto) {
   const strict=fixture(webcrypto);
   const asset=await vm.runInContext("loadImageAsset('skybox/px.png')",strict.context);
   assert.equal(asset.sha256,identity.faces.px,'Export-capable loads retain actual-byte hashing');
+  assert.deepEqual(strict.caches,['no-store'],'Export-capable loads must verify fresh bytes');
   // Exercise the actual export planner without a browser: ready is not enough
   // when the lock also requires a verified environment identity.
   const viewerSource=fs.readFileSync(path.join(__dirname,'..','tesseract.js'),'utf8');
