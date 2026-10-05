@@ -37,8 +37,8 @@ def process_snapshot():
 
 
 def remember_descendants(root_pid, owned, snapshot):
-    parents = {root_pid} | {pid for pid, identity in owned.items()
-                               if pid in snapshot and snapshot[pid][1:] == identity}
+    parents = ({root_pid} if root_pid is not None else set()) | {pid for pid, identity in owned.items()
+                               if pid in snapshot and snapshot[pid][1] == identity[0]}
     changed = True
     while changed:
         changed = False
@@ -52,33 +52,45 @@ def remember_descendants(root_pid, owned, snapshot):
 def signal_owned(owned, sig):
     snapshot = process_snapshot()
     for pid, identity in owned.items():
-        if pid in snapshot and snapshot[pid][1:] == identity:
+        if pid in snapshot and snapshot[pid][1] == identity[0]:
             try:
                 os.kill(pid, sig)
             except ProcessLookupError:
                 pass
 
 
-def cleanup(child, owned):
+def cleanup(child, owned, force=lambda: False):
     try:
-        remember_descendants(child.pid, owned, process_snapshot())
+        remember_descendants(child.pid if child.poll() is None else None, owned, process_snapshot())
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Cleanup process inspection failed: {error}', file=sys.stderr)
-    # Allow JS finally/signal handlers to close Chromium and the server first.
-    if child.poll() is None:
-        child.send_signal(signal.SIGTERM)
+    # The root is often make, which does not forward signals to recipes. Signal
+    # its entire private group so node/Python cleanup handlers get the grace
+    # period too. Detached Chromium is left to its owning node during this phase.
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and not force():
         try:
-            child.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
-    # Detached browser processes can have their own groups. Their PID + start
-    # time + command must still match our recorded descendants before signalling.
+            snapshot = process_snapshot()
+            remember_descendants(child.pid if child.poll() is None else None, owned, snapshot)
+            alive = any(pid in snapshot and snapshot[pid][1] == identity[0]
+                        for pid, identity in owned.items())
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            alive = False
+        if child.poll() is not None and not alive:
+            break
+        time.sleep(.2)
+    # Detached processes can have their own groups. PID + start time must still
+    # match. Command lines may legitimately change across fork/exec or setproctitle.
     try:
         signal_owned(owned, signal.SIGTERM)
         deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not force():
             snapshot = process_snapshot()
-            if not any(pid in snapshot and snapshot[pid][1:] == identity
+            if not any(pid in snapshot and snapshot[pid][1] == identity[0]
                        for pid, identity in owned.items()):
                 break
             time.sleep(.2)
@@ -106,7 +118,8 @@ def main(argv=None):
         parser.error('A command and positive timeout are required')
 
     with LOCK_PATH.open('a+') as lock:
-        # Nested Make targets inherit the outer guard and its process group.
+        # Nested Make targets inherit the outer guard and its process group;
+        # their --timeout is intentionally replaced by the outer total budget.
         lock.seek(0)
         try:
             owner = json.loads(lock.read() or '{}')
@@ -138,15 +151,22 @@ def main(argv=None):
         lock.write(json.dumps({'pid': os.getpid(), 'token': token, 'command': command}))
         lock.flush()
         environment = dict(os.environ, **{TOKEN_KEY: token, 'TESSERACT_TEST_ENCODER_THREADS': '2'})
-        child = subprocess.Popen(command, env=environment, start_new_session=True)
+        child = None
         owned = {}
         interrupted = []
+        previous = {}
         def stop(sig, _frame):
             interrupted.append(sig)
-        previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
-        started = time.monotonic()
         timed_out = False
         try:
+            # Install before spawning: even a hangup/interrupt during Popen must
+            # keep the guard alive long enough to clean its detached child session.
+            for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+                previous[sig] = signal.signal(sig, stop)
+            if interrupted:
+                return 128 + interrupted[0]
+            child = subprocess.Popen(command, env=environment, start_new_session=True)
+            started = time.monotonic()
             while child.poll() is None:
                 remember_descendants(child.pid, owned, process_snapshot())
                 if interrupted:
@@ -158,14 +178,16 @@ def main(argv=None):
                 time.sleep(.5)
         finally:
             try:
-                cleanup(child, owned)
+                if child is not None:
+                    cleanup(child, owned, force=lambda: len(interrupted) > 1)
             finally:
                 for sig, handler in previous.items():
                     signal.signal(sig, handler)
                 lock.seek(0); lock.truncate(); lock.flush()
         if interrupted:
             return 128 + interrupted[0]
-        return 124 if timed_out else child.returncode
+        rc = child.returncode
+        return 124 if timed_out else (128 - rc if rc < 0 else rc)
 
 
 if __name__ == '__main__':
