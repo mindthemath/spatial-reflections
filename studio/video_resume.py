@@ -588,18 +588,25 @@ class VideoJobStore:
             finally:
                 stream.close()
 
-    def resume(self, job_id, render_context=None):
+    def resume(self, job_id, render_context=None, encoder_error=None):
+        # Reserve the complete transition before examining/removing leases. Pause
+        # and discard must not interrupt this resume (or release its owner lock).
         with self.stop_lock:
             if job_id in self.stopping:
                 raise ValueError('Video export is stopping in another request')
+            self.stopping.add(job_id)
+        try:
+            return self._resume_exclusive(job_id, render_context, encoder_error)
+        finally:
+            with self.stop_lock:
+                self.stopping.discard(job_id)
+
+    def _resume_exclusive(self, job_id, render_context, encoder_error):
         with self.lock:
             if job_id in self.leases:
                 raise ValueError('Video export is already active in another browser')
         self._interrupt_active_segment(job_id)
         with self._job_lock(job_id):
-            with self.stop_lock:
-                if job_id in self.stopping:
-                    raise ValueError('Video export is stopping in another request')
             manifest, job = self._load(job_id)
             self._remove_pending_output(job_id)
             if job.get('activeEncoder'):
@@ -609,14 +616,13 @@ class VideoJobStore:
             self._acquire_owner(manifest, job_id)
             lease = uuid.uuid4().hex
             try:
-                with self.stop_lock:
-                    if job_id in self.stopping:
-                        raise ValueError('Video export is stopping in another request')
-                    with self.lock:
-                        if job_id in self.leases:
-                            raise ValueError('Video export is already active in another browser')
-                        self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
+                with self.lock:
+                    if job_id in self.leases:
+                        raise ValueError('Video export is already active in another browser')
+                    self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
                 self._verify_segments(manifest, job, repair=True)
+                if job['nextFrame'] < job['request']['frames'] and encoder_error:
+                    raise ValueError(encoder_error)
                 if job['nextFrame'] < job['request']['frames'] and render_context is not None:
                     source_url = render_context.get('sourceUrl')
                     render_signature = render_context.get('renderSignature')

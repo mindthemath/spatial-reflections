@@ -211,8 +211,16 @@ class StudioAPITest(unittest.TestCase):
                                                   {'Content-Type': 'image/png'})
                 self.assertEqual(code, 201)
                 self.assertEqual(progress['frame'], index + 1)
-            code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
-            self.assertEqual(code, 201)
+            self.request('POST', '/api/video/pause', {'id': started['id'], 'lease': started['lease']})
+            with mock.patch.object(server, 'FFMPEG_ENCODER_ERROR', 'libx264 unavailable'):
+                code, capabilities = self.request('GET', '/api/video/capabilities')
+                self.assertFalse(capabilities['available'])
+                self.assertTrue(capabilities['canManage'])
+                code, resumed = self.request('POST', '/api/video/resume', {'id': started['id']})
+                self.assertEqual(code, 200)
+                self.assertEqual(resumed['nextFrame'], 2)
+                code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
+                self.assertEqual(code, 201)
         video = server.ROOT / completed['url'].lstrip('/')
         self.assertEqual(video.read_bytes(), b'fake mp4')
         self.assertTrue((video.with_suffix('.png')).is_file())
@@ -607,6 +615,28 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(response.status, 403)
         response.read()
         self.assertIsNone(connection.sock)
+
+
+class ServerStartupTest(unittest.TestCase):
+    def test_missing_encoder_still_claims_ownership_and_starts_recovery(self):
+        store = mock.Mock()
+        with mock.patch.object(server, 'video_store', return_value=store), \
+             mock.patch.object(server, 'FFMPEG_ENCODER_ERROR', 'libx264 unavailable'), \
+             mock.patch.object(server.threading, 'Thread') as thread:
+            self.assertIs(server.start_video_recovery(), store)
+            store.claim_server.assert_called_once()
+            self.assertTrue(store.recovery_running)
+            self.assertEqual(thread.call_args.kwargs['target'], store.recover_stale_encoders)
+            thread.return_value.start.assert_called_once()
+
+    def test_ownership_failure_never_starts_recovery(self):
+        store = mock.Mock()
+        store.claim_server.side_effect = ValueError('already owned')
+        with mock.patch.object(server, 'video_store', return_value=store), \
+             mock.patch.object(server.threading, 'Thread') as thread:
+            with self.assertRaisesRegex(ValueError, 'already owned'):
+                server.start_video_recovery()
+            thread.assert_not_called()
 
 
 if __name__ == '__main__':

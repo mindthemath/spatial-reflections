@@ -49,6 +49,7 @@ test-fast:
 	node studio/test_skybox_hashing.cjs
 	node studio/test_video_resume_ui.cjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
+	cd studio && python3 -m unittest test_server.ServerStartupTest
 	$(MAKE) test-guard
 
 test-guard:

@@ -239,12 +239,24 @@ def video_capabilities():
         elif recovery['indexFailed']:
             available = False
             reason = 'Encoder startup recovery could not inspect the durable job index'
-    return {'available': available, 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
+    can_manage = bool(ffmpeg) and not (store.recovery_running or recovery['indexFailed']) if ffmpeg else False
+    return {'available': available, 'canManage': can_manage, 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
             'qualities': list(VIDEO_QUALITIES), 'formats': list(VIDEO_FORMATS),
             'freeBytes': shutil.disk_usage(ROOT).free,
             'clips': video_clip_labels(),
             'encoderRecovery': recovery,
             'reason': reason}
+
+
+def start_video_recovery():
+    # Ownership and crash recovery are required even when this ffmpeg cannot
+    # encode new H.264 frames. Existing jobs can still be managed/stream-copied.
+    store = video_store()
+    store.claim_server()
+    store.recovery_running = True
+    threading.Thread(target=store.recover_stale_encoders,
+                     name='video-encoder-recovery', daemon=True).start()
+    return store
 
 
 def video_store():
@@ -498,6 +510,8 @@ class Handler(SimpleHTTPRequestHandler):
                     raise ValueError(f"Resume frame must be {request['width']}×{request['height']} pixels")
                 return self.send_json(201, store.write_poster(job_id, data, lease))
             if route.path == '/api/video/frame':
+                if FFMPEG_ENCODER_ERROR:
+                    raise ValueError(FFMPEG_ENCODER_ERROR)
                 query = parse_qs(route.query)
                 job_id = query.get('id', [''])[0]
                 lease = query.get('lease', [''])[0]
@@ -582,7 +596,8 @@ class Handler(SimpleHTTPRequestHandler):
                     request.get('id'), reason or 'Browser paused the export', request.get('lease'))
                 return self.send_json(200, paused)
             if route.path == '/api/video/resume':
-                return self.send_json(200, video_store().resume(request.get('id'), request))
+                return self.send_json(200, video_store().resume(
+                    request.get('id'), request, encoder_error=FFMPEG_ENCODER_ERROR))
             if route.path == '/api/publish':
                 return self.send_json(201, publish_work(request))
             if route.path == '/api/export/start':
@@ -642,19 +657,12 @@ if __name__ == '__main__':
     ffmpeg = shutil.which('ffmpeg')
     if ffmpeg:
         FFMPEG_ENCODER_ERROR = ffmpeg_encoder_error(ffmpeg)
-    if ffmpeg and not FFMPEG_ENCODER_ERROR:
-        store = video_store()
+    if ffmpeg:
         try:
-            store.claim_server()
+            start_video_recovery()
         except Exception:
             http.server_close()
             raise
-        store.recovery_running = True
-        threading.Thread(
-            target=store.recover_stale_encoders,
-            name='video-encoder-recovery',
-            daemon=True,
-        ).start()
     print(f'Viewer: http://localhost:{args.port}/\nStudio: http://localhost:{args.port}/studio/')
     try:
         http.serve_forever()

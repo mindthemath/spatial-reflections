@@ -518,6 +518,52 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertRegex(str(write_errors[0]), 'lease')
         self.assertNotIn(job['id'], self.store.active)
 
+    def test_resume_reserves_transition_against_pause_discard_and_resume(self):
+        job = self.store.create(request())
+        entered, release = threading.Event(), threading.Event()
+        original = self.store._resume_exclusive
+        errors = []
+        def delayed(*args):
+            entered.set()
+            release.wait(2)
+            return original(*args)
+        self.store._resume_exclusive = delayed
+        def resume():
+            try: self.store.resume(job['id'])
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=resume)
+        worker.start()
+        self.assertTrue(entered.wait(2))
+        try:
+            for operation in (self.store.pause, self.store.discard, self.store.resume):
+                with self.assertRaisesRegex(ValueError, 'stopping'):
+                    operation(job['id'])
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertIn(job['id'], self.store.owners)
+        self.assertIn(job['id'], self.store.leases)
+        self.assertNotIn(job['id'], self.store.stopping)
+
+    def test_missing_encoder_allows_only_fully_verified_finalization(self):
+        incomplete = self.store.create(request())
+        with self.assertRaisesRegex(ValueError, 'libx264 unavailable'):
+            self.store.resume(incomplete['id'], encoder_error='libx264 unavailable')
+        self.assertNotIn(incomplete['id'], self.store.owners)
+        self.assertNotIn(incomplete['id'], self.store.leases)
+        complete = self.ready_job()
+        result = self.store.resume(complete['id'], encoder_error='libx264 unavailable')
+        self.assertEqual(result['nextFrame'], result['frames'])
+        self.store.pause(complete['id'])
+        # Repair can change a superficially complete job back to needing frames.
+        (self.manifest(complete).parent / 'segment-000001.mkv').unlink()
+        with self.assertRaisesRegex(ValueError, 'libx264 unavailable'):
+            self.store.resume(complete['id'], encoder_error='libx264 unavailable')
+        self.assertNotIn(complete['id'], self.store.owners)
+        self.assertNotIn(complete['id'], self.store.leases)
+
     def test_resume_cannot_race_past_pause_transition(self):
         job = self.store.create(request())
         active = self.store.resume(job['id'])
