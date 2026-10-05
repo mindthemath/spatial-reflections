@@ -35,17 +35,22 @@ def run(source, seconds):
             lease = store.resume(job['id'])['lease']
             frame = 0
             restarted = set()
+            # Avoid checkpoint boundaries even for common 3/6/600-second runs.
+            restart_points = {frames // 3 + fps // 2, frames * 2 // 3 + fps // 2}
             while frame < frames:
                 store.write_frame(job['id'], frame, samples[frame % len(samples)].read_bytes(), lease)
                 frame += 1
                 # Pause mid-checkpoint twice, recreate the store, verify and rerender.
-                if frame in (max(1, frames // 3), max(2, frames * 2 // 3)) and frame not in restarted:
+                if frame in restart_points and frame not in restarted:
                     restarted.add(frame)
                     store.pause(job['id'], 'soak restart', lease)
                     store = VideoJobStore(root, ffmpeg)
                     store.recover_stale_encoders()
                     resumed = store.resume(job['id'])
+                    assert resumed['nextFrame'] < frame, 'Soak must discard/rerender an incomplete checkpoint'
+                    assert resumed['nextFrame'] % fps == 0
                     frame, lease = resumed['nextFrame'], resumed['lease']
+            assert len(restarted) == 2, 'Both mid-checkpoint restarts must be exercised'
             completed = store.finish(job['id'])
             output = root / 'videos' / completed['filename']
             result = subprocess.run([ffprobe, '-v', 'error', '-count_frames', '-select_streams', 'v:0',
