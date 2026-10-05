@@ -1794,7 +1794,9 @@ function videoExportPlan() {
     const scratchPath = document.getElementById('video-export-scratch').value.trim();
 
     if (!loopTiming.exact || loopTiming.frameCount < 1) error = 'The current motion does not have an exportable timeline.';
-    if (!skyboxLibrary?.getRenderState().ready) error = 'Wait for the selected skybox to finish loading before exporting.';
+    const renderState = skyboxLibrary?.getRenderState();
+    if (!renderState?.ready) error = 'Wait for the selected skybox to finish loading before exporting.';
+    else if (!renderState.identity) error = 'Skybox verification requires HTTPS or localhost before exporting video.';
     if (!Number.isInteger(checkpointSeconds) || checkpointSeconds < 0 || checkpointSeconds > 3600) error = 'Checkpoint duration must be between 0 and 3,600 seconds.';
     if (range === 'clip') {
         const startSeconds = parseTimeInput(document.getElementById('video-export-start').value);

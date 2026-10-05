@@ -50,7 +50,7 @@ async function published(crypto) {
     assert.equal(value.state.identity,null,'Unhashed assets must not get a verified render identity');
     assert.match(value.status.textContent,/16 × 16px/);
     assert.deepEqual(value.counts(),{fetches:6,created:6,revoked:6});
-    assert.throws(()=>value.api.acquireRenderLock(),/before exporting video/);
+    assert.throws(()=>value.api.acquireRenderLock(),/verification requires HTTPS or localhost/);
     const strict=fixture(crypto);
     await assert.rejects(vm.runInContext("loadImageAsset('skybox/px.png')",strict.context),/HTTPS or localhost/);
     assert.equal(strict.counts().fetches,0,'Fail export-capable loads before fetching large assets');
@@ -65,6 +65,28 @@ async function published(crypto) {
   const strict=fixture(webcrypto);
   const asset=await vm.runInContext("loadImageAsset('skybox/px.png')",strict.context);
   assert.equal(asset.sha256,identity.faces.px,'Export-capable loads retain actual-byte hashing');
+  // Exercise the actual export planner without a browser: ready is not enough
+  // when the lock also requires a verified environment identity.
+  const viewerSource=fs.readFileSync(path.join(__dirname,'..','tesseract.js'),'utf8');
+  const planner=viewerSource.slice(viewerSource.indexOf('function videoExportPlan() {'),viewerSource.indexOf('function updateVideoExportSummary()'));
+  const fields={
+    'video-export-resolution':'1280x720','video-export-format':'mp4',
+    'video-export-quality':'standard','video-export-range':'full',
+    'video-export-checkpoint':'60','video-export-scratch':''
+  };
+  const plannerContext=vm.createContext({
+    videoExportDialog:{},loopTiming:{exact:true,frameCount:30},exportFps:30,
+    VIDEO_QUALITY_BITS_PER_PIXEL:{standard:.07},
+    document:{getElementById(id){return {value:fields[id]};}}
+  });
+  vm.runInContext(planner,plannerContext);
+  for(const state of [{ready:false,identity:null},{ready:true,identity:null},{ready:true,identity:secure.state.identity}]) {
+    plannerContext.skyboxLibrary={getRenderState(){return state;}};
+    const plan=vm.runInContext('videoExportPlan()',plannerContext);
+    if(!state.ready)assert.match(plan.error,/finish loading/);
+    else if(!state.identity)assert.match(plan.error,/verification requires HTTPS or localhost/);
+    else assert.equal(plan.error,'');
+  }
   const failed=await published({subtle:{digest:async()=>{throw new Error('injected digest failure');}}});
   assert.equal(failed.state.ready,false,'A failed available digest must not silently downgrade verification');
   assert.match(failed.status.textContent,/injected digest failure/);

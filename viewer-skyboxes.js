@@ -55,7 +55,8 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
     const renderApi={
         getRenderState(){return {ready:renderReady,identity:renderIdentity};},
         acquireRenderLock(){
-            if(!renderReady||!renderIdentity)throw new Error('Wait for the skybox to finish loading before exporting video');
+            if(!renderReady)throw new Error('Wait for the skybox to finish loading before exporting video');
+            if(!renderIdentity)throw new Error('Skybox verification requires HTTPS or localhost before exporting video');
             renderLocks+=1;let released=false;
             return ()=>{if(!released){released=true;renderLocks=Math.max(0,renderLocks-1);}};
         }
