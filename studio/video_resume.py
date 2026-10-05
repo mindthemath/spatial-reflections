@@ -735,8 +735,10 @@ class VideoJobStore:
                 '-color_range', 'tv', '-colorspace', 'bt709',
                 '-color_primaries', 'bt709', '-color_trc', 'bt709',
             ]
-        # The guarded test runner constrains only test encoders. Normal exports
-        # retain their usual ffmpeg threading policy.
+        # The guarded test runner constrains only test codecs. Normal exports
+        # retain their usual ffmpeg threading policy. ffmpeg options are scoped:
+        # input-side -threads bounds PNG decoding; output-side -threads bounds
+        # libx264 encoding. Both occurrences are necessary, not duplicates.
         test_threads = os.environ.get('TESSERACT_TEST_ENCODER_THREADS')
         thread_args = []
         if test_threads:

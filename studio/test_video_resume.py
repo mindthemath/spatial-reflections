@@ -608,14 +608,21 @@ class VideoJobStoreTest(unittest.TestCase):
         self.store.popen = FakeProcess
         job = self.store.create(request(fps=2, frames=6, checkpointSeconds=2))
         lease = self.store.resume(job['id'])['lease']
-        for frame in range(3):
-            progress = self.store.write_frame(job['id'], frame, b'png', lease)
-            self.assertEqual(progress['durableFrame'], 0)
+        with mock.patch.dict('os.environ', {'TESSERACT_TEST_ENCODER_THREADS': '2'}):
+            for frame in range(3):
+                progress = self.store.write_frame(job['id'], frame, b'png', lease)
+                self.assertEqual(progress['durableFrame'], 0)
         progress = self.store.write_frame(job['id'], 3, b'png', lease)
         self.assertEqual(progress['durableFrame'], 4)
         self.assertTrue(progress['checkpointed'])
         self.assertEqual(len(processes), 1)
         command = processes[0].command
+        thread_flags = [index for index, arg in enumerate(command) if arg == '-threads']
+        self.assertEqual(len(thread_flags), 2)
+        self.assertLess(thread_flags[0], command.index('-i'), 'PNG decoder input scope')
+        self.assertGreater(thread_flags[1], command.index('-c:v'), 'H.264 encoder output scope')
+        self.assertEqual([command[index + 1] for index in thread_flags], ['2', '2'])
+        self.assertEqual(command[command.index('-filter_threads') + 1], '1')
         color_filter = command[command.index('-vf') + 1]
         self.assertIn('scale=in_range=pc:out_range=tv:out_color_matrix=bt709', color_filter)
         self.assertIn('setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709', color_filter)
