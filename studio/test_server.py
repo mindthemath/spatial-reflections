@@ -38,8 +38,10 @@ class StudioAPITest(unittest.TestCase):
         self.http = ThreadingHTTPServer(('localhost', 0), server.Handler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
+        self.connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
 
     def tearDown(self):
+        self.connection.close()
         self.http.shutdown()
         self.http.server_close()
         self.thread.join()
@@ -53,20 +55,19 @@ class StudioAPITest(unittest.TestCase):
         self.temp.cleanup()
 
     def request(self, method, path, payload=None, headers=None):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
-        connection.request(method, path, json.dumps(payload) if payload is not None else None, headers or {})
-        response = connection.getresponse()
-        status, data = response.status, json.loads(response.read())
-        connection.close()
-        return status, data
+        return self.raw_request(method, path, json.dumps(payload) if payload is not None else None, headers)
 
     def raw_request(self, method, path, body, headers=None):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
-        connection.request(method, path, body, headers or {})
-        response = connection.getresponse()
-        status, data = response.status, json.loads(response.read())
-        connection.close()
-        return status, data
+        self.connection.request(method, path, body, headers or {})
+        response = self.connection.getresponse()
+        return response.status, json.loads(response.read())
+
+    def test_request_helpers_reuse_connection(self):
+        self.request('GET', '/api/video/capabilities')
+        first_socket = self.connection.sock
+        self.assertIsNotNone(first_socket)
+        self.raw_request('GET', '/api/video/capabilities', None)
+        self.assertIs(self.connection.sock, first_socket)
 
     def test_http_connection_is_reused_between_requests(self):
         connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
