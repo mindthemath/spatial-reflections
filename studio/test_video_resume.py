@@ -670,6 +670,43 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertTrue(progress['checkpointed'])
         self.assertEqual(len(processes), 1)
 
+    def test_failed_stop_preserves_encoder_ownership_and_closes_stderr_copy(self):
+        class ResistantProcess:
+            pid = 23456
+            def __init__(self, command, **kwargs):
+                self.stdin = io.BytesIO()
+                self.returncode = None
+                self.fail_stop = True
+                kwargs['stderr'].write(b'resistant encoder diagnostic')
+                kwargs['stderr'].flush()
+            def poll(self): return self.returncode
+            def kill(self):
+                if self.fail_stop: raise OSError('injected termination failure')
+                self.returncode = -9
+            def wait(self, timeout=None): return self.returncode
+        self.store.popen = ResistantProcess
+        job = self.store.create(request(frames=2))
+        lease = self.store.resume(job['id'])['lease']
+        self.store.write_frame(job['id'], 0, b'png', lease)
+        runtime = self.store.active[job['id']]
+        stream, log = runtime['stderrStream'], runtime['stderrPath']
+        with self.assertRaisesRegex(ValueError, 'could not be stopped'):
+            self.store.pause(job['id'], lease=lease)
+        self.assertTrue(stream.closed)
+        self.assertTrue(log.exists())
+        self.assertIs(self.store.active[job['id']], runtime)
+        self.assertIn('activeEncoder', json.loads(self.manifest(job).read_text()))
+        # The frame-failure path must retain ownership and log as well.
+        self.store._fail_active_segment(job['id'], runtime, 'injected frame failure')
+        self.assertIs(self.store.active[job['id']], runtime)
+        self.assertIn('activeEncoder', json.loads(self.manifest(job).read_text()))
+        runtime['process'].fail_stop = False
+        paused = self.store.pause(job['id'], lease=lease)
+        self.assertEqual(paused['state'], 'paused')
+        self.assertNotIn('could not be stopped', paused.get('reason') or '')
+        self.assertNotIn(job['id'], self.store.active)
+        self.assertFalse(log.exists())
+
     def test_encoder_failure_pauses_at_last_durable_frame(self):
         class FailingProcess:
             def __init__(self, command, **kwargs):

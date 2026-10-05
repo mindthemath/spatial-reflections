@@ -643,7 +643,7 @@ class VideoJobStore:
     def _interrupt_active_segment(self, job_id):
         with self.lock:
             runtime = self.active.pop(job_id, None)
-            self.leases.pop(job_id, None)
+            previous_lease = self.leases.pop(job_id, None)
         if not runtime:
             self._release_owner(job_id)
             return
@@ -656,7 +656,16 @@ class VideoJobStore:
                 stopped = True
             except Exception:
                 pass
-        if stopped and process and process.stdin:
+        if not stopped:
+            # Do not lose ownership of an encoder that resisted termination, or
+            # wait on the job lock while its frame writer may still be blocked.
+            self._consume_encoder_stderr(runtime, stopped=False)
+            with self.lock:
+                self.active[job_id] = runtime
+                if previous_lease:
+                    self.leases[job_id] = previous_lease
+            raise ValueError('Checkpoint encoder could not be stopped; retry pause or restart the server for recovery')
+        if process and process.stdin:
             try:
                 process.stdin.close()
             except OSError:
@@ -669,6 +678,8 @@ class VideoJobStore:
         runtime_manifest = runtime.get('manifest')
         if runtime_job and runtime_manifest:
             runtime_job.pop('activeEncoder', None)
+            if 'stopFailureMessage' in runtime:
+                runtime_job['error'] = runtime.pop('stopFailureMessage')
             if detail:
                 runtime_job['error'] = f'Checkpoint encoder diagnostic: {detail}'
             try:
@@ -797,9 +808,11 @@ class VideoJobStore:
         return runtime
 
     @staticmethod
-    def _consume_encoder_stderr(runtime):
+    def _consume_encoder_stderr(runtime, stopped=True):
         stream = runtime.pop('stderrStream', None)
-        path = runtime.pop('stderrPath', None)
+        # A live encoder still owns its stderr fd. Close our copy, but retain the
+        # log and path for a later successful stop/recovery instead of unlinking.
+        path = runtime.pop('stderrPath', None) if stopped else None
         if stream and not stream.closed:
             try:
                 stream.flush()
@@ -827,7 +840,14 @@ class VideoJobStore:
                 stopped = True
             except Exception:
                 pass
-        if stopped and process.stdin:
+        if not stopped:
+            self._consume_encoder_stderr(runtime, stopped=False)
+            job = runtime['job']
+            runtime['stopFailureMessage'] = message
+            job['error'] = f'{message}; encoder could not be stopped, retry pause or restart the server for recovery'
+            self._save(runtime['manifest'], job)
+            return
+        if process.stdin:
             try:
                 process.stdin.close()
             except OSError:
