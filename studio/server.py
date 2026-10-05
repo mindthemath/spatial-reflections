@@ -652,11 +652,16 @@ class Handler(SimpleHTTPRequestHandler):
         except (ConnectionError, BrokenPipeError):
             return
         except (ValueError, KeyError, TypeError, StopIteration) as error:
+            # Some validation failures occur before a request body is consumed.
+            # Never reuse that HTTP/1.1 connection: unread bytes could otherwise
+            # be parsed as the beginning of the next request.
+            self.close_connection = True
             try:
                 self.send_json(400, {'error': str(error)})
             except (ConnectionError, BrokenPipeError, OSError):
                 return
         except OSError as error:
+            self.close_connection = True
             try:
                 self.send_json(500, {'error': str(error)})
             except (ConnectionError, BrokenPipeError, OSError):
