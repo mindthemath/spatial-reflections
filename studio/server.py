@@ -28,8 +28,6 @@ VIDEO_FORMATS = ('mp4', 'mkv')
 MAX_VIDEO_FRAME_BYTES = 100 * 1024 * 1024
 MAX_VIDEO_FRAMES = 10_000_000
 VIDEO_FRAME_READ_TIMEOUT = 30
-VIDEO_JOBS = {}
-VIDEO_JOBS_LOCK = threading.Lock()
 VIDEO_STORE = None
 VIDEO_STORE_LOCK = threading.Lock()
 FFMPEG_ENCODER_ERROR = None
@@ -339,54 +337,12 @@ def start_video(request):
     return active
 
 
-def video_job(job_id):
-    if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
-        raise ValueError('Invalid video export id')
-    with VIDEO_JOBS_LOCK:
-        job = VIDEO_JOBS.get(job_id)
-    if not job:
-        raise ValueError('Video export is missing or already complete')
-    return job
-
-
-def remove_video_job(job_id):
-    with VIDEO_JOBS_LOCK:
-        return VIDEO_JOBS.pop(job_id, None)
-
-
-def cancel_video(job_id):
-    job = remove_video_job(job_id)
-    if not job:
-        return
-    # Never wait for the frame-write lock here. A disconnected browser can leave
-    # its request thread blocked in a pipe write; killing ffmpeg must remain able
-    # to interrupt that write immediately.
-    process = job['process']
-    # Kill only. Closing stdin here deadlocks when the frame thread is blocked
-    # inside that same buffered write; the broken pipe wakes the writer instead.
-    if process.poll() is None:
-        process.kill()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-    job['pending'].unlink(missing_ok=True)
-
-
-def cancel_all_videos():
-    with VIDEO_JOBS_LOCK:
-        job_ids = list(VIDEO_JOBS)
-    for job_id in job_ids:
-        try:
-            cancel_video(job_id)
-        except (OSError, subprocess.SubprocessError):
-            pass
+def pause_all_videos():
     if VIDEO_STORE is not None:
         VIDEO_STORE.pause_all()
 
 
-atexit.register(cancel_all_videos)
+atexit.register(pause_all_videos)
 
 
 def finish_video(job_id):

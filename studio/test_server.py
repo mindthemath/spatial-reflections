@@ -361,39 +361,6 @@ class StudioAPITest(unittest.TestCase):
             self.assertEqual(code, 400)
             self.assertIn('scratch', result['error'].lower())
 
-    def test_video_cancel_does_not_wait_for_frame_lock(self):
-        class FakeProcess:
-            def __init__(self):
-                self.stdin = io.BytesIO()
-                self.returncode = None
-                self.killed = False
-
-            def poll(self):
-                return self.returncode
-
-            def kill(self):
-                self.killed = True
-                self.returncode = -9
-
-            def wait(self, timeout=None):
-                return self.returncode
-
-        job_id = 'a' * 32
-        frame_lock = threading.Lock()
-        frame_lock.acquire()
-        process = FakeProcess()
-        pending = server.ROOT / 'blocked.pending.mp4'
-        pending.write_bytes(b'partial')
-        with server.VIDEO_JOBS_LOCK:
-            server.VIDEO_JOBS[job_id] = {'process': process, 'lock': frame_lock, 'pending': pending}
-        cancelled = threading.Thread(target=server.cancel_video, args=(job_id,))
-        cancelled.start()
-        cancelled.join(timeout=1)
-        frame_lock.release()
-        self.assertFalse(cancelled.is_alive(), 'Cancellation waited for the blocked frame lock')
-        self.assertTrue(process.killed)
-        self.assertFalse(pending.exists())
-
     def test_stalled_video_frame_upload_unblocks(self):
         class FakeFFmpeg:
             def __init__(self, command, **_kwargs):
