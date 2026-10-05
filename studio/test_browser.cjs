@@ -159,7 +159,8 @@ finally:
    await viewer.locator('#close-video-export').click();await viewer.locator('#open-video-export').click();await viewer.waitForSelector(`.video-resume-job[data-job-id="${pausedId}"]`);
    await viewer.locator(`.video-resume-job[data-job-id="${pausedId}"] .resume-video-export`).click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-resume-')&&file.endsWith('.mp4')));
    const mismatchId=await viewer.evaluate(async()=>{
-    const request={name:'mismatch',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:'different-render',startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
+    const signature=JSON.parse(document.querySelector('#video-export-dialog').dataset.renderSignature);signature.shader='different-render';
+    const request={name:'mismatch',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:JSON.stringify(signature),startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
     const started=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}).then(r=>r.json());
     await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});
     return started.id;

@@ -54,6 +54,7 @@ let exportFpsSelect;
 let videoExportButton;
 let videoExportDialog;
 let videoExportDialogRequest = 0;
+let videoResumeJobsRequest = 0;
 let panelExpanded = true;
 let videoTimingExpanded = false;
 let savedCameraPosition = { x: 3, y: 3, z: 3 };
@@ -252,9 +253,7 @@ function createEnvironmentMap() {
             updateMaterialsWithEnvMap();
             previous?.dispose();
         },
-        onStateChange: () => {
-            if (videoExportDialog) updateVideoExportSummary();
-        },
+        onStateChange: refreshVideoEnvironmentState,
         confirmAction,
         onSwitchChrome: () => {
             const select = document.getElementById('viewer-shader');
@@ -1674,28 +1673,57 @@ async function openVideoExportDialog() {
     updateVideoExportSummary();
 }
 
+function refreshVideoEnvironmentState() {
+    if (!videoExportDialog) return;
+    updateVideoExportSummary();
+    if (videoExportDialog.open && !videoExportRunning) {
+        videoExportDialog.dataset.renderSignature = videoRenderSignature();
+        if (videoExportDialog.dataset.statusMode === 'ready') loadVideoResumeJobs();
+    }
+}
+
+function videoResumeCompatibility(job, currentSignature, currentSource) {
+    const request = job.request || {};
+    const sourceMatches = request.sourceUrl === currentSource;
+    const settingsMatch = request.renderSignature === currentSignature;
+    const fullyRendered = job.nextFrame === job.frames;
+    let saved = null, current = null;
+    try { saved = JSON.parse(request.renderSignature); } catch { /* Old/invalid signature. */ }
+    try { current = JSON.parse(currentSignature); } catch { /* Not yet ready. */ }
+    const verified = Boolean(saved?.environment);
+    const environmentMatches = verified && saved.environment === current?.environment;
+    let reason = '';
+    if (job.state === 'unavailable') reason = job.reason;
+    else if (job.state === 'active') reason = 'The server still marks this export active; discard it or retry after recovery.';
+    else if (!fullyRendered && !verified) reason = 'This export predates verified skybox identity. Resume with the previous viewer runtime, or start a new export; settings restoration cannot verify its original environment.';
+    else if (!fullyRendered && !sourceMatches) reason = 'Open the original viewer URL and load its saved skybox before resuming.';
+    else if (!fullyRendered && !environmentMatches) reason = 'Load the original skybox and wait for content verification before restoring settings or resuming.';
+    else if (!fullyRendered && !settingsMatch) reason = 'Current render settings do not match.';
+    const usable = !['unavailable', 'active'].includes(job.state);
+    return {
+        available: usable && (fullyRendered || (verified && sourceMatches && settingsMatch)),
+        restore: usable && !fullyRendered && sourceMatches && environmentMatches && !settingsMatch && Boolean(request.viewerState),
+        fullyRendered, reason
+    };
+}
+
 async function loadVideoResumeJobs() {
     const requestId = videoExportDialogRequest;
+    const jobsRequest = ++videoResumeJobsRequest;
     const section = document.getElementById('video-resume-jobs');
     const list = document.getElementById('video-resume-job-list');
     list.replaceChildren();
     try {
         const value = await videoControlApi('/api/video/jobs', { cache: 'no-store' });
-        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
+        if (requestId !== videoExportDialogRequest || jobsRequest !== videoResumeJobsRequest || !videoExportDialog.open) return;
         for (const job of value.jobs || []) {
             const card = document.createElement('div');
             card.className = 'video-resume-job';
             card.dataset.jobId = job.id;
             const request = job.request || {};
-            const sourceMatches = request.sourceUrl === location.pathname + location.search;
-            const settingsMatch = request.renderSignature === videoRenderSignature();
-            const fullyRendered = job.nextFrame === job.frames;
-            const available = !['unavailable', 'active'].includes(job.state)
-                && (fullyRendered || (sourceMatches && settingsMatch));
-            const reason = job.state === 'unavailable'
-                ? job.reason
-                : job.state === 'active' ? 'The server still marks this export active; discard it or retry after recovery.'
-                : !fullyRendered && (!sourceMatches || !settingsMatch) ? 'Current source or render settings do not match.' : '';
+            const {available, restore: canRestore, fullyRendered, reason} = videoResumeCompatibility(
+                job, videoRenderSignature(), location.pathname + location.search
+            );
             const description = document.createElement('span');
             description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}`;
             const resume = document.createElement('button');
@@ -1725,7 +1753,7 @@ async function loadVideoResumeJobs() {
                 await loadVideoResumeJobs();
             });
             card.append(description, resume);
-            if (job.state !== 'unavailable' && sourceMatches && !settingsMatch && !fullyRendered && request.viewerState) {
+            if (canRestore) {
                 const restore = document.createElement('button');
                 restore.type = 'button';
                 restore.className = 'restore-video-export';
@@ -1754,7 +1782,7 @@ async function loadVideoResumeJobs() {
         }
         section.hidden = !list.children.length;
     } catch (error) {
-        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
+        if (requestId !== videoExportDialogRequest || jobsRequest !== videoResumeJobsRequest || !videoExportDialog.open) return;
         section.hidden = false;
         list.textContent = `Could not inspect interrupted exports: ${error.message}`;
     }
