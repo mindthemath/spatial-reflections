@@ -269,29 +269,51 @@ function setupDragAndDropHandlers() {
     const dropZone = document.getElementById('drop-zone');
     if (!dropZone) return;
     
-    // Handle drag over
+    let dragDepth = 0;
+    let dragTimeout = null;
+    const hideDropZone = () => {
+        dragDepth = 0;
+        clearTimeout(dragTimeout);
+        dragTimeout = null;
+        dropZone.style.display = 'none';
+    };
+    const showDropZone = () => {
+        dropZone.style.display = 'block';
+        clearTimeout(dragTimeout);
+        // External drags cancelled by the OS may send no dragleave/dragend.
+        // Active drags keep sending dragover, including while stationary.
+        dragTimeout = setTimeout(hideDropZone, 1200);
+    };
+    window.addEventListener('dragenter', () => {
+        dragDepth += 1;
+        showDropZone();
+    });
     window.addEventListener('dragover', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        dropZone.style.display = 'block';
+        showDropZone();
     });
-    
-    // Handle drag leave
     window.addEventListener('dragleave', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        const rect = document.body.getBoundingClientRect();
-        if (e.clientX <= rect.left || e.clientX >= rect.right || 
-            e.clientY <= rect.top || e.clientY >= rect.bottom) {
-            dropZone.style.display = 'none';
-        }
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0 || e.clientX <= 0 || e.clientX >= window.innerWidth ||
+            e.clientY <= 0 || e.clientY >= window.innerHeight) hideDropZone();
+    });
+    window.addEventListener('dragend', hideDropZone);
+    window.addEventListener('blur', hideDropZone);
+    window.addEventListener('keydown', e => {
+        if (e.key === 'Escape') hideDropZone();
+    }, true);
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) hideDropZone();
     });
     
     // Handle drop
     window.addEventListener('drop', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        dropZone.style.display = 'none';
+        hideDropZone();
         
         if (e.dataTransfer.files.length > 0) {
             const file = e.dataTransfer.files[0];

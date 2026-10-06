@@ -107,6 +107,15 @@ finally:
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+  const dragOverlay=await viewer.evaluate(()=>{
+   const zone=document.getElementById('drop-zone');
+   const emit=type=>window.dispatchEvent(new DragEvent(type,{bubbles:true,cancelable:true,clientX:200,clientY:200}));
+   emit('dragenter');emit('dragover');const shown=zone.style.display;
+   emit('dragleave');const left=zone.style.display;
+   emit('dragenter');emit('dragover');window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
+   return {shown,left,cancelled:zone.style.display};
+  });
+  assert.deepEqual(dragOverlay,{shown:'block',left:'none',cancelled:'none'});
   // Video export defaults to a 30s clip inside the loop, and still rejects an empty window before encoding.
   await viewer.locator('#rotation-xw').fill('10');await viewer.locator('details').filter({hasText:'Video timing'}).locator('summary').click();
   await viewer.locator('#open-video-export').click();await viewer.waitForSelector('#video-export-dialog[open]');await viewer.waitForFunction(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes'||document.querySelector('#video-export-status').classList.contains('error'));

@@ -49,6 +49,7 @@ test-fast:
 	node studio/test_lifecycle_test.cjs
 	node studio/test_skybox_hashing.cjs
 	node studio/test_video_resume_ui.cjs
+	node studio/test_drag_drop.cjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
 	python3 -m unittest discover -s studio -p 'test_video_simple.py'
 	cd studio && python3 -m unittest test_server.ServerStartupTest
