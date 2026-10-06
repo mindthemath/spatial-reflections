@@ -189,6 +189,7 @@ finally:
     const response=await route.fetch();const capabilities=await response.json();
     await route.fulfill({json:{...capabilities,available:false,canManage:true,reason:'injected missing libx264'}});
    });
+   await finalizePage.locator('details').filter({hasText:'Video timing'}).locator('summary').click();
    await finalizePage.locator('#open-video-export').click();
    const legacy=finalizePage.locator(`.video-resume-job[data-job-id="${legacyId}"]`);await legacy.waitFor();
    assert.equal(await legacy.locator('.restore-video-export').count(),0);assert.equal(await legacy.locator('.resume-video-export').innerText(),'Finalize');
