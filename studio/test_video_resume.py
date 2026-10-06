@@ -1010,6 +1010,21 @@ class VideoJobStoreTest(unittest.TestCase):
                 self.assertFalse(self.manifest(job).parent.exists())
                 self.assertEqual(store.list_jobs(), [])
 
+    def test_invalid_or_complete_frame_request_does_not_spawn_encoder(self):
+        job=self.store.create(request())
+        lease=self.store.resume(job['id'])['lease']
+        with mock.patch.object(self.store,'popen') as spawn:
+            with self.assertRaisesRegex(ValueError,'Expected frame 0'):
+                self.store.write_frame(job['id'],1,b'png',lease)
+            spawn.assert_not_called()
+        self.store.pause(job['id'])
+        ready=self.ready_job();active=self.store.resume(ready['id']);lease=active['lease']
+        with mock.patch.object(self.store,'popen') as spawn:
+            with self.assertRaisesRegex(ValueError,'already received all frames'):
+                self.store.write_frame(ready['id'],active['nextFrame'],b'png',lease)
+            spawn.assert_not_called()
+        self.store.pause(ready['id'])
+
     def test_foreign_store_cannot_modify_owned_finalizer_files(self):
         job = self.ready_job()
         entered, release = threading.Event(), threading.Event()

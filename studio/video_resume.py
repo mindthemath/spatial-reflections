@@ -1024,6 +1024,11 @@ class VideoJobStore:
                 runtime = self.active.get(job_id)
             if runtime is None:
                 manifest, job = self._load(job_id)
+                expected = job['nextFrame']
+                if int(frame_index) != expected:
+                    raise ValueError(f'Expected frame {expected}, received {frame_index}')
+                if expected >= job['request']['frames']:
+                    raise ValueError('Video export already received all frames')
                 runtime = self._start_segment(manifest, job, lease)
                 with self.lock:
                     current = self.leases.get(job_id)
