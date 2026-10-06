@@ -59,6 +59,34 @@ def signal_owned(owned, sig):
                 pass
 
 
+def signal_private_group(child, owned, sig):
+    # A live/unreaped child pins its PID. After reaping, the numeric group ID may
+    # be reused: require a still-verified invocation member in that group.
+    proven = child.poll() is None
+    if not proven:
+        try:
+            snapshot = process_snapshot()
+            for pid, identity in owned.items():
+                if pid in snapshot and snapshot[pid][1] == identity[0]:
+                    try:
+                        if os.getpgid(pid) == child.pid:
+                            proven = True
+                            break
+                    except ProcessLookupError:
+                        pass
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return
+    if not proven:
+        return
+    try:
+        os.killpg(child.pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if child.poll() is None:
+            raise
+
+
 def cleanup(child, owned, force=lambda: False):
     try:
         remember_descendants(child.pid if child.poll() is None else None, owned, process_snapshot())
@@ -67,15 +95,7 @@ def cleanup(child, owned, force=lambda: False):
     # The root is often make, which does not forward signals to recipes. Signal
     # its entire private group so node/Python cleanup handlers get the grace
     # period too. Detached Chromium is left to its owning node during this phase.
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        # macOS may return EPERM rather than ESRCH after an empty group exits.
-        # Never suppress a permission failure for a still-running owned leader.
-        if child.poll() is None:
-            raise
+    signal_private_group(child, owned, signal.SIGTERM)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline and not force():
         try:
@@ -101,16 +121,10 @@ def cleanup(child, owned, force=lambda: False):
             time.sleep(.2)
         signal_owned(owned, signal.SIGKILL)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-        print(f'Detached-process inspection failed; terminating only the owned test group: {error}', file=sys.stderr)
+        print(f'Detached-process inspection failed; checking only the owned test group: {error}', file=sys.stderr)
     # Also cover ordinary children reparented during forced shutdown. This group
     # was exclusively created for this test invocation, not the user's server.
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        if child.poll() is None:
-            raise
+    signal_private_group(child, owned, signal.SIGKILL)
     if child.poll() is None:
         child.wait(timeout=5)
 

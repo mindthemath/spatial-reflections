@@ -141,6 +141,29 @@ time.sleep(60)
             test_guard.cleanup(child, {})
         child.wait.assert_not_called()
 
+    def test_reaped_root_group_reuse_is_never_signaled(self):
+        child=mock.Mock(pid=123,poll=lambda:0)
+        snapshot={123:(1,'new start','unrelated leader'),456:(123,'new child','unrelated child')}
+        with mock.patch.object(test_guard,'process_snapshot',return_value=snapshot), \
+             mock.patch.object(test_guard.os,'killpg') as group, \
+             mock.patch.object(test_guard.os,'kill') as individual:
+            test_guard.cleanup(child,{456:('old child','old command')},force=lambda:True)
+            group.assert_not_called();individual.assert_not_called()
+
+    def test_reaped_group_is_signaled_only_with_verified_current_member(self):
+        child=mock.Mock(pid=123,poll=lambda:0)
+        owned={456:('same start','old command')}
+        with mock.patch.object(test_guard,'process_snapshot',return_value={456:(1,'same start','after exec')}), \
+             mock.patch.object(test_guard.os,'getpgid',return_value=123), \
+             mock.patch.object(test_guard.os,'killpg') as group:
+            test_guard.signal_private_group(child,owned,signal.SIGTERM)
+            group.assert_called_once_with(123,signal.SIGTERM)
+        with mock.patch.object(test_guard,'process_snapshot',return_value={456:(1,'same start','after exec')}), \
+             mock.patch.object(test_guard.os,'getpgid',return_value=999), \
+             mock.patch.object(test_guard.os,'killpg') as group:
+            test_guard.signal_private_group(child,owned,signal.SIGKILL)
+            group.assert_not_called()
+
     def test_live_group_permission_failure_is_not_hidden(self):
         child = mock.Mock(pid=123, poll=lambda: None)
         with mock.patch.object(test_guard, 'process_snapshot', return_value={}), \
