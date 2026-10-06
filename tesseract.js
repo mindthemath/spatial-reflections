@@ -1666,6 +1666,16 @@ async function openVideoExportDialog() {
         if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
         if (!value.available && !value.canManage) throw new Error(value.reason || 'Video service is unavailable');
         videoExportDialog.dataset.serverAvailable = value.available ? 'yes' : 'no';
+        videoExportDialog.dataset.videoMode = value.videoMode || 'resumable';
+        const simpleMode = videoExportDialog.dataset.videoMode === 'simple';
+        for (const id of ['video-export-checkpoint', 'video-export-scratch']) {
+            const label = document.getElementById(id)?.closest?.('label');
+            if (label) {
+                label.hidden = simpleMode;
+                label.style.display = simpleMode ? 'none' : '';
+            }
+        }
+        document.getElementById('cancel-video-export').textContent = simpleMode ? 'Cancel export' : 'Pause export';
         if (!value.available) {
             status.textContent = `${value.reason || 'H.264 encoding is unavailable'}. Completed checkpoints can still be finalized or discarded.`;
             status.classList.add('error');
@@ -1743,6 +1753,10 @@ async function loadVideoResumeJobs() {
     const section = document.getElementById('video-resume-jobs');
     const list = document.getElementById('video-resume-job-list');
     list.replaceChildren();
+    if (videoExportDialog.dataset.videoMode === 'simple') {
+        section.hidden = true;
+        return;
+    }
     try {
         const value = await videoControlApi('/api/video/jobs', { cache: 'no-store' });
         if (requestId !== videoExportDialogRequest || jobsRequest !== videoResumeJobsRequest || !videoExportDialog.open) return;
@@ -1853,8 +1867,9 @@ function videoExportPlan() {
     let startFrame = 0;
     let frames = loopTiming.frameCount;
     let error = '';
-    const checkpointSeconds = Number(document.getElementById('video-export-checkpoint').value);
-    const scratchPath = document.getElementById('video-export-scratch').value.trim();
+    const simpleMode = videoExportDialog?.dataset?.videoMode === 'simple';
+    const checkpointSeconds = simpleMode ? 0 : Number(document.getElementById('video-export-checkpoint').value);
+    const scratchPath = simpleMode ? '' : document.getElementById('video-export-scratch').value.trim();
 
     if (!loopTiming.exact || loopTiming.frameCount < 1) error = 'The current motion does not have an exportable timeline.';
     const renderState = skyboxLibrary?.getRenderState();
@@ -1896,7 +1911,9 @@ function updateVideoExportSummary() {
         const rangeText = plan.range === 'full'
             ? `Whole loop · frames 0–${plan.frames - 1}`
             : `Clip · frames ${plan.startFrame}–${plan.startFrame + plan.frames - 1}`;
-        const checkpointText = plan.checkpointSeconds === 0
+        const checkpointText = videoExportDialog.dataset.videoMode === 'simple'
+            ? 'SIMPLE MODE: one-shot encoding, no checkpoints or resume. Cancellation/interruption discards partial output; restart from frame 0.'
+            : plan.checkpointSeconds === 0
             ? 'No checkpoints. Pausing or interruption restarts from frame 0.'
             : `Durable progress is saved every ${plan.checkpointSeconds} seconds.`;
         summary.innerHTML = `
@@ -1921,7 +1938,7 @@ function updateVideoExportSummary() {
                     ? `${recovery.failed} older video job${recovery.failed === 1 ? '' : 's'} could not be inspected; new exports remain available. `
                 : '';
         document.getElementById('video-export-status').textContent =
-            `${videoExportDialog.dataset.encoder} encoder ready. ${recoveryText}${selection}Leaving the page pauses the export at its latest checkpoint.`;
+            `${videoExportDialog.dataset.encoder} encoder ready. ${recoveryText}${selection}${videoExportDialog.dataset.videoMode === 'simple' ? 'Simple mode: leaving the page cancels the export; no partial progress is kept.' : 'Leaving the page pauses the export at its latest checkpoint.'}`;
     }
 }
 
@@ -1948,21 +1965,21 @@ function ensureVideoExportStopRequest() {
 
 function requestVideoExportCancellation() {
     if (!videoExportRunning || videoExportStopAction) return;
-    videoExportStopAction = 'pause';
+    videoExportStopAction = videoExportDialog.dataset.videoMode === 'simple' ? 'discard' : 'pause';
     cancelVideoExportRequested = true;
     videoExportAbort?.abort();
     ensureVideoExportStopRequest();
     const button = document.getElementById('cancel-video-export');
     button.disabled = true;
     document.getElementById('discard-active-video-export').disabled = true;
-    document.getElementById('video-export-status').textContent = 'Pausing…';
+    document.getElementById('video-export-status').textContent = videoExportStopAction === 'discard' ? 'Cancelling…' : 'Pausing…';
 }
 
 async function requestVideoExportDiscard() {
     if (!videoExportRunning || videoExportStopAction) return;
     const confirmed = await confirmAction({
         title: 'CANCEL VIDEO EXPORT',
-        message: 'Permanently delete this export, its poster, and every saved checkpoint?',
+        message: videoExportDialog.dataset.videoMode === 'simple' ? 'Cancel this one-shot export and discard its partial output?' : 'Permanently delete this export, its poster, and every saved checkpoint?',
         confirmLabel: 'Cancel export'
     });
     if (!confirmed || !videoExportRunning || videoExportStopAction) return;
@@ -2180,9 +2197,10 @@ async function runVideoExport(plan, resumableJob = null) {
     const result = document.getElementById('video-export-result');
     const fields = videoExportDialog.querySelectorAll('input, select');
     fields.forEach(field => { field.disabled = true; });
+    const simpleMode = videoExportDialog.dataset.videoMode === 'simple';
     cancel.hidden = false;
     cancel.disabled = false;
-    discard.hidden = false;
+    discard.hidden = simpleMode;
     discard.disabled = false;
     progress.hidden = false;
     progress.max = plan.frames;
@@ -2248,7 +2266,7 @@ async function runVideoExport(plan, resumableJob = null) {
             camera.aspect = plan.width / plan.height;
             camera.updateProjectionMatrix();
         }
-        if (firstFrame === 0) {
+        if (firstFrame === 0 && !simpleMode) {
             status.textContent = 'Saving resume frame…';
             await saveVideoExportPoster(plan, activeVideoExportJob);
         }
@@ -2271,7 +2289,7 @@ async function runVideoExport(plan, resumableJob = null) {
                 const elapsedSeconds = Math.max(0.001, (now - exportStartedAt) / 1000);
                 const renderRate = (frame - firstFrame + 1) / elapsedSeconds;
                 const remainingSeconds = (plan.frames - frame - 1) / renderRate;
-                status.textContent = `Rendering + encoding ${(frame + 1).toLocaleString()} / ${plan.frames.toLocaleString()} frames · ${Math.round((frame + 1) / plan.frames * 100)}% · checkpoint ${frameResult.durableFrame.toLocaleString()} · ${renderRate.toFixed(1)} fps · ETA ${formatDuration(remainingSeconds)}`;
+                status.textContent = `Rendering + encoding ${(frame + 1).toLocaleString()} / ${plan.frames.toLocaleString()} frames · ${Math.round((frame + 1) / plan.frames * 100)}%${simpleMode ? '' : ` · checkpoint ${frameResult.durableFrame.toLocaleString()}`} · ${renderRate.toFixed(1)} fps · ETA ${formatDuration(remainingSeconds)}`;
                 lastProgressUpdate = now;
             }
         }
@@ -2321,7 +2339,9 @@ async function runVideoExport(plan, resumableJob = null) {
             status.classList.remove('error');
         } else {
             videoExportDialog.dataset.statusMode = 'error';
-            status.textContent = videoExportFailureMessage(error, stopError, videoExportStopAction, hadJob, finishAttempted);
+            status.textContent = simpleMode
+                ? `${error.message} ${stopError ? `Could not stop the export: ${stopError.message}.` : 'Simple export stopped; restart from frame 0.'}`
+                : videoExportFailureMessage(error, stopError, videoExportStopAction, hadJob, finishAttempted);
             status.classList.add('error');
         }
     } finally {

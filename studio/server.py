@@ -15,7 +15,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from video_resume import VideoJobStore
+# Lazy selection keeps the simple fallback independent of the resume module.
+VideoJobStore = None
+VIDEO_MODE = 'resumable'
 
 ROOT = Path(__file__).resolve().parent.parent
 FACES = ('px', 'nx', 'py', 'ny', 'pz', 'nz')
@@ -250,7 +252,8 @@ def video_capabilities():
                 available = False
                 reason = 'Encoder startup recovery could not inspect the durable job index'
     can_manage = store is not None and not (store.recovery_running or recovery['indexFailed'])
-    return {'available': available, 'canManage': can_manage, 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
+    return {'available': available, 'canManage': can_manage, 'videoMode': VIDEO_MODE,
+            'resumable': VIDEO_MODE == 'resumable', 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
             'qualities': list(VIDEO_QUALITIES), 'formats': list(VIDEO_FORMATS),
             'freeBytes': shutil.disk_usage(ROOT).free,
             'clips': video_clip_labels(),
@@ -279,6 +282,8 @@ def start_video_recovery():
     # encode new H.264 frames. Existing jobs can still be managed/stream-copied.
     store = video_store()
     store.claim_server()
+    if VIDEO_MODE == 'simple':
+        return
     store.recovery_running = True
     threading.Thread(target=store.recover_stale_encoders,
                      name='video-encoder-recovery', daemon=True).start()
@@ -302,7 +307,14 @@ def video_store(for_control=False):
         if VIDEO_STORE is None or VIDEO_STORE.root != root or VIDEO_STORE.ffmpeg != str(ffmpeg):
             if VIDEO_STORE is not None:
                 VIDEO_STORE.pause_all()
-            VIDEO_STORE = VideoJobStore(root, ffmpeg)
+            if VIDEO_MODE == 'simple':
+                from video_simple import SimpleVideoBackend
+                factory = SimpleVideoBackend
+            else:
+                factory = VideoJobStore
+                if factory is None:
+                    from video_resume import VideoJobStore as factory
+            VIDEO_STORE = factory(root, ffmpeg)
         # Keep dependency injection and unittest patches applied to subprocess.
         VIDEO_STORE.popen = subprocess.Popen
         VIDEO_STORE.run = subprocess.run
@@ -343,6 +355,18 @@ def start_video(request):
     if store.last_recovery['indexFailed']:
         raise ValueError('Encoder startup recovery failed; inspect the video job index')
     width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
+    if VIDEO_MODE == 'simple':
+        parent = ROOT / 'videos'
+        parent.mkdir(exist_ok=True)
+        if estimate > shutil.disk_usage(parent).free * 0.9:
+            raise ValueError('Estimated video exceeds output disk space')
+        active = store.start({**request, 'width': width, 'height': height, 'fps': fps,
+                              'frames': frames, 'quality': quality, 'format': video_format,
+                              'bitRate': bit_rate, 'estimatedBytes': estimate,
+                              'checkpointSeconds': 0, 'scratchPath': '',
+                              'colorProfile': 'bt709-limited-v1'})
+        active.update({'estimatedBytes': estimate, 'bitRate': bit_rate})
+        return active
     checkpoint_seconds = int(request.get('checkpointSeconds', 60))
     request = {
         **request, 'width': width, 'height': height, 'fps': fps,
@@ -513,6 +537,8 @@ class Handler(SimpleHTTPRequestHandler):
                 query = parse_qs(route.query) if route.path in ('/api/video/frame', '/api/video/poster') else {}
                 check_video_recovery(store, query.get('id', [None])[0], query.get('lease', [None])[0])
             if route.path == '/api/video/poster':
+                if VIDEO_MODE == 'simple':
+                    raise ValueError('Simple mode does not save resume frames')
                 query = parse_qs(route.query)
                 job_id = query.get('id', [''])[0]
                 lease = query.get('lease', [''])[0]
@@ -698,7 +724,10 @@ class StudioHTTPServer(ThreadingHTTPServer):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=1313)
+    parser.add_argument('--video-mode', choices=('resumable', 'simple'), default='resumable',
+                        help='simple: one-shot encoding; cancellation discards partial output')
     args = parser.parse_args()
+    VIDEO_MODE = args.video_mode
     http = StudioHTTPServer(('localhost', args.port), Handler)
     ffmpeg = shutil.which('ffmpeg')
     VIDEO_FFMPEG_BOOTSTRAP = str(Path(ffmpeg).resolve()) if ffmpeg else ''

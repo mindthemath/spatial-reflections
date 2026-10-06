@@ -110,6 +110,35 @@ Rendering and encoding are intentionally split. The active browser renders the e
 
 New exports explicitly convert full-range RGB to limited-range BT.709 YUV and tag BT.709 matrix, transfer and primaries in H.264 and the container. Checkpoint concatenation preserves these tags, verified with real `ffprobe` tests for MP4 and MKV. Existing checkpoint jobs without a color profile retain their original conversion rather than mixing old and new colors within one movie. Checkpoint encoder failures preserve the last 4 KB of diagnostics in the interrupted job's reason.
 
+### One-shot fallback
+
+Resumable export remains the default. To select a separate, simpler backend,
+restart Studio with either:
+
+```sh
+make serve VIDEO_MODE=simple
+# or
+python3 studio/server.py --port 1313 --video-mode simple
+```
+
+The dialog identifies **Simple mode**: deterministic PNG capture, one H.264
+encoder, BT.709 color, and publication only after successful encoding. Cancel,
+leaving the page, or encoder failure discards partial progress; restart from
+frame 0. There are no checkpoints, resume, custom scratch folders, or startup
+recovery. Existing resumable jobs remain untouched and hidden; restart with
+`--video-mode resumable` (or plain `make serve`) to manage them again.
+
+Use local project/output storage for this fallback. An abrupt server/machine
+crash can leave hidden `videos/.simple-*` directories. Simple mode deliberately
+does not scan or delete them on restart; remove leftovers only after confirming
+their old encoders have exited. Multi-hour and network-share endurance remain
+unvalidated.
+
+`make test-video-encoder` checks real encoding; `make test-video-simple-browser`
+checks browser export/cancellation. `make test` checks both modes. Tests remain
+standard-library `unittest`: pytest would not replace the owned-process guard
+and bounded cleanup.
+
 ### Video validation commands
 
 ```sh
@@ -133,7 +162,7 @@ The soak uses three samples from an existing artwork video at 1080p/30 FPS, two 
 
 ### Long-running video recovery
 
-New video exports are resumable. Interrupted jobs created before verified environment signatures cannot be securely resumed by this viewer: the dialog explains this and does not offer a misleading settings-restore button. Use the previous viewer runtime to finish those jobs, or start a new export. Already-rendered legacy jobs can still be finalized without rendering more frames. When a verified job's skybox or viewer URL differs, load its original environment/URL first; settings restoration only repairs camera/render settings once environment identity matches. The default checkpoint interval is 60 seconds and can be changed from 1 to 3,600 seconds. A browser navigation, server shutdown, encoder failure, or five minutes without a frame pauses the job and preserves completed checkpoints. Reopen the same viewer URL with the same camera and render settings, open **Export video…**, and use **Resume**. The active incomplete checkpoint is rerendered, so an interruption loses at most one checkpoint interval—not the preceding hours. **Pause export** is recoverable; **Discard** permanently removes the checkpoints and requires confirmation.
+In the default resumable mode, new video exports are resumable. Interrupted jobs created before verified environment signatures cannot be securely resumed by this viewer: the dialog explains this and does not offer a misleading settings-restore button. Use the previous viewer runtime to finish those jobs, or start a new export. Already-rendered legacy jobs can still be finalized without rendering more frames. When a verified job's skybox or viewer URL differs, load its original environment/URL first; settings restoration only repairs camera/render settings once environment identity matches. The default checkpoint interval is 60 seconds and can be changed from 1 to 3,600 seconds. A browser navigation, server shutdown, encoder failure, or five minutes without a frame pauses the job and preserves completed checkpoints. Reopen the same viewer URL with the same camera and render settings, open **Export video…**, and use **Resume**. The active incomplete checkpoint is rerendered, so an interruption loses at most one checkpoint interval—not the preceding hours. **Pause export** is recoverable; **Discard** permanently removes the checkpoints and requires confirmation.
 
 When ffmpeg is present but lacks libx264, the server still claims project ownership and performs crash recovery. New/remaining-frame encoding is blocked, but completed checkpoints can still be finalized via stream copy and jobs can be discarded from the dialog.
 

@@ -62,6 +62,35 @@ class StudioAPITest(unittest.TestCase):
         response = self.connection.getresponse()
         return response.status, json.loads(response.read())
 
+    def test_simple_mode_is_one_shot_and_never_constructs_resume_store(self):
+        class Encoder:
+            def __init__(self,command,**_kwargs):self.stdin=io.BytesIO();self.output=Path(command[-1]);self.returncode=None
+            def poll(self):return self.returncode
+            def kill(self):self.returncode=-9
+            def wait(self,timeout=None):
+                if self.returncode is None:self.output.write_bytes(b'movie');self.returncode=0
+                return self.returncode
+        with mock.patch.object(server,'VIDEO_MODE','simple'), \
+             mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess,'Popen',Encoder), \
+             mock.patch.object(server,'ffmpeg_encoder_error',return_value=None), \
+             mock.patch.object(server,'VideoJobStore',side_effect=AssertionError('Resume backend must not be used')):
+            code,caps=self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertEqual(caps['videoMode'],'simple');self.assertFalse(caps['resumable'])
+            code,job=self.request('POST','/api/video/start',{'name':'one-shot','width':64,'height':64,'fps':24,'frames':1,'scratchPath':'/not/a/directory','checkpointSeconds':99999})
+            self.assertEqual(code,201)
+            frame=server.PNG_SIGNATURE+(13).to_bytes(4,'big')+b'IHDR'+(64).to_bytes(4,'big')+(64).to_bytes(4,'big')
+            code,_=self.raw_request('POST',f"/api/video/frame?id={job['id']}&frame=0&lease={job['lease']}",frame,{'Content-Type':'image/png'})
+            self.assertEqual(code,201)
+            code,result=self.request('POST','/api/video/finish',{'id':job['id']})
+            self.assertEqual(code,201);self.assertEqual((server.ROOT/result['url'].lstrip('/')).read_bytes(),b'movie')
+            code,value=self.request('GET','/api/video/jobs');self.assertEqual(code,200);self.assertEqual(value['jobs'],[])
+            code,error=self.request('POST','/api/video/resume',{'id':job['id']})
+            self.assertEqual(code,400);self.assertIn('no resume',error['error'])
+            self.assertFalse((server.ROOT/'videos'/'.checkpoints').exists())
+            self.assertFalse((server.ROOT/'videos'/'.video-jobs.json').exists())
+            server.VIDEO_STORE.release_server()
+
     def test_request_helpers_reuse_connection(self):
         self.request('GET', '/api/video/capabilities')
         first_socket = self.connection.sock
