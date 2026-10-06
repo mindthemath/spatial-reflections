@@ -109,9 +109,18 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  requests[0].resolve({available:false,canManage:false,reason:'server unavailable'});await unavailable;
  assert.equal(requests.length,1);assert.equal(context.videoExportDialog.dataset.statusMode,'error');
  requests=[];
- context.videoExportDialog.dataset.serverAvailable='yes';
+ context.error=new Error('Video export lease is no longer active');context.job=job();
+ for(const state of ['paused','ready','active','finalizing','unavailable']){
+  requests=[];const repair=vm.runInContext('resolveVideoPauseError(job,error)',context);
+  requests[0].resolve({jobs:[{id:'job',state}]});
+  assert.equal(await repair,['paused','ready'].includes(state)?null:context.error);
+ }
+ requests=[];const unknownPause=vm.runInContext('resolveVideoPauseError(job,error)',context);
+ requests[0].reject(new Error('unreachable'));assert.equal(await unknownPause,context.error);
+ requests=[];context.videoExportDialog.dataset.serverAvailable='yes';
  const protectedList=vm.runInContext('loadVideoResumeJobs()',context);
- requests[0].resolve({jobs:[job(signature('verified','rough'))]});await protectedList;
+ requests[0].resolve({jobs:[job(signature('verified','rough'),{reason:'libx264 diagnostic: scratch full'})]});await protectedList;
+ assert.match(list.children[0].children[0].textContent,/libx264 diagnostic: scratch full/);
  const protectedCard=list.children[0];const protectedButtons=protectedCard.children.filter(item=>item.listeners?.click);
  assert.equal(protectedButtons.length,3);
  const beforeRestore=restored;context.videoExportRunning=true;

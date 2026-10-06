@@ -1725,6 +1725,18 @@ function videoResumeCompatibility(job, currentSignature, currentSource, encoding
     };
 }
 
+async function resolveVideoPauseError(job, error) {
+    if (error?.message !== 'Video export lease is no longer active') return error;
+    try {
+        const value = await videoControlApi('/api/video/jobs', { cache: 'no-store' });
+        const current = (value.jobs || []).find(candidate => candidate.id === job.id);
+        // Encoder failure cleanup may already have consumed the lease. Confirm
+        // durable idle state; do not hide a stale lease owned by another renderer.
+        if (current && ['paused', 'ready'].includes(current.state)) return null;
+    } catch { /* Keep the original failure if state cannot be verified. */ }
+    return error;
+}
+
 async function loadVideoResumeJobs() {
     const requestId = videoExportDialogRequest;
     const jobsRequest = ++videoResumeJobsRequest;
@@ -1744,7 +1756,8 @@ async function loadVideoResumeJobs() {
                 videoExportDialog.dataset.serverAvailable === 'yes'
             );
             const description = document.createElement('span');
-            description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}`;
+            const diagnostic = job.reason && job.reason !== reason ? job.reason : '';
+            description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}${diagnostic ? ` · ${diagnostic}` : ''}`;
             const resume = document.createElement('button');
             resume.type = 'button';
             resume.className = 'resume-video-export';
@@ -2294,7 +2307,7 @@ async function runVideoExport(plan, resumableJob = null) {
                             reason: String(error.message || error).slice(0, 500)
                         })
                     });
-                } catch (pauseError) { stopError = pauseError; }
+                } catch (pauseError) { stopError = await resolveVideoPauseError(activeVideoExportJob, pauseError); }
             }
             activeVideoExportJob = null;
         }

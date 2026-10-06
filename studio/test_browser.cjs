@@ -159,6 +159,17 @@ finally:
    assert.doesNotMatch(await viewer.locator('#video-export-status').innerText(),/Export paused/);
    const failedPause=viewer.locator('.video-resume-job').filter({hasText:'browser-failed-pause'});await failedPause.waitFor();
    await failedPause.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await failedPause.waitFor({state:'detached'});
+   await viewer.route('**/api/video/frame?*',async route=>{
+    const query=new URL(route.request().url()).searchParams;
+    const paused=await context.request.post(`http://localhost:${port}/api/video/pause`,{data:{id:query.get('id'),lease:query.get('lease'),reason:'libx264 diagnostic: injected scratch full'}});
+    assert(paused.ok());await route.fulfill({status:400,json:{error:'Checkpoint encoder failed'}});
+   },{times:1});
+   await viewer.locator('#video-export-name').fill('browser-encoder-failure');await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Export paused'));
+   assert.doesNotMatch(await viewer.locator('#video-export-status').innerText(),/Could not pause|lease is no longer active/);
+   const encoderFailure=viewer.locator('.video-resume-job').filter({hasText:'browser-encoder-failure'});await encoderFailure.waitFor();
+   assert.match(await encoderFailure.innerText(),/libx264 diagnostic: injected scratch full/);
+   await encoderFailure.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await encoderFailure.waitFor({state:'detached'});
    const pausedId=await viewer.evaluate(async()=>{
     const dialog=document.querySelector('#video-export-dialog'),signature=dialog.dataset.renderSignature;
     const request={name:'browser-resume',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
