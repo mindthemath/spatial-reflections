@@ -4,7 +4,7 @@ const source=fs.readFileSync(path.join(__dirname,'..','tesseract.js'),'utf8');
 const helpers=source.slice(source.indexOf('function refreshVideoEnvironmentState()'),source.indexOf('function videoExportPlanFromRequest('));
 const signature=(environment='verified',shader='chrome')=>JSON.stringify({environment,shader});
 const elements=new Map();
-function element(){return {classList:{add(){},remove(){}},dataset:{},children:[],append(...items){this.children.push(...items);},appendChild(item){this.children.push(item);},replaceChildren(){this.children=[];},addEventListener(){}};}
+function element(){return {classList:{add(){},remove(){}},dataset:{},children:[],append(...items){this.children.push(...items);},appendChild(item){this.children.push(item);},replaceChildren(){this.children=[];},listeners:{},addEventListener(type,handler){this.listeners[type]=handler;}};}
 const section=element(),list=element();elements.set('video-resume-jobs',section);elements.set('video-resume-job-list',list);
 let summaries=0,requests=[];
 const context=vm.createContext({
@@ -108,6 +108,20 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  const unavailable=vm.runInContext('openVideoExportDialog()',context);
  requests[0].resolve({available:false,canManage:false,reason:'server unavailable'});await unavailable;
  assert.equal(requests.length,1);assert.equal(context.videoExportDialog.dataset.statusMode,'error');
+ requests=[];
+ context.videoExportDialog.dataset.serverAvailable='yes';
+ const protectedList=vm.runInContext('loadVideoResumeJobs()',context);
+ requests[0].resolve({jobs:[job(signature('verified','rough'))]});await protectedList;
+ const protectedCard=list.children[0];const protectedButtons=protectedCard.children.filter(item=>item.listeners?.click);
+ assert.equal(protectedButtons.length,3);
+ const beforeRestore=restored;context.videoExportRunning=true;
+ for(const button of protectedButtons)await button.listeners.click();
+ assert.equal(restored,beforeRestore);assert.equal(requests.length,1);
+ context.videoExportRunning=false;
+ let confirmResolve;context.confirmAction=()=>new Promise(resolve=>{confirmResolve=resolve;});
+ const pendingDiscard=protectedButtons.find(button=>button.className==='discard-video-export').listeners.click();
+ context.videoExportRunning=true;confirmResolve(true);await pendingDiscard;
+ assert.equal(requests.length,1,'Confirmation opened before a run must not discard during it');context.videoExportRunning=false;
  let controls=[];
  context.videoControlApi=(url,options)=>{controls.push({url,body:JSON.parse(options.body)});return Promise.resolve({});};
  Object.assign(context,{activeVideoExportJob:{id:'known-job',lease:'nonce'},videoExportStopAction:'discard',videoExportStopPromise:null,videoExportStopJobId:null});

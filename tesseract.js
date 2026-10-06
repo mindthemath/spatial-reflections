@@ -1751,6 +1751,7 @@ async function loadVideoResumeJobs() {
             resume.textContent = fullyRendered ? 'Finalize' : 'Resume';
             resume.disabled = !available;
             resume.addEventListener('click', () => {
+                if (videoExportRunning) return;
                 const plan = videoExportPlanFromRequest(request);
                 if (plan) runVideoExport(plan, job);
             });
@@ -1759,12 +1760,13 @@ async function loadVideoResumeJobs() {
             discard.className = 'discard-video-export';
             discard.textContent = 'Discard';
             discard.addEventListener('click', async () => {
+                if (videoExportRunning) return;
                 const confirmed = await confirmAction({
                     title: 'DISCARD VIDEO EXPORT',
                     message: 'Delete this interrupted export and all of its checkpoints?',
                     confirmLabel: 'Discard'
                 });
-                if (!confirmed) return;
+                if (!confirmed || videoExportRunning) return;
                 await videoControlApi('/api/video/cancel', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id: job.id })
@@ -1778,6 +1780,7 @@ async function loadVideoResumeJobs() {
                 restore.className = 'restore-video-export';
                 restore.textContent = 'Restore export settings';
                 restore.addEventListener('click', async () => {
+                    if (videoExportRunning) return;
                     restoreVideoRenderSettings(request.viewerState);
                     const restoredFrame = timelineFrame;
                     camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
@@ -2146,6 +2149,7 @@ function videoExportFailureMessage(error, stopError, stopAction, hadJob, finishA
 async function runVideoExport(plan, resumableJob = null) {
     if (videoExportRunning) return;
     videoExportRunning = true;
+    document.getElementById('video-resume-jobs').inert = true;
     cancelVideoExportRequested = false;
     videoExportAbort = new AbortController();
     videoExportStopAction = null;
@@ -2318,6 +2322,7 @@ async function runVideoExport(plan, resumableJob = null) {
         animationPaused = originalPaused;
         releaseEnvironmentLock?.();
         videoExportRunning = false;
+        document.getElementById('video-resume-jobs').inert = false;
         cancelVideoExportRequested = false;
         videoExportAbort = null;
         videoCaptureSurface = null;

@@ -134,11 +134,13 @@ finally:
    await viewer.locator('#video-export-duration').fill('2');
    await viewer.locator('#confirm-video-export').click();
    await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Rendering + encoding'));
+   assert.equal(await viewer.locator('#video-resume-jobs').evaluate(section=>section.inert),true);
    await viewer.locator('#cancel-video-export').click();
    await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('paused'));
    assert(pauseAcknowledged,'pause UI completed before the server acknowledged it');
    const pausedCard=viewer.locator('.video-resume-job').filter({hasText:'browser-pause'});
    await pausedCard.waitFor();assert(!(await pausedCard.locator('.resume-video-export').isDisabled()));
+   assert.equal(await viewer.locator('#video-resume-jobs').evaluate(section=>section.inert),false);
    await pausedCard.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await pausedCard.waitFor({state:'detached'});
 
    await viewer.locator('#video-export-name').fill('browser-cancel');
