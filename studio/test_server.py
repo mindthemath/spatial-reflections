@@ -464,6 +464,37 @@ class StudioAPITest(unittest.TestCase):
         finally:
             server.FFMPEG_ENCODER_ERROR = previous
 
+    def test_background_recovery_keeps_live_upload_and_pause_usable(self):
+        entered, release = threading.Event(), threading.Event()
+        class FakeEncoder:
+            def __init__(self,command,**_kwargs):
+                self.stdin=io.BytesIO();self.output=Path(command[-1]);self.returncode=None
+            def poll(self): return self.returncode
+            def wait(self,timeout=None):
+                self.output.write_bytes(b'checkpoint');self.returncode=0;return 0
+            def kill(self): self.returncode=-9
+        with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess,'Popen',FakeEncoder):
+            code,started=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1,'quality':'draft'})
+            self.assertEqual(code,201);store=server.video_store()
+            def scan():
+                entered.set();release.wait(3)
+                return store._empty_recovery_report()
+            with mock.patch.object(store,'_recover_stale_encoders',side_effect=scan):
+                worker=threading.Thread(target=store.recover_stale_encoders);worker.start()
+                self.assertTrue(entered.wait(2))
+                try:
+                    frame=server.PNG_SIGNATURE+(13).to_bytes(4,'big')+b'IHDR'+(64).to_bytes(4,'big')+(64).to_bytes(4,'big')
+                    code,_=self.raw_request('POST',f"/api/video/frame?id={started['id']}&frame=0&lease={started['lease']}",frame,{'Content-Type':'image/png'})
+                    self.assertEqual(code,201)
+                    code,_=self.request('POST','/api/video/pause',{'id':started['id'],'lease':started['lease']})
+                    self.assertEqual(code,200)
+                    code,error=self.request('POST','/api/video/resume',{'id':started['id']})
+                    self.assertEqual(code,400);self.assertIn('recovery is still running',error['error'])
+                finally:
+                    release.set();worker.join(2)
+                self.assertFalse(worker.is_alive())
+
     def test_video_mutations_wait_for_startup_recovery(self):
         with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'):
             store = server.video_store();store.recovery_running = True
@@ -656,6 +687,18 @@ class StudioAPITest(unittest.TestCase):
 
 
 class ServerStartupTest(unittest.TestCase):
+    def test_recovery_gate_allows_only_a_known_live_owner_lease(self):
+        store=mock.Mock(recovery_running=True,lock=threading.RLock(),leases={},owners={},last_recovery={'indexFailed':False})
+        with self.assertRaisesRegex(ValueError,'recovery is still running'):
+            server.check_video_recovery(store,'job','old-nonce')
+        store.leases['job']={'token':'nonce'};store.owners['job']=mock.Mock()
+        server.check_video_recovery(store,'job','nonce')
+        with self.assertRaises(ValueError): server.check_video_recovery(store,'job','old-nonce')
+        store.recovery_running=False;store.last_recovery['indexFailed']=True
+        server.check_video_recovery(store,'job','nonce')
+        with self.assertRaisesRegex(ValueError,'durable job index'):
+            server.check_video_recovery(store)
+
     def test_missing_encoder_still_claims_ownership_and_starts_recovery(self):
         store = mock.Mock()
         with mock.patch.object(server, 'video_store', return_value=store), \

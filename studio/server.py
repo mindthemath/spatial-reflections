@@ -249,6 +249,22 @@ def video_capabilities():
             'reason': reason}
 
 
+def check_video_recovery(store, job_id=None, lease=None):
+    reason = ('Encoder recovery is still running; retry preflight before modifying jobs'
+              if store.recovery_running else
+              'Encoder startup recovery could not inspect the durable job index'
+              if store.last_recovery['indexFailed'] else None)
+    if not reason:
+        return
+    # A background repair pass skips live owner locks. Do not interrupt healthy
+    # uploads or their pause requests; an old tab after restart has no valid lease.
+    with store.lock:
+        active = store.leases.get(job_id)
+        if lease and active and active['token'] == lease and job_id in store.owners:
+            return
+    raise ValueError(reason)
+
+
 def start_video_recovery():
     # Ownership and crash recovery are required even when this ffmpeg cannot
     # encode new H.264 frames. Existing jobs can still be managed/stream-copied.
@@ -471,12 +487,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.close_connection = True
             return self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
         try:
-            if route.path.startswith('/api/video/'):
+            if route.path.startswith('/api/video/') and route.path != '/api/video/pause':
                 store = video_store()
-                if store.recovery_running:
-                    raise ValueError('Encoder startup recovery is still running; retry preflight before modifying jobs')
-                if store.last_recovery['indexFailed']:
-                    raise ValueError('Encoder startup recovery could not inspect the durable job index')
+                query = parse_qs(route.query) if route.path in ('/api/video/frame', '/api/video/poster') else {}
+                check_video_recovery(store, query.get('id', [None])[0], query.get('lease', [None])[0])
             if route.path == '/api/video/poster':
                 query = parse_qs(route.query)
                 job_id = query.get('id', [''])[0]
@@ -594,6 +608,7 @@ class Handler(SimpleHTTPRequestHandler):
                 video_store().discard(request.get('id'))
                 return self.send_json(200, {'cancelled': True})
             if route.path == '/api/video/pause':
+                check_video_recovery(video_store(), request.get('id'), request.get('lease'))
                 reason = request.get('reason')
                 if reason is not None:
                     if not isinstance(reason, str) or len(reason) > 500:
