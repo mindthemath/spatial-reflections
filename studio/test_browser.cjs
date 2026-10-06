@@ -207,6 +207,7 @@ finally:
    await mismatch.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await mismatch.waitFor({state:'detached'});
    const restorableId=await viewer.evaluate(async()=>{
     const dialog=document.querySelector('#video-export-dialog'),signature=dialog.dataset.renderSignature,viewerState=JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1'));
+    viewerState.panelExpanded=false;viewerState.videoTimingExpanded=false;viewerState.animationPaused=true;
     const request={name:'restore-settings',width:1280,height:720,fps:viewerState.exportFps,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState};
     const started=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}).then(r=>r.json());
     await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});return started.id;
@@ -216,6 +217,9 @@ finally:
    await viewer.locator('#video-export-resolution').selectOption('1920x1080');await viewer.locator('#video-export-quality').selectOption('high');
    await restorable.locator('.restore-video-export').click();await viewer.waitForFunction(id=>{const button=document.querySelector(`.video-resume-job[data-job-id="${id}"] .resume-video-export`);return button&&!button.disabled;},restorableId);assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
    assert.equal(await viewer.locator('#video-export-resolution').inputValue(),'1280x720');assert.equal(await viewer.locator('#video-export-quality').inputValue(),'draft');
+   assert.equal(await viewer.locator('#controlPanelContent').evaluate(element=>element.hidden),false);
+   const restoredPreferences=await viewer.evaluate(()=>JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1')));
+   assert.equal(restoredPreferences.panelExpanded,true);assert.equal(restoredPreferences.videoTimingExpanded,true);
    await restorable.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await restorable.waitFor({state:'detached'});
   }
   if(await viewer.locator('#video-export-dialog').isVisible())await viewer.locator('#close-video-export').click();

@@ -27,6 +27,8 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  assert.equal(changed.available,false);assert.equal(changed.restore,false);assert.match(changed.reason,/original skybox/);
  assert.equal(compatibility(job(JSON.stringify({shader:'chrome'}),{nextFrame:30})).available,true,'Legacy finalization needs no new frames');
  assert.equal(compatibility(job(signature(),{state:'active'})).restore,false);
+ const finalizing=compatibility(job(signature(),{state:'finalizing',nextFrame:30}));
+ assert.equal(finalizing.available,false);assert.equal(finalizing.restore,false);assert.match(finalizing.reason,/being finalized/);
  assert.equal(compatibility(job(),signature(null)).available,false);
  context.job=job();context.current=signature();
  const noEncoder=vm.runInContext("videoResumeCompatibility(job,current,'/',false)",context);
@@ -40,6 +42,14 @@ function compatibility(value,current=signature()){context.job=value;context.curr
   exportFpsSelect:null,videoExportWidth:1280,videoExportHeight:720,videoExportQuality:'high'});
  vm.runInContext(source.slice(source.indexOf('function syncViewerControlsFromState()'),source.indexOf('const COEFFICIENT_SCALE')),context);
  vm.runInContext('syncViewerControlsFromState()',context);
+ let restored;
+ context.applyViewerSettings=settings=>{restored=settings;};
+ vm.runInContext(source.slice(source.indexOf('function restoreVideoRenderSettings('),source.indexOf('function syncViewerControlsFromState()')),context);
+ context.saved={shader:'chrome',videoExportWidth:1280,panelExpanded:false,videoTimingExpanded:false,animationPaused:true};
+ vm.runInContext('restoreVideoRenderSettings(saved)',context);
+ assert.equal(restored.shader,'chrome');assert.equal(restored.videoExportWidth,1280);
+ for(const key of ['panelExpanded','videoTimingExpanded','animationPaused'])assert.equal(key in restored,false);
+ assert.equal(context.saved.panelExpanded,false,'Stored provenance must not be mutated');
  assert.equal(elements.get('video-export-resolution').value,'1280x720');assert.equal(elements.get('video-export-quality').value,'high');
  vm.runInContext(source.slice(source.indexOf('function videoExportFailureMessage('),source.indexOf('async function runVideoExport(')),context);
  context.error=new Error('frame failure');context.stopError=new Error('encoder could not stop');

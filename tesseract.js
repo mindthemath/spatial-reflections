@@ -1314,6 +1314,13 @@ function updateMaterials() {
     });
 }
 
+function restoreVideoRenderSettings(saved) {
+    // Restoring render settings should not collapse the current controls or
+    // change the user's preview play/pause preference.
+    const {panelExpanded, videoTimingExpanded, animationPaused, ...renderSettings} = saved || {};
+    applyViewerSettings(renderSettings);
+}
+
 function syncViewerControlsFromState() {
     if (motionStepSlider) motionStepSlider.value = String(rotationSpeed * 1000);
     if (motionStepLabel) motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
@@ -1704,12 +1711,13 @@ function videoResumeCompatibility(job, currentSignature, currentSource, encoding
     let reason = '';
     if (job.state === 'unavailable') reason = job.reason;
     else if (job.state === 'active') reason = 'The server still marks this export active; discard it or retry after recovery.';
+    else if (job.state === 'finalizing') reason = 'This export is being finalized in another request. Wait for it to complete.';
     else if (!fullyRendered && !encodingAvailable) reason = 'H.264 encoding is unavailable; discard this job or restore the encoder to render its remaining frames.';
     else if (!fullyRendered && !verified) reason = 'This export predates verified skybox identity. Resume with the previous viewer runtime, or start a new export; settings restoration cannot verify its original environment.';
     else if (!fullyRendered && !sourceMatches) reason = 'Open the original viewer URL and load its saved skybox before resuming.';
     else if (!fullyRendered && !environmentMatches) reason = 'Load the original skybox and wait for content verification before restoring settings or resuming.';
     else if (!fullyRendered && !settingsMatch) reason = 'Current render settings do not match.';
-    const usable = !['unavailable', 'active'].includes(job.state);
+    const usable = !['unavailable', 'active', 'finalizing'].includes(job.state);
     return {
         available: usable && (fullyRendered || (encodingAvailable && verified && sourceMatches && settingsMatch)),
         restore: usable && encodingAvailable && !fullyRendered && sourceMatches && environmentMatches && !settingsMatch && Boolean(request.viewerState),
@@ -1770,7 +1778,7 @@ async function loadVideoResumeJobs() {
                 restore.className = 'restore-video-export';
                 restore.textContent = 'Restore export settings';
                 restore.addEventListener('click', async () => {
-                    applyViewerSettings(request.viewerState);
+                    restoreVideoRenderSettings(request.viewerState);
                     const restoredFrame = timelineFrame;
                     camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
                     controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
