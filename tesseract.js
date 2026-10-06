@@ -361,7 +361,7 @@ function readMetadataFromPNG(file) {
                         
                         // Reconstruct string from pixel data
                         let dataString = "";
-                        for (let i = 1; i < 500; i++) { // Limit to reasonable number of pixels
+                        for (let i = 1; i < canvas.width; i++) { // Read the complete metadata row
                             const pixelIndex = i * 4;
                             if (pixelIndex >= pixelData.length) break;
                             
@@ -514,6 +514,16 @@ function applyViewSettings(metadata) {
     console.log("Applying view settings from metadata:", metadata);
     
     try {
+        if (metadata.render) {
+            const { camera: renderCamera, ...renderSettings } = metadata.render;
+            restoreVideoRenderSettings({
+                ...renderSettings,
+                exportFps: metadata.render.fps,
+                videoExportWidth: metadata.video?.width,
+                videoExportHeight: metadata.video?.height,
+                videoExportQuality: metadata.video?.quality
+            });
+        }
         // Set camera position
         if (metadata.camera && metadata.camera.position) {
             camera.position.set(
@@ -2122,6 +2132,9 @@ function embedMetadataInPngDataUrl(imageData, metadata = {}) {
                     pixelData[pixelIndex + 2] = 0;
                     pixelData[pixelIndex + 3] = 255;
                 }
+                // Stop the reader before it reaches ordinary image pixels.
+                const terminator = (fullData.length + 1) * 4;
+                if (terminator < pixelData.length) pixelData[terminator] = 0;
                 ctx.putImageData(imgData, 0, 0);
                 resolve(canvas.toDataURL('image/png'));
             } catch (error) {
@@ -2266,8 +2279,8 @@ async function runVideoExport(plan, resumableJob = null) {
             camera.aspect = plan.width / plan.height;
             camera.updateProjectionMatrix();
         }
-        if (firstFrame === 0 && !simpleMode) {
-            status.textContent = 'Saving resume frame…';
+        if (firstFrame === 0) {
+            status.textContent = 'Saving reproducibility frame…';
             await saveVideoExportPoster(plan, activeVideoExportJob);
         }
         for (let frame = firstFrame; frame < plan.frames; frame++) {

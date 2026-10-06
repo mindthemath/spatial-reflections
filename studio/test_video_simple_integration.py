@@ -20,8 +20,14 @@ class SimpleVideoIntegrationTest(unittest.TestCase):
                 try:
                     job=backend.start({'name':'simple-real','width':64,'height':64,'fps':24,
                                        'frames':3,'format':container,'quality':'draft','bitRate':100000})
+                    poster=solid_png(64,64,0)
+                    backend.write_poster(job['id'],poster,job['lease'])
                     for frame in range(3):backend.write_frame(job['id'],frame,solid_png(64,64,frame*60),job['lease'])
                     result=backend.finish(job['id']);path=root/result['url'].lstrip('/')
+                    self.assertEqual(path.with_suffix('.png').read_bytes(),poster)
+                    metadata=json.loads(path.with_suffix('.json').read_text())
+                    self.assertEqual(metadata['poster']['file'],path.with_suffix('.png').name)
+                    self.assertEqual(metadata['frames'],3);self.assertEqual(metadata['fps'],24)
                     probe=subprocess.run([shutil.which('ffprobe'),'-v','error','-count_frames',
                         '-select_streams','v:0','-show_entries',
                         'stream=nb_read_frames,color_range,color_space,color_transfer,color_primaries:format=duration',

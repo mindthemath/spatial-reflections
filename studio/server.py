@@ -537,8 +537,6 @@ class Handler(SimpleHTTPRequestHandler):
                 query = parse_qs(route.query) if route.path in ('/api/video/frame', '/api/video/poster') else {}
                 check_video_recovery(store, query.get('id', [None])[0], query.get('lease', [None])[0])
             if route.path == '/api/video/poster':
-                if VIDEO_MODE == 'simple':
-                    raise ValueError('Simple mode does not save resume frames')
                 query = parse_qs(route.query)
                 job_id = query.get('id', [''])[0]
                 lease = query.get('lease', [''])[0]

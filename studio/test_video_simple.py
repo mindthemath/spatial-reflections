@@ -1,5 +1,6 @@
 """Mocked one-shot backend tests: no browser/network/real encoder."""
 import io
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -46,13 +47,24 @@ class SimpleVideoTest(unittest.TestCase):
     def test_one_process_no_checkpoint_store_and_atomic_publish(self):
         sentinel=self.root/'videos'/'.video-jobs.json'
         sentinel.parent.mkdir();sentinel.write_bytes(b'durable store must be untouched')
-        job=self.backend.start(request())
+        saved_request=request(startFrame=17, viewerState={'shader':'chrome'},
+                              renderSignature='verified-render', sourceUrl='/?skybox=exports/test')
+        job=self.backend.start(saved_request)
+        poster=b'png-with-embedded-view-settings'
+        self.backend.write_poster(job['id'],poster,job['lease'])
         for frame in range(2):self.backend.write_frame(job['id'],frame,b'png',job['lease'])
         process=self.backend.jobs[job['id']]['process']
         self.assertEqual(process.stdin.getvalue(),b'pngpng')
         self.assertFalse(list((self.root/'videos').glob('*.mp4')))
         result=self.backend.finish(job['id'])
-        self.assertEqual((self.root/result['url'].lstrip('/')).read_bytes(),b'movie')
+        output=self.root/result['url'].lstrip('/')
+        self.assertEqual(output.read_bytes(),b'movie')
+        self.assertEqual(output.with_suffix('.png').read_bytes(),poster)
+        metadata=json.loads(output.with_suffix('.json').read_text())
+        for key,value in saved_request.items():self.assertEqual(metadata[key],value)
+        self.assertEqual(metadata['poster']['file'],output.with_suffix('.png').name)
+        self.assertEqual(metadata['videoMode'],'simple');self.assertEqual(metadata['bytes'],5)
+        self.assertNotIn('segments',metadata)
         self.assertEqual(sentinel.read_bytes(),b'durable store must be untouched')
         self.assertFalse((self.root/'videos'/'.checkpoints').exists())
         self.assertFalse(list((self.root/'videos').glob('.simple-*')))
@@ -64,12 +76,15 @@ class SimpleVideoTest(unittest.TestCase):
     def test_cancel_discards_partial_and_pause_is_cancel(self):
         for action in ('discard','pause'):
             job=self.backend.start(request())
+            self.backend.write_poster(job['id'],b'poster',job['lease'])
             self.backend.write_frame(job['id'],0,b'png',job['lease'])
             process=self.backend.jobs[job['id']]['process']
             getattr(self.backend,action)(job['id'])
             self.assertEqual(process.returncode,-9)
             self.assertEqual(self.backend.jobs,{})
             self.assertFalse(list((self.root/'videos').glob('.simple-*')))
+            self.assertFalse(list((self.root/'videos').glob('*.png')))
+            self.assertFalse(list((self.root/'videos').glob('*.json')))
         self.assertEqual(self.backend.list_jobs(),[])
         with self.assertRaisesRegex(ValueError,'no resume'):self.backend.resume('anything')
 
@@ -110,6 +125,26 @@ class SimpleVideoTest(unittest.TestCase):
         self.backend.write_frame(job['id'],0,b'png',job['lease'])
         with self.assertRaises(ValueError):self.backend.finish(job['id'])
         self.assertEqual(destination.read_bytes(),b'original')
+
+    def test_existing_sidecar_is_not_overwritten_and_own_links_roll_back(self):
+        for suffix in ('.png','.json','.mp4'):
+            with self.subTest(suffix=suffix):
+                job=self.backend.start(request(frames=1))
+                self.backend.write_poster(job['id'],b'poster',job['lease'])
+                destination=(self.root/'videos'/job['filename']).with_suffix(suffix)
+                destination.write_bytes(b'original')
+                self.backend.write_frame(job['id'],0,b'png',job['lease'])
+                with self.assertRaises(ValueError):self.backend.finish(job['id'])
+                self.assertEqual(destination.read_bytes(),b'original')
+                for other in ('.png','.json','.mp4'):
+                    if other!=suffix:self.assertFalse(destination.with_suffix(other).exists())
+                destination.unlink()
+
+    def test_poster_requires_current_lease_and_precedes_frames(self):
+        job=self.backend.start(request())
+        with self.assertRaises(ValueError):self.backend.write_poster(job['id'],b'poster','wrong')
+        self.backend.write_frame(job['id'],0,b'png',job['lease'])
+        with self.assertRaises(ValueError):self.backend.write_poster(job['id'],b'poster',job['lease'])
 
     def test_one_active_export_and_shared_project_lock(self):
         job=self.backend.start(request())

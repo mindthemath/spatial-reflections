@@ -1,5 +1,6 @@
 """One-shot video encoding. No checkpoint store, manifests, hashes or resume."""
 import fcntl
+import json
 import os
 from pathlib import Path
 import re
@@ -62,6 +63,7 @@ class SimpleVideoBackend:
             directory = Path(tempfile.mkdtemp(prefix=f'.simple-{job_id}-', dir=self.videos))
             job = {'id': job_id, 'lease': uuid.uuid4().hex, 'request': dict(request),
                    'filename': filename, 'nextFrame': 0, 'state': 'active',
+                   'createdAt': datetime.now(timezone.utc).isoformat(),
                    'process': None, 'directory': directory, 'lock': threading.RLock(),
                    'pending': directory / filename,
                    'stderr': directory / 'encoder.stderr',
@@ -123,6 +125,23 @@ class SimpleVideoBackend:
         except OSError:
             return ''
 
+    def write_poster(self, job_id, png, lease):
+        job = self._job(job_id, lease)
+        with job['lock']:
+            if job['state'] != 'active' or job['nextFrame'] != 0:
+                raise ValueError('Starting frame can only be saved before rendering starts')
+            filename = Path(job['filename']).with_suffix('.png').name
+            path = job['directory'] / filename
+            path.write_bytes(png)
+            with self.lock:
+                if job['state'] != 'active':
+                    raise ValueError('Simple export was cancelled')
+                job['poster'] = {'file': filename, 'bytes': len(png),
+                                 'width': job['request']['width'], 'height': job['request']['height']}
+                job['lastActivity'] = self.clock()
+            return {'url': f'/videos/{filename}', 'filename': filename,
+                    **{key: value for key, value in job['poster'].items() if key != 'file'}}
+
     def write_frame(self, job_id, frame_index, data, lease=None):
         job = self._job(job_id, lease)
         with job['lock']:
@@ -163,6 +182,7 @@ class SimpleVideoBackend:
                 if job['state'] != 'active' or job['nextFrame'] != job['request']['frames']:
                     raise ValueError('Simple export has not received all frames or is stopping')
                 job['state'] = 'finalizing'
+            published = []
             try:
                 process = job['process']
                 process.stdin.close()
@@ -171,15 +191,32 @@ class SimpleVideoBackend:
                 if not job['pending'].is_file() or not job['pending'].stat().st_size:
                     raise ValueError('Encoder produced no output')
                 size = job['pending'].stat().st_size
+                metadata_path = job['pending'].with_suffix('.json')
+                request_metadata = dict(job['request'])
+                request_metadata.pop('scratchPath', None)
+                metadata = {**request_metadata, 'schemaVersion': 2, 'videoMode': 'simple',
+                            'createdAt': job['createdAt'],
+                            'completedAt': datetime.now(timezone.utc).isoformat(),
+                            'file': job['filename'], 'bytes': size, 'resumeCount': 0,
+                            **({'poster': job['poster']} if 'poster' in job else {})}
+                metadata_path.write_text(json.dumps(metadata, indent=2), encoding='utf-8')
+                artifacts = ([job['directory'] / job['poster']['file']] if 'poster' in job else [])
+                artifacts += [metadata_path, job['pending']]
                 with self.lock:
                     if job['state'] != 'finalizing':
                         raise ValueError('Simple export was cancelled before publishing')
-                    # Same-filesystem exclusive publication, never overwrite an existing clip.
-                    os.link(job['pending'], self.videos / job['filename'])
+                    # Publish the movie last, with its reproducibility artifacts
+                    # already present. Roll back only our own links on failure.
+                    for source in artifacts:
+                        destination = self.videos / source.name
+                        os.link(source, destination)
+                        published.append(destination)
                     job['state'] = 'complete'
                 self._remove(job)
                 return {'filename': job['filename'], 'url': f"/videos/{job['filename']}", 'bytes': size}
             except (OSError, ValueError, subprocess.SubprocessError) as error:
+                for path in reversed(published):
+                    path.unlink(missing_ok=True)
                 self.discard(job_id)
                 raise ValueError(f'Simple finalization failed: {error}; restart from frame 0') from error
 

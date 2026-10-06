@@ -122,7 +122,10 @@ python3 studio/server.py --port 1313 --video-mode simple
 ```
 
 The dialog identifies **Simple mode**: deterministic PNG capture, one H.264
-encoder, BT.709 color, and publication only after successful encoding. Cancel,
+encoder, BT.709 color, and publication only after successful encoding. The movie
+is saved with a same-named JSON settings sidecar and a metadata-bearing PNG of
+the clip's starting frame. Drag that PNG onto the viewer to restore its view,
+timing, and render settings (use the original skybox/environment). Cancel,
 leaving the page, or encoder failure discards partial progress; restart from
 frame 0. There are no checkpoints, resume, custom scratch folders, or startup
 recovery. Existing resumable jobs remain untouched and hidden; restart with
