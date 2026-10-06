@@ -1118,6 +1118,63 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
         self.assertEqual(foreign.owners,{})
 
+    def test_resume_refreshes_activity_after_slow_verification(self):
+        now=[0.0];self.store.clock=lambda:now[0]
+        job=self.ready_job();original=self.store._verify_segments
+        def verify(*args,**kwargs):
+            now[0]+=600
+            self.assertEqual(self.store.pause_stale_jobs(),[],'Timer interrupted a reserved resume')
+            return original(*args,**kwargs)
+        with mock.patch.object(self.store,'_verify_segments',side_effect=verify):
+            self.store.resume(job['id'])
+        self.assertEqual(self.store.leases[job['id']]['lastActivity'],600)
+        self.assertEqual(self.store.pause_stale_jobs(),[])
+        self.store.pause(job['id'])
+
+    def test_idle_timer_does_not_wait_for_or_cancel_slow_finalization(self):
+        now=[0.0];self.store.clock=lambda:now[0]
+        job=self.ready_job();self.store.resume(job['id'])
+        verifying,release=threading.Event(),threading.Event()
+        original=self.store._verify_segments;errors,timed=[],[]
+        def verify(*args,**kwargs):
+            original(*args,**kwargs);now[0]+=600;verifying.set();release.wait(5)
+        def concat(command,**_kwargs):
+            Path(command[-1]).write_bytes(b'joined');return mock.Mock(returncode=0)
+        def finish():
+            try:self.store.finish(job['id'])
+            except Exception as error:errors.append(error)
+        self.store.run=concat
+        with mock.patch.object(self.store,'_verify_segments',side_effect=verify):
+            worker=threading.Thread(target=finish);worker.start()
+            timer=threading.Thread(target=lambda:timed.append(self.store.pause_stale_jobs()))
+            try:
+                self.assertTrue(verifying.wait(2));timer.start();timer.join(.5)
+                self.assertFalse(timer.is_alive(),'Idle cleanup blocked the accept loop on a finalizer')
+                self.assertEqual(timed,[[]]);self.assertNotIn(job['id'],self.store.stopping)
+                self.assertIn(job['id'],self.store.leases)
+            finally:
+                release.set();worker.join(2)
+                if timer.ident is not None:timer.join(2)
+        self.assertEqual(errors,[]);self.assertFalse(worker.is_alive())
+        self.assertTrue(list((self.root/'videos').glob('*.mp4')))
+
+    def test_idle_pause_rechecks_transition_and_activity_after_candidate_collection(self):
+        now=[0.0];self.store.clock=lambda:now[0]
+        job=self.store.create(request());self.store.resume(job['id']);now[0]=600
+        original=self.store.pause
+        for race in ('finishing','stopping','activity'):
+            self.store.leases[job['id']]['lastActivity']=0
+            def pause(*args,**kwargs):
+                if race=='activity':self.store.leases[job['id']]['lastActivity']=600
+                else:getattr(self.store,race).add(job['id'])
+                try:return original(*args,**kwargs)
+                finally:
+                    if race!='activity':getattr(self.store,race).discard(job['id'])
+            with self.subTest(race=race),mock.patch.object(self.store,'pause',side_effect=pause):
+                self.assertEqual(self.store.pause_stale_jobs(),[])
+                self.assertIn(job['id'],self.store.leases)
+        self.store.pause(job['id'])
+
     def test_pause_serializes_with_an_exited_encoders_checkpoint_commit(self):
         partial,commit_release,pause_waiting=threading.Event(),threading.Event(),threading.Event()
         saves,errors=[],[]
