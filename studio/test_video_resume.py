@@ -1118,6 +1118,59 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
         self.assertEqual(foreign.owners,{})
 
+    def test_pause_serializes_with_an_exited_encoders_checkpoint_commit(self):
+        partial,commit_release,pause_waiting=threading.Event(),threading.Event(),threading.Event()
+        saves,errors=[],[]
+        class Encoder:
+            pid=23456
+            def __init__(self,command,**_kwargs):
+                self.stdin=io.BytesIO();self.pending=Path(command[-1]);self.returncode=None
+            def poll(self): return self.returncode
+            def wait(self,timeout=None):
+                self.pending.write_bytes(b'checkpoint');self.returncode=0;return 0
+            def kill(self): self.returncode=-9
+        class AuditedLock:
+            def __init__(self): self.lock=threading.RLock()
+            def __enter__(self):
+                if threading.current_thread().name=='checkpoint-pauser': pause_waiting.set()
+                return self.lock.__enter__()
+            def __exit__(self,*args): return self.lock.__exit__(*args)
+        self.store.popen=Encoder
+        job=self.store.create(request(frames=2,fps=2,checkpointSeconds=1))
+        lease=self.store.resume(job['id'])['lease'];self.store.write_frame(job['id'],0,b'png',lease)
+        audited=AuditedLock();self.store.job_locks[job['id']]=audited
+        original_save=self.store._save
+        def save(manifest,data):
+            saves.append((audited.lock._is_owned(),data['nextFrame'],sum(segment['frames'] for segment in data['segments'])))
+            return original_save(manifest,data)
+        def commit(job_id,runtime):
+            runtime['process'].stdin.close();runtime['process'].wait()
+            path=runtime['pending'].with_name('segment-000000.mkv');runtime['pending'].replace(path)
+            data=runtime['job'];data['segments'].append({'index':0,'firstFrame':0,'frames':2,'file':path.name,'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()})
+            # Model the real finalizer between appending a segment and updating
+            # nextFrame. The exited encoder must not permit an unlocked save here.
+            partial.set();commit_release.wait(5)
+            data['nextFrame']=2;data['state']='ready';self.store._save(runtime['manifest'],data)
+            with self.store.lock: self.store.active.pop(job_id,None)
+        self.store._save=save;self.store._finalize_segment=commit
+        def invoke(action):
+            try: action()
+            except Exception as error: errors.append(error)
+        writer=threading.Thread(target=lambda:invoke(lambda:self.store.write_frame(job['id'],1,b'png',lease)))
+        pauser=threading.Thread(name='checkpoint-pauser',target=lambda:invoke(lambda:self.store.pause(job['id'],lease=lease)))
+        writer.start()
+        try:
+            self.assertTrue(partial.wait(2));pauser.start();self.assertTrue(pause_waiting.wait(2))
+            self.assertEqual(saves,[],'Interrupt saved the partially updated checkpoint without its job lock')
+        finally:
+            commit_release.set();writer.join(2)
+            if pauser.ident is not None: pauser.join(2)
+        self.assertFalse(writer.is_alive());self.assertFalse(pauser.is_alive());self.assertEqual(errors,[])
+        self.assertTrue(all(owned and next_frame==frames for owned,next_frame,frames in saves))
+        persisted=json.loads(self.manifest(job).read_text());self.assertEqual(persisted['nextFrame'],2)
+        self.store._verify_segments(self.manifest(job),persisted,repair=True)
+        self.assertEqual(self.store.get(job['id'])['state'],'paused')
+
     def test_finish_cleanup_does_not_release_a_waiting_discards_new_owner(self):
         job=self.ready_job()
         concat_entered,concat_release=threading.Event(),threading.Event()

@@ -736,25 +736,29 @@ class VideoJobStore:
                     process.stdin.close()
                 except OSError:
                     pass
-            pending = runtime.get('pending')
-            if pending:
-                pending.unlink(missing_ok=True)
-            detail = self._consume_encoder_stderr(runtime)
-            runtime_job = runtime.get('job')
-            runtime_manifest = runtime.get('manifest')
-            if runtime_job and runtime_manifest:
-                runtime_job.pop('activeEncoder', None)
-                runtime_job['state'] = 'paused'
-                if 'stopFailureMessage' in runtime:
-                    runtime_job['error'] = runtime.pop('stopFailureMessage')
-                if detail:
-                    original = runtime_job.get('error')
-                    runtime_job['error'] = f'{original}: {detail}' if original else f'Checkpoint encoder diagnostic: {detail}'
-                try:
-                    self._save(runtime_manifest, runtime_job)
-                except (OSError, ValueError):
-                    return  # The serial transition retries; preflight also repairs.
-            failed = False
+            # Killing/closing first wakes a blocked pipe writer. Only then wait
+            # for its serial transition: it may be hashing/committing an exited
+            # encoder's checkpoint and mutating this same runtime job dictionary.
+            with self._job_lock(job_id):
+                pending = runtime.get('pending')
+                if pending:
+                    pending.unlink(missing_ok=True)
+                detail = self._consume_encoder_stderr(runtime)
+                runtime_job = runtime.get('job')
+                runtime_manifest = runtime.get('manifest')
+                if runtime_job and runtime_manifest:
+                    runtime_job.pop('activeEncoder', None)
+                    runtime_job['state'] = 'paused'
+                    if 'stopFailureMessage' in runtime:
+                        runtime_job['error'] = runtime.pop('stopFailureMessage')
+                    if detail:
+                        original = runtime_job.get('error')
+                        runtime_job['error'] = f'{original}: {detail}' if original else f'Checkpoint encoder diagnostic: {detail}'
+                    try:
+                        self._save(runtime_manifest, runtime_job)
+                    except (OSError, ValueError):
+                        return  # The serial transition retries; preflight also repairs.
+                failed = False
         finally:
             try:
                 self._consume_encoder_stderr(runtime, stopped=False)
