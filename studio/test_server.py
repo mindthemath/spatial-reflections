@@ -524,7 +524,7 @@ class StudioAPITest(unittest.TestCase):
             def wait(self,timeout=None): return self.returncode
         with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'), \
              mock.patch.object(server.subprocess,'Popen',Encoder):
-            code,started=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':2,'quality':'draft'})
+            code,started=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':2,'quality':'draft','sourceUrl':'/','renderSignature':'render-v1'})
             self.assertEqual(code,201)
             frame=server.PNG_SIGNATURE+(13).to_bytes(4,'big')+b'IHDR'+(64).to_bytes(4,'big')+(64).to_bytes(4,'big')
             code,_=self.raw_request('POST',f"/api/video/frame?id={started['id']}&frame=0&lease={started['lease']}",frame,{'Content-Type':'image/png'})
@@ -537,7 +537,7 @@ class StudioAPITest(unittest.TestCase):
             code,capabilities=self.request('GET','/api/video/capabilities')
             self.assertEqual(code,200);self.assertTrue(capabilities['available'])
             self.assertEqual(store.get(started['id'])['state'],'paused')
-            code,resumed=self.request('POST','/api/video/resume',{'id':started['id']})
+            code,resumed=self.request('POST','/api/video/resume',{'id':started['id'],'sourceUrl':'/','renderSignature':'render-v1'})
             self.assertEqual(code,200);self.assertTrue(resumed['lease'])
 
     def test_preflight_repairs_active_metadata_after_failed_idle_pause(self):
