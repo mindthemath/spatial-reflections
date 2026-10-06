@@ -57,6 +57,13 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  assert.match(failedPause,/frame failure/);assert.match(failedPause,/Could not pause/);assert.doesNotMatch(failedPause,/Export paused/);
  assert.match(vm.runInContext('videoExportFailureMessage(error,null,null,true)',context),/Export paused/);
  assert.equal(vm.runInContext('videoExportFailureMessage(error,null,null,false)',context),'frame failure');
+ context.stopError=new Error('Video export lease is no longer active');
+ const failedFinish=vm.runInContext('videoExportFailureMessage(error,stopError,null,true,true)',context);
+ assert.match(failedFinish,/Finalization failed; checkpoints retained/);assert.doesNotMatch(failedFinish,/Could not pause|Export paused/);
+ assert.match(vm.runInContext('videoExportFailureMessage(error,stopError,null,true,false)',context),/Could not pause/);
+ assert.match(vm.runInContext('videoExportFailureMessage(error,stopError,"discard",true,true)',context),/Could not cancel/);
+ context.stopError=new Error('scratch unavailable');
+ assert.match(vm.runInContext('videoExportFailureMessage(error,stopError,null,true,true)',context),/Could not pause.*scratch unavailable/);
  context.videoExportDialog.open=false;
  vm.runInContext('refreshVideoEnvironmentState()',context);
  assert.equal(requests.length,0);

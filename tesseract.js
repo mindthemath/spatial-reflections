@@ -2133,8 +2133,13 @@ async function saveVideoExportPoster(plan, job) {
     });
 }
 
-function videoExportFailureMessage(error, stopError, stopAction, hadJob) {
+function videoExportFailureMessage(error, stopError, stopAction, hadJob, finishAttempted = false) {
+    // Finish consumes its lease before concat. Its expected stale-lease response
+    // to our best-effort pause is not a second failure. Keep the pause attempt for
+    // network errors or early validation failures that still own a live lease.
+    if (finishAttempted && !stopAction && stopError?.message === 'Video export lease is no longer active') stopError = null;
     if (stopError) return `${error.message} Could not ${stopAction === 'discard' ? 'cancel' : 'pause'} the export: ${stopError.message}. Check the interrupted export below.`;
+    if (finishAttempted && !stopAction && hadJob) return `${error.message} Finalization failed; checkpoints retained. Check the interrupted export below.`;
     return hadJob ? `${error.message} Export paused and can be resumed.` : error.message;
 }
 
@@ -2176,6 +2181,7 @@ async function runVideoExport(plan, resumableJob = null) {
     let lastProgressUpdate = 0;
     let exportStartedAt = 0;
     let releaseEnvironmentLock = null;
+    let finishAttempted = false;
 
     try {
         const prepareCapture = () => {
@@ -2254,6 +2260,7 @@ async function runVideoExport(plan, resumableJob = null) {
         }
 
         status.textContent = `Finalizing ${plan.format.toUpperCase()}…`;
+        finishAttempted = true;
         const completed = await videoApi('/api/video/finish', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: activeVideoExportJob.id })
@@ -2297,7 +2304,7 @@ async function runVideoExport(plan, resumableJob = null) {
             status.classList.remove('error');
         } else {
             videoExportDialog.dataset.statusMode = 'error';
-            status.textContent = videoExportFailureMessage(error, stopError, videoExportStopAction, hadJob);
+            status.textContent = videoExportFailureMessage(error, stopError, videoExportStopAction, hadJob, finishAttempted);
             status.classList.add('error');
         }
     } finally {

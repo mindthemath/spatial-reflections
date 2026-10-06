@@ -193,6 +193,16 @@ finally:
    await finalizePage.locator('#open-video-export').click();
    const legacy=finalizePage.locator(`.video-resume-job[data-job-id="${legacyId}"]`);await legacy.waitFor();
    assert.equal(await legacy.locator('.restore-video-export').count(),0);assert.equal(await legacy.locator('.resume-video-export').innerText(),'Finalize');
+   await finalizePage.route('**/api/video/finish',async route=>{
+    const request=route.request().postDataJSON();
+    // Simulate a concat failure after the server consumed the rendering lease.
+    const paused=await finalizeContext.request.post(`http://localhost:${port}/api/video/pause`,{data:{id:request.id}});
+    assert(paused.ok());await route.fulfill({status:500,json:{error:'injected concat failure'}});
+   });
+   await legacy.locator('.resume-video-export').click();
+   await finalizePage.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Finalization failed; checkpoints retained'));
+   assert.doesNotMatch(await finalizePage.locator('#video-export-status').innerText(),/Could not pause|lease is no longer active|Export paused/);
+   await finalizePage.unroute('**/api/video/finish');await legacy.waitFor();
    await legacy.locator('.resume-video-export').click();await finalizePage.waitForSelector('#video-export-result a',{timeout:30000});
    assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-legacy-finalize-')&&file.endsWith('.mp4')));
    await finalizeContext.close();
