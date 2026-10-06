@@ -471,6 +471,12 @@ class Handler(SimpleHTTPRequestHandler):
             self.close_connection = True
             return self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
         try:
+            if route.path.startswith('/api/video/'):
+                store = video_store()
+                if store.recovery_running:
+                    raise ValueError('Encoder startup recovery is still running; retry preflight before modifying jobs')
+                if store.last_recovery['indexFailed']:
+                    raise ValueError('Encoder startup recovery could not inspect the durable job index')
             if route.path == '/api/video/poster':
                 query = parse_qs(route.query)
                 job_id = query.get('id', [''])[0]

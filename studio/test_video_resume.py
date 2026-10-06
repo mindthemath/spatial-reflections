@@ -1010,6 +1010,32 @@ class VideoJobStoreTest(unittest.TestCase):
                 self.assertFalse(self.manifest(job).parent.exists())
                 self.assertEqual(store.list_jobs(), [])
 
+    def test_foreign_store_cannot_modify_owned_finalizer_files(self):
+        job = self.ready_job()
+        entered, release = threading.Event(), threading.Event()
+        errors, pending = [], []
+        def concat(command, **_kwargs):
+            path = Path(command[-1]);path.write_bytes(b'in progress');pending.append(path)
+            entered.set();release.wait(2)
+            path.write_bytes(b'joined')
+            return mock.Mock(returncode=0)
+        self.store.run = concat
+        def finish():
+            try: self.store.finish(job['id'])
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=finish);worker.start();self.assertTrue(entered.wait(2))
+        foreign = VideoJobStore(self.root,'/fake/ffmpeg')
+        try:
+            for operation in (foreign.resume, foreign.finish, foreign.discard):
+                with self.assertRaisesRegex(ValueError,'active in another server'):
+                    operation(job['id'])
+                self.assertTrue(pending[0].exists())
+                self.assertTrue(self.manifest(job).exists())
+        finally:
+            release.set();worker.join(2)
+        self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
+        self.assertEqual(foreign.owners,{})
+
     def test_second_resume_or_finish_cannot_cancel_or_unlock_a_finalizer(self):
         job = self.ready_job()
         entered, release = threading.Event(), threading.Event()

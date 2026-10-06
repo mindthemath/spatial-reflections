@@ -464,6 +464,22 @@ class StudioAPITest(unittest.TestCase):
         finally:
             server.FFMPEG_ENCODER_ERROR = previous
 
+    def test_video_mutations_wait_for_startup_recovery(self):
+        with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'):
+            store = server.video_store();store.recovery_running = True
+            try:
+                for route in ('start','resume','pause','cancel','finish'):
+                    code, error = self.request('POST',f'/api/video/{route}',{'id':'0'*32})
+                    self.assertEqual(code,400);self.assertIn('recovery is still running',error['error'])
+                    self.assertIsNone(self.connection.sock)
+                code,error = self.raw_request('POST','/api/video/frame',PNG,{'Content-Type':'image/png'})
+                self.assertEqual(code,400);self.assertIn('recovery is still running',error['error'])
+            finally:
+                store.recovery_running = False
+            store.last_recovery['indexFailed'] = True
+            code,error = self.request('POST','/api/video/resume',{'id':'0'*32})
+            self.assertEqual(code,400);self.assertIn('durable job index',error['error'])
+
     def test_preflight_repairs_active_metadata_after_failed_idle_pause(self):
         with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
             code, started = self.request('POST', '/api/video/start', {

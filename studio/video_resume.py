@@ -653,7 +653,6 @@ class VideoJobStore:
         with self._job_lock(job_id):
             self._release_idle_owner(job_id)
             manifest, job = self._load(job_id)
-            self._remove_pending_output(job_id)
             if job.get('activeEncoder'):
                 raise ValueError(
                     'Video encoder recovery is incomplete; retry preflight before resuming'
@@ -665,6 +664,7 @@ class VideoJobStore:
                     if job_id in self.leases:
                         raise ValueError('Video export is already active in another browser')
                     self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
+                self._remove_pending_output(job_id)
                 self._verify_segments(manifest, job, repair=True)
                 if job['nextFrame'] < job['request']['frames'] and encoder_error:
                     raise ValueError(encoder_error)
@@ -1106,6 +1106,12 @@ class VideoJobStore:
                     raise ValueError('Video export index entry is invalid')
                 manifest = self._validated_manifest_path(
                     job_id, entry.get('manifest', ''))
+                with self.lock:
+                    owns_job = job_id in self.owners
+                # Missing scratch storage has no reachable checkpoint tree to
+                # mutate. Preserve explicit removal of unavailable index entries.
+                if not owns_job and manifest.parent.is_dir():
+                    self._acquire_owner(manifest, job_id)
                 poster_name = entry.get('poster')
                 poster_path = None
                 if (isinstance(poster_name, str)
@@ -1168,6 +1174,10 @@ class VideoJobStore:
                 if runtime:
                     raise ValueError('Video export still has an active checkpoint')
             manifest, job = self._load(job_id)
+            with self.lock:
+                owns_job = job_id in self.owners
+            if not owns_job:
+                self._acquire_owner(manifest, job_id)
             self._verify_segments(manifest, job)
             request = job['request']
             if job['nextFrame'] != request['frames']:
@@ -1179,9 +1189,6 @@ class VideoJobStore:
                 raise ValueError('Unsupported video format')
             with self.lock:
                 self.leases.pop(job_id, None)
-                owns_job = job_id in self.owners
-            if not owns_job:
-                self._acquire_owner(manifest, job_id)
 
             filename = self.output_filename(job_id)
             self.videos.mkdir(parents=True, exist_ok=True)
