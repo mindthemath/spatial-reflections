@@ -495,7 +495,7 @@ class VideoJobStore:
         if not job_dir.exists():
             return job_dir
         removable = re.compile(
-            r'(?:job\.json|\.owner\.lock|\.concat\.txt|'
+            r'(?:job\.json|\.owner\.lock|\.concat\.txt|\.DS_Store|'
             r'segment-\d{6}\.mkv|\.segment-\d{6}\.pending\.mkv|'
             r'\.segment-\d{6}\.stderr\.log|'
             r'\.job\.json\.[a-f0-9]{32}\.tmp)'
@@ -503,7 +503,7 @@ class VideoJobStore:
         for path in job_dir.iterdir():
             if path.name == 'quarantine' and path.is_dir() and not path.is_symlink():
                 for quarantined in path.iterdir():
-                    if (not SEGMENT_NAME.fullmatch(quarantined.name)
+                    if ((not SEGMENT_NAME.fullmatch(quarantined.name) and quarantined.name != '.DS_Store')
                             or (quarantined.is_dir() and not quarantined.is_symlink())):
                         raise ValueError(
                             'Video export quarantine contains an unexpected entry: '

@@ -1078,6 +1078,20 @@ class VideoJobStoreTest(unittest.TestCase):
             spawn.assert_not_called()
         self.store.pause(ready['id'])
 
+    def test_finder_metadata_does_not_block_finish_or_discard(self):
+        for action in ('finish','discard'):
+            job=self.ready_job();directory=self.manifest(job).parent
+            (directory/'.DS_Store').write_bytes(b'Finder metadata')
+            quarantine=directory/'quarantine';quarantine.mkdir()
+            (quarantine/'.DS_Store').write_bytes(b'Finder metadata')
+            if action=='finish':
+                def concat(command,**_kwargs):
+                    Path(command[-1]).write_bytes(b'joined')
+                    return mock.Mock(returncode=0)
+                self.store.run=concat;self.store.finish(job['id'])
+            else: self.store.discard(job['id'])
+            self.assertFalse(directory.exists())
+
     def test_foreign_store_cannot_modify_owned_finalizer_files(self):
         job = self.ready_job()
         entered, release = threading.Event(), threading.Event()
