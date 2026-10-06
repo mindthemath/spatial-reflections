@@ -499,6 +499,17 @@ class StudioAPITest(unittest.TestCase):
                     release.set();worker.join(2)
                 self.assertFalse(worker.is_alive())
 
+    def test_encoder_install_after_cli_startup_requires_restart(self):
+        with mock.patch.object(server,'VIDEO_FFMPEG_BOOTSTRAP',''), \
+             mock.patch.object(server.shutil,'which',return_value='/new/ffmpeg'), \
+             mock.patch.object(server,'VideoJobStore') as factory:
+            code,value=self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertFalse(value['available']);self.assertFalse(value['canManage'])
+            self.assertIn('Restart the Studio server',value['reason'])
+            code,error=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1})
+            self.assertEqual(code,400);self.assertIn('Restart the Studio server',error['error'])
+            factory.assert_not_called()
+
     def test_video_mutations_wait_for_startup_recovery(self):
         with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'):
             store = server.video_store();store.recovery_running = True
@@ -716,6 +727,19 @@ class StudioAPITest(unittest.TestCase):
 
 
 class ServerStartupTest(unittest.TestCase):
+    def test_cli_refuses_lazy_store_after_encoder_install_or_path_change(self):
+        old=mock.Mock()
+        for bootstrap in ('','/old/ffmpeg'):
+            with self.subTest(bootstrap=bootstrap), \
+                 mock.patch.object(server,'VIDEO_FFMPEG_BOOTSTRAP',bootstrap), \
+                 mock.patch.object(server,'VIDEO_STORE',old), \
+                 mock.patch.object(server.shutil,'which',return_value='/new/ffmpeg'), \
+                 mock.patch.object(server,'VideoJobStore') as factory:
+                with self.assertRaisesRegex(ValueError,'Restart the Studio server'):
+                    server.video_store()
+                factory.assert_not_called();old.pause_all.assert_not_called()
+                old.release_server.assert_not_called()
+
     def test_recovery_gate_allows_only_a_known_live_owner_lease(self):
         store=mock.Mock(recovery_running=True,lock=threading.RLock(),leases={},owners={},last_recovery={'indexFailed':False})
         with self.assertRaisesRegex(ValueError,'recovery is still running'):

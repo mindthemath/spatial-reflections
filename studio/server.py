@@ -31,6 +31,9 @@ VIDEO_FRAME_READ_TIMEOUT = 30
 VIDEO_STORE = None
 VIDEO_STORE_LOCK = threading.Lock()
 FFMPEG_ENCODER_ERROR = None
+# None means an embedded/test server has not run CLI startup. CLI startup pins
+# its binary (or its absence); changing it requires ownership/recovery preflight.
+VIDEO_FFMPEG_BOOTSTRAP = None
 
 
 def hash_file(path):
@@ -282,6 +285,9 @@ def video_store():
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
     root = ROOT.resolve()
+    if (VIDEO_FFMPEG_BOOTSTRAP is not None
+            and str(Path(ffmpeg).resolve()) != VIDEO_FFMPEG_BOOTSTRAP):
+        raise ValueError('Restart the Studio server after installing or changing ffmpeg')
     with VIDEO_STORE_LOCK:
         if VIDEO_STORE is None or VIDEO_STORE.root != root or VIDEO_STORE.ffmpeg != str(ffmpeg):
             if VIDEO_STORE is not None:
@@ -678,6 +684,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     http = StudioHTTPServer(('localhost', args.port), Handler)
     ffmpeg = shutil.which('ffmpeg')
+    VIDEO_FFMPEG_BOOTSTRAP = str(Path(ffmpeg).resolve()) if ffmpeg else ''
     if ffmpeg:
         FFMPEG_ENCODER_ERROR = ffmpeg_encoder_error(ffmpeg)
     if ffmpeg:

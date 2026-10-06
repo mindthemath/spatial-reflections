@@ -10,7 +10,7 @@ Install the locked JavaScript tooling and Chromium once, and synchronize the ven
 make install
 ```
 
-Video export additionally requires an `ffmpeg` executable with H.264 (`libx264`) support on `PATH`. It is called as a subprocess; the Python server remains standard-library-only and does not install or import third-party Python packages.
+Video export additionally requires an `ffmpeg` executable with H.264 (`libx264`) support on `PATH`. Restart the Studio server after installing ffmpeg or changing its executable path so encoder capability, project ownership and recovery are checked together. It is called as a subprocess; the Python server remains standard-library-only and does not install or import third-party Python packages.
 
 Then start the local application:
 
