@@ -487,7 +487,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.close_connection = True
             return self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
         try:
-            if route.path.startswith('/api/video/') and route.path != '/api/video/pause':
+            if route.path.startswith('/api/video/') and route.path not in ('/api/video/pause', '/api/video/cancel'):
                 store = video_store()
                 query = parse_qs(route.query) if route.path in ('/api/video/frame', '/api/video/poster') else {}
                 check_video_recovery(store, query.get('id', [None])[0], query.get('lease', [None])[0])
@@ -605,6 +605,7 @@ class Handler(SimpleHTTPRequestHandler):
             if route.path == '/api/video/finish':
                 return self.send_json(201, finish_video(request.get('id')))
             if route.path == '/api/video/cancel':
+                check_video_recovery(video_store(), request.get('id'), request.get('lease'))
                 video_store().discard(request.get('id'))
                 return self.send_json(200, {'cancelled': True})
             if route.path == '/api/video/pause':

@@ -101,5 +101,12 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  const unavailable=vm.runInContext('openVideoExportDialog()',context);
  requests[0].resolve({available:false,canManage:false,reason:'server unavailable'});await unavailable;
  assert.equal(requests.length,1);assert.equal(context.videoExportDialog.dataset.statusMode,'error');
- console.log('PASS: resume/restore policy, verified-state refresh, stale-response suppression, pause errors and encoder-free management.');
+ let controls=[];
+ context.videoControlApi=(url,options)=>{controls.push({url,body:JSON.parse(options.body)});return Promise.resolve({});};
+ Object.assign(context,{activeVideoExportJob:{id:'known-job',lease:'nonce'},videoExportStopAction:'discard',videoExportStopPromise:null,videoExportStopJobId:null});
+ vm.runInContext(source.slice(source.indexOf('function ensureVideoExportStopRequest()'),source.indexOf('function requestVideoExportCancellation()')),context);
+ await vm.runInContext('ensureVideoExportStopRequest()',context);
+ await vm.runInContext('ensureVideoExportStopRequest()',context);
+ assert.equal(controls.length,1);assert.equal(controls[0].url,'/api/video/cancel');assert.deepEqual(controls[0].body,{id:'known-job',lease:'nonce'});
+ console.log('PASS: resume/restore policy, verified-state refresh, stale-response suppression, leased cancellation and truthful pause errors.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

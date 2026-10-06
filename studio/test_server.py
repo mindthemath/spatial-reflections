@@ -477,6 +477,8 @@ class StudioAPITest(unittest.TestCase):
              mock.patch.object(server.subprocess,'Popen',FakeEncoder):
             code,started=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1,'quality':'draft'})
             self.assertEqual(code,201);store=server.video_store()
+            code,cancelled=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1,'quality':'draft'})
+            self.assertEqual(code,201)
             def scan():
                 entered.set();release.wait(3)
                 return store._empty_recovery_report()
@@ -488,6 +490,8 @@ class StudioAPITest(unittest.TestCase):
                     code,_=self.raw_request('POST',f"/api/video/frame?id={started['id']}&frame=0&lease={started['lease']}",frame,{'Content-Type':'image/png'})
                     self.assertEqual(code,201)
                     code,_=self.request('POST','/api/video/pause',{'id':started['id'],'lease':started['lease']})
+                    self.assertEqual(code,200)
+                    code,_=self.request('POST','/api/video/cancel',{'id':cancelled['id'],'lease':cancelled['lease']})
                     self.assertEqual(code,200)
                     code,error=self.request('POST','/api/video/resume',{'id':started['id']})
                     self.assertEqual(code,400);self.assertIn('recovery is still running',error['error'])

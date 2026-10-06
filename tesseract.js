@@ -1925,9 +1925,7 @@ function ensureVideoExportStopRequest() {
     videoExportStopPromise = videoControlApi(discard ? '/api/video/cancel' : '/api/video/pause', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(discard
-            ? { id: job.id }
-            : { id: job.id, lease: job.lease })
+        body: JSON.stringify({ id: job.id, lease: job.lease })
     }).then(() => null, error => error);
     return videoExportStopPromise;
 }
