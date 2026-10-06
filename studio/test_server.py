@@ -508,7 +508,27 @@ class StudioAPITest(unittest.TestCase):
             self.assertIn('Restart the Studio server',value['reason'])
             code,error=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1})
             self.assertEqual(code,400);self.assertIn('Restart the Studio server',error['error'])
+            code,error=self.request('GET','/api/video/jobs')
+            self.assertEqual(code,400);self.assertIn('Restart the Studio server',error['error'])
             factory.assert_not_called()
+
+    def test_existing_jobs_can_be_paused_or_cancelled_after_encoder_path_changes(self):
+        with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'):
+            jobs=[]
+            for _ in range(2):
+                code,job=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1})
+                self.assertEqual(code,201);jobs.append(job)
+        with mock.patch.object(server,'VIDEO_FFMPEG_BOOTSTRAP','/fake/ffmpeg'), \
+             mock.patch.object(server.shutil,'which',return_value='/new/ffmpeg'), \
+             mock.patch.object(server,'VideoJobStore') as factory:
+            code,value=self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertFalse(value['available'])
+            code,value=self.request('GET','/api/video/jobs')
+            self.assertEqual(code,200);self.assertEqual(len(value['jobs']),2)
+            code,_=self.request('POST','/api/video/pause',{'id':jobs[0]['id'],'lease':jobs[0]['lease']})
+            self.assertEqual(code,200)
+            code,_=self.request('POST','/api/video/cancel',{'id':jobs[1]['id'],'lease':jobs[1]['lease']})
+            self.assertEqual(code,200);factory.assert_not_called()
 
     def test_video_mutations_wait_for_startup_recovery(self):
         with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'):

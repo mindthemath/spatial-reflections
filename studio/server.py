@@ -230,20 +230,26 @@ def video_capabilities():
     available = bool(ffmpeg) and not FFMPEG_ENCODER_ERROR
     reason = (FFMPEG_ENCODER_ERROR if ffmpeg
               else 'ffmpeg is not installed or is not on the server PATH')
+    store = None
     if ffmpeg:
-        store = video_store()
-        if (not store.recovery_running and
-                (store.recovery_pending is True or (store.last_recovery['failed']
-                 and not store.last_recovery['indexFailed']))):
-            store.recover_stale_encoders()
-        recovery = store.last_recovery
-        if store.recovery_running:
+        try:
+            store = video_store()
+        except (ValueError, OSError) as error:
             available = False
-            reason = 'Encoder startup recovery is still running; retry in a moment'
-        elif recovery['indexFailed']:
-            available = False
-            reason = 'Encoder startup recovery could not inspect the durable job index'
-    can_manage = bool(ffmpeg) and not (store.recovery_running or recovery['indexFailed']) if ffmpeg else False
+            reason = str(error)
+        if store is not None:
+            if (not store.recovery_running and
+                    (store.recovery_pending is True or (store.last_recovery['failed']
+                     and not store.last_recovery['indexFailed']))):
+                store.recover_stale_encoders()
+            recovery = store.last_recovery
+            if store.recovery_running:
+                available = False
+                reason = 'Encoder startup recovery is still running; retry in a moment'
+            elif recovery['indexFailed']:
+                available = False
+                reason = 'Encoder startup recovery could not inspect the durable job index'
+    can_manage = store is not None and not (store.recovery_running or recovery['indexFailed'])
     return {'available': available, 'canManage': can_manage, 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
             'qualities': list(VIDEO_QUALITIES), 'formats': list(VIDEO_FORMATS),
             'freeBytes': shutil.disk_usage(ROOT).free,
@@ -279,8 +285,12 @@ def start_video_recovery():
     return store
 
 
-def video_store():
+def video_store(for_control=False):
     global VIDEO_STORE
+    if for_control:
+        with VIDEO_STORE_LOCK:
+            if VIDEO_STORE is not None and VIDEO_STORE.root == ROOT.resolve():
+                return VIDEO_STORE
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
@@ -447,7 +457,12 @@ class Handler(SimpleHTTPRequestHandler):
         if path == '/api/video/capabilities':
             return self.send_json(200, video_capabilities())
         if path == '/api/video/jobs':
-            return self.send_json(200, {'jobs': video_store().list_jobs()})
+            try:
+                return self.send_json(200, {'jobs': video_store(for_control=True).list_jobs()})
+            except ValueError as error:
+                return self.send_json(400, {'error': str(error)})
+            except OSError as error:
+                return self.send_json(500, {'error': str(error)})
         if path == '/api/exports':
             exports = []
             parent = ROOT / 'exports'
@@ -611,17 +626,19 @@ class Handler(SimpleHTTPRequestHandler):
             if route.path == '/api/video/finish':
                 return self.send_json(201, finish_video(request.get('id')))
             if route.path == '/api/video/cancel':
-                check_video_recovery(video_store(), request.get('id'), request.get('lease'))
-                video_store().discard(request.get('id'))
+                store = video_store(for_control=True)
+                check_video_recovery(store, request.get('id'), request.get('lease'))
+                store.discard(request.get('id'))
                 return self.send_json(200, {'cancelled': True})
             if route.path == '/api/video/pause':
-                check_video_recovery(video_store(), request.get('id'), request.get('lease'))
+                store = video_store(for_control=True)
+                check_video_recovery(store, request.get('id'), request.get('lease'))
                 reason = request.get('reason')
                 if reason is not None:
                     if not isinstance(reason, str) or len(reason) > 500:
                         raise ValueError('Video pause reason must be text under 500 characters')
                     reason = ' '.join(reason.split()) or None
-                paused = video_store().pause(
+                paused = store.pause(
                     request.get('id'), reason or 'Browser paused the export', request.get('lease'))
                 return self.send_json(200, paused)
             if route.path == '/api/video/resume':
