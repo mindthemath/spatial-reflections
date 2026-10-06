@@ -531,6 +531,59 @@ class VideoJobStoreTest(unittest.TestCase):
             self.assertIn('interrupted export', recovered['reason'])
             self.assertEqual(recovered['nextFrame'], 2 if complete else 0)
 
+    def test_failed_live_encoder_cleanup_requests_recovery_after_storage_heals(self):
+        class Encoder:
+            pid=23456
+            def __init__(self,*_args,**_kwargs): self.stdin=io.BytesIO();self.returncode=None
+            def poll(self): return self.returncode
+            def kill(self): self.returncode=-9
+            def wait(self,timeout=None): return self.returncode
+        for action in ('pause','fail','unlink'):
+            with self.subTest(action=action):
+                self.store.popen=Encoder
+                job=self.store.create(request());lease=self.store.resume(job['id'])['lease']
+                self.store.write_frame(job['id'],0,b'png',lease)
+                runtime=self.store.active[job['id']];stderr=runtime['stderrStream']
+                self.assertIn('activeEncoder',json.loads(self.manifest(job).read_text()))
+                if action=='unlink':
+                    runtime['pending']=mock.Mock(unlink=mock.Mock(side_effect=OSError('scratch unplugged')))
+                    with self.assertRaisesRegex(OSError,'scratch unplugged'): self.store.pause(job['id'],lease=lease)
+                else:
+                    with mock.patch.object(self.store,'_save',side_effect=OSError('scratch unplugged')):
+                        with self.assertRaisesRegex(OSError,'scratch unplugged'):
+                            if action=='pause': self.store.pause(job['id'],lease=lease)
+                            else: self.store._fail_active_segment(job['id'],runtime,'encoder failed')
+                self.assertTrue(self.store.recovery_pending);self.assertTrue(stderr.closed)
+                self.assertNotIn(job['id'],self.store.owners);self.assertNotIn(job['id'],self.store.active)
+                self.assertNotIn(job['id'],self.store.leases)
+                # Restored mount: stale PID metadata is repaired without restart.
+                self.store.processes_for_path=lambda _path: []
+                self.store.process_command=lambda _pid: ''
+                report=self.store.recover_stale_encoders();self.assertEqual(report['failed'],0)
+                self.assertEqual(self.store.get(job['id'])['state'],'paused')
+                self.store.resume(job['id']);self.store.pause(job['id'])
+
+    def test_transient_start_marker_save_failure_leaves_job_paused(self):
+        class Encoder:
+            pid=23456
+            def __init__(self,*_args,**_kwargs): self.stdin=io.BytesIO();self.returncode=None
+            def poll(self): return self.returncode
+            def kill(self): self.returncode=-9
+            def wait(self,timeout=None): return self.returncode
+        self.store.popen=Encoder
+        job=self.store.create(request());lease=self.store.resume(job['id'])['lease']
+        original=self.store._save;calls=[]
+        def save(manifest,data):
+            calls.append(True)
+            if len(calls)==1: raise OSError('transient marker write failure')
+            return original(manifest,data)
+        with mock.patch.object(self.store,'_save',side_effect=save):
+            with self.assertRaisesRegex(OSError,'transient marker'):
+                self.store.write_frame(job['id'],0,b'png',lease)
+        self.assertEqual(self.store.get(job['id'])['state'],'paused')
+        self.assertNotIn(job['id'],self.store.owners);self.assertNotIn(job['id'],self.store.leases)
+        self.store.resume(job['id']);self.store.pause(job['id'])
+
     def test_repair_requested_during_recovery_survives_report_publication(self):
         def scan():
             self.store.recovery_pending = True

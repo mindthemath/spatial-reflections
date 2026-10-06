@@ -614,6 +614,11 @@ class VideoJobStore:
             self._release_owner(job_id)
             return True
 
+    def _request_idle_recovery(self, job_id):
+        with self.lock:
+            if job_id not in self.active and job_id not in self.leases:
+                self.recovery_pending = True
+
     @contextmanager
     def _idle_owner_guard(self, job_id):
         failed = False
@@ -623,12 +628,12 @@ class VideoJobStore:
             failed = True
             raise
         finally:
-            released = self._release_idle_owner(job_id)
-            if released and failed:
-                # A failed filesystem transition may have left active metadata
-                # without a runtime. Preflight retries recovery once storage heals.
-                with self.lock:
-                    self.recovery_pending = True
+            try:
+                self._release_idle_owner(job_id)
+            finally:
+                if failed:
+                    # Another cleanup path may already have released the owner.
+                    self._request_idle_recovery(job_id)
 
     def resume(self, job_id, render_context=None, encoder_error=None):
         # Reserve the complete transition before examining/removing leases. Pause
@@ -654,6 +659,7 @@ class VideoJobStore:
             self._release_idle_owner(job_id)
             manifest, job = self._load(job_id)
             if job.get('activeEncoder'):
+                self._request_idle_recovery(job_id)
                 raise ValueError(
                     'Video encoder recovery is incomplete; retry preflight before resuming'
                 )
@@ -719,29 +725,41 @@ class VideoJobStore:
                 elif runtime.get('lease'):
                     self.leases[job_id] = {'token': runtime['lease'], 'lastActivity': self.clock()}
             raise ValueError('Checkpoint encoder could not be stopped; retry pause or restart the server for recovery')
-        if process and process.stdin:
+        failed = True
+        try:
+            if process and process.stdin:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            pending = runtime.get('pending')
+            if pending:
+                pending.unlink(missing_ok=True)
+            detail = self._consume_encoder_stderr(runtime)
+            runtime_job = runtime.get('job')
+            runtime_manifest = runtime.get('manifest')
+            if runtime_job and runtime_manifest:
+                runtime_job.pop('activeEncoder', None)
+                runtime_job['state'] = 'paused'
+                if 'stopFailureMessage' in runtime:
+                    runtime_job['error'] = runtime.pop('stopFailureMessage')
+                if detail:
+                    original = runtime_job.get('error')
+                    runtime_job['error'] = f'{original}: {detail}' if original else f'Checkpoint encoder diagnostic: {detail}'
+                try:
+                    self._save(runtime_manifest, runtime_job)
+                except (OSError, ValueError):
+                    return  # The serial transition retries; preflight also repairs.
+            failed = False
+        finally:
             try:
-                process.stdin.close()
-            except OSError:
-                pass
-        pending = runtime.get('pending')
-        if pending:
-            pending.unlink(missing_ok=True)
-        detail = self._consume_encoder_stderr(runtime) if stopped else ''
-        runtime_job = runtime.get('job')
-        runtime_manifest = runtime.get('manifest')
-        if runtime_job and runtime_manifest:
-            runtime_job.pop('activeEncoder', None)
-            if 'stopFailureMessage' in runtime:
-                runtime_job['error'] = runtime.pop('stopFailureMessage')
-            if detail:
-                original = runtime_job.get('error')
-                runtime_job['error'] = f'{original}: {detail}' if original else f'Checkpoint encoder diagnostic: {detail}'
-            try:
-                self._save(runtime_manifest, runtime_job)
-            except OSError:
-                pass
-        self._release_owner(job_id)
+                self._consume_encoder_stderr(runtime, stopped=False)
+            finally:
+                try:
+                    self._release_owner(job_id)
+                finally:
+                    if failed:
+                        self._request_idle_recovery(job_id)
 
     def pause(self, job_id, reason=None, lease=None):
         with self.lock:
@@ -905,25 +923,36 @@ class VideoJobStore:
             job['error'] = f'{message}; encoder could not be stopped, retry pause or restart the server for recovery'
             self._save(runtime['manifest'], job)
             return
-        if process.stdin:
+        failed = True
+        try:
+            if process.stdin:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            if runtime.get('pending'):
+                runtime['pending'].unlink(missing_ok=True)
+            detail = self._consume_encoder_stderr(runtime)
+            if detail:
+                message = f'{message}: {detail}'
+            job = runtime['job']
+            job.pop('activeEncoder', None)
+            job['state'] = 'paused'
+            job['error'] = message
+            self._save(runtime['manifest'], job)
+            failed = False
+        finally:
             try:
-                process.stdin.close()
-            except OSError:
-                pass
-        if runtime.get('pending'):
-            runtime['pending'].unlink(missing_ok=True)
-        detail = self._consume_encoder_stderr(runtime)
-        if detail:
-            message = f'{message}: {detail}'
-        with self.lock:
-            self.active.pop(job_id, None)
-            self.leases.pop(job_id, None)
-        self._release_owner(job_id)
-        job = runtime['job']
-        job.pop('activeEncoder', None)
-        job['state'] = 'paused'
-        job['error'] = message
-        self._save(runtime['manifest'], job)
+                self._consume_encoder_stderr(runtime, stopped=False)
+            finally:
+                with self.lock:
+                    self.active.pop(job_id, None)
+                    self.leases.pop(job_id, None)
+                try:
+                    self._release_owner(job_id)
+                finally:
+                    if failed:
+                        self._request_idle_recovery(job_id)
 
     def _finalize_segment(self, job_id, runtime):
         process = runtime['process']

@@ -515,6 +515,31 @@ class StudioAPITest(unittest.TestCase):
             code,error = self.request('POST','/api/video/resume',{'id':'0'*32})
             self.assertEqual(code,400);self.assertIn('durable job index',error['error'])
 
+    def test_preflight_repairs_pid_metadata_after_failed_live_pause(self):
+        class Encoder:
+            pid=23456
+            def __init__(self,*_args,**_kwargs): self.stdin=io.BytesIO();self.returncode=None
+            def poll(self): return self.returncode
+            def kill(self): self.returncode=-9
+            def wait(self,timeout=None): return self.returncode
+        with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess,'Popen',Encoder):
+            code,started=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':2,'quality':'draft'})
+            self.assertEqual(code,201)
+            frame=server.PNG_SIGNATURE+(13).to_bytes(4,'big')+b'IHDR'+(64).to_bytes(4,'big')+(64).to_bytes(4,'big')
+            code,_=self.raw_request('POST',f"/api/video/frame?id={started['id']}&frame=0&lease={started['lease']}",frame,{'Content-Type':'image/png'})
+            self.assertEqual(code,201);store=server.video_store()
+            store.processes_for_path=lambda _path: [];store.process_command=lambda _pid: ''
+            with mock.patch.object(store,'_save',side_effect=OSError('scratch unplugged')):
+                code,_=self.request('POST','/api/video/pause',{'id':started['id'],'lease':started['lease']})
+                self.assertEqual(code,500)
+            self.assertTrue(store.recovery_pending)
+            code,capabilities=self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertTrue(capabilities['available'])
+            self.assertEqual(store.get(started['id'])['state'],'paused')
+            code,resumed=self.request('POST','/api/video/resume',{'id':started['id']})
+            self.assertEqual(code,200);self.assertTrue(resumed['lease'])
+
     def test_preflight_repairs_active_metadata_after_failed_idle_pause(self):
         with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
             code, started = self.request('POST', '/api/video/start', {
