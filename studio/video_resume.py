@@ -84,6 +84,7 @@ class VideoJobStore:
         self.owners = {}
         self.stopping = set()
         self.finishing = set()
+        self.finishing_owners = {}
         self.server_owner = None
         self.popen = subprocess.Popen
         self.run = subprocess.run
@@ -595,8 +596,10 @@ class VideoJobStore:
         with self.lock:
             self.owners[job_id] = stream
 
-    def _release_owner(self, job_id):
+    def _release_owner(self, job_id, expected=None):
         with self.lock:
+            if expected is not None and self.owners.get(job_id) is not expected:
+                return
             stream = self.owners.pop(job_id, None)
         if stream:
             try:
@@ -606,12 +609,13 @@ class VideoJobStore:
 
     def _release_idle_owner(self, job_id):
         with self.stop_lock:
-            if job_id in self.finishing:
-                return False
             with self.lock:
-                if job_id in self.active or job_id in self.leases or job_id not in self.owners:
+                owner = self.owners.get(job_id)
+                if not owner or job_id in self.active or job_id in self.leases:
                     return False
-            self._release_owner(job_id)
+                if job_id in self.finishing and self.finishing_owners.get(job_id) is owner:
+                    return False
+            self._release_owner(job_id, owner)
             return True
 
     def _request_idle_recovery(self, job_id):
@@ -1186,17 +1190,29 @@ class VideoJobStore:
             if job_id in self.finishing:
                 raise ValueError('Video export is finalizing in another request')
             self.finishing.add(job_id)
+            with self.lock:
+                self.finishing_owners[job_id] = self.owners.get(job_id)
+        failed = True
         try:
-            return self._finish_exclusive(job_id)
+            result = self._finish_exclusive(job_id)
+            failed = False
+            return result
         finally:
-            # Early validation/filesystem failures must not leak finalizer
-            # ownership, but never release a live checkpoint/lease on rejection.
+            # A waiting discard may have acquired a DIFFERENT owner after the
+            # exclusive helper released its lock. Never release that new stream.
             with self.lock:
                 still_rendering = job_id in self.active or job_id in self.leases
-            if not still_rendering:
-                self._release_owner(job_id)
-            with self.stop_lock:
-                self.finishing.discard(job_id)
+                owner = self.finishing_owners.get(job_id)
+            try:
+                if not still_rendering and owner is not None:
+                    self._release_owner(job_id, owner)
+            finally:
+                with self.stop_lock:
+                    with self.lock:
+                        self.finishing_owners.pop(job_id, None)
+                    self.finishing.discard(job_id)
+                if failed:
+                    self._request_idle_recovery(job_id)
 
     def _finish_exclusive(self, job_id):
         with self._job_lock(job_id):
@@ -1212,6 +1228,8 @@ class VideoJobStore:
                 owns_job = job_id in self.owners
             if not owns_job:
                 self._acquire_owner(manifest, job_id)
+            with self.lock:
+                self.finishing_owners[job_id] = self.owners.get(job_id)
             self._verify_segments(manifest, job)
             request = job['request']
             if job['nextFrame'] != request['frames']:

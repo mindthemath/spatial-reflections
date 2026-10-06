@@ -1104,6 +1104,53 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
         self.assertEqual(foreign.owners,{})
 
+    def test_finish_cleanup_does_not_release_a_waiting_discards_new_owner(self):
+        job=self.ready_job()
+        concat_entered,concat_release=threading.Event(),threading.Event()
+        interrupted,discard_entered,discard_release=threading.Event(),threading.Event(),threading.Event()
+        helper_exited,wrapper_release=threading.Event(),threading.Event()
+        errors,discard_owners=[],[]
+        original_finish=self.store._finish_exclusive
+        original_interrupt=self.store._interrupt_active_segment
+        original_remove=self.store._remove_job_directory
+        def concat(command,**_kwargs):
+            concat_entered.set();concat_release.wait(5)
+            Path(command[-1]).write_bytes(b'joined')
+            return mock.Mock(returncode=0)
+        def finish_helper(job_id):
+            try: return original_finish(job_id)
+            finally: helper_exited.set();wrapper_release.wait(5)
+        def interrupt(job_id):
+            original_interrupt(job_id)
+            if threading.current_thread().name=='waiting-discard': interrupted.set()
+        def remove(manifest,job_id):
+            discard_owners.append(self.store.owners[job_id])
+            discard_entered.set();discard_release.wait(5)
+            return original_remove(manifest,job_id)
+        def invoke(action):
+            try: action()
+            except Exception as error: errors.append(error)
+        self.store.run=concat;self.store._finish_exclusive=finish_helper
+        self.store._interrupt_active_segment=interrupt;self.store._remove_job_directory=remove
+        finisher=threading.Thread(target=lambda:invoke(lambda:self.store.finish(job['id'])))
+        discarder=threading.Thread(name='waiting-discard',target=lambda:invoke(lambda:self.store.discard(job['id'])))
+        finisher.start()
+        try:
+            self.assertTrue(concat_entered.wait(2));discarder.start()
+            self.assertTrue(interrupted.wait(2));concat_release.set()
+            self.assertTrue(helper_exited.wait(2));self.assertTrue(discard_entered.wait(2))
+            owner=discard_owners[0];self.assertFalse(owner.closed)
+            wrapper_release.set();finisher.join(2)
+            self.assertFalse(finisher.is_alive())
+            self.assertIs(self.store.owners[job['id']],owner);self.assertFalse(owner.closed)
+        finally:
+            concat_release.set();wrapper_release.set();discard_release.set()
+            finisher.join(2)
+            if discarder.ident is not None: discarder.join(2)
+        self.assertFalse(discarder.is_alive());self.assertTrue(discard_owners[0].closed)
+        self.assertEqual(len(errors),1);self.assertIn('cancelled before publishing',str(errors[0]))
+        self.assertEqual(self.store.owners,{});self.assertEqual(self.store.finishing_owners,{})
+
     def test_second_resume_or_finish_cannot_cancel_or_unlock_a_finalizer(self):
         job = self.ready_job()
         entered, release = threading.Event(), threading.Event()
