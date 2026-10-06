@@ -518,6 +518,115 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertRegex(str(write_errors[0]), 'lease')
         self.assertNotIn(job['id'], self.store.active)
 
+    def test_recovery_pauses_ownerless_active_jobs_without_encoder_markers(self):
+        for complete in (False, True):
+            job = self.ready_job() if complete else self.store.create(request())
+            manifest = json.loads(self.manifest(job).read_text())
+            manifest['state'] = 'active'
+            self.write_manifest(job, manifest)
+            self.store.processes_for_path = lambda _path: []
+            self.store.recover_stale_encoders()
+            recovered = self.store.get(job['id'])
+            self.assertEqual(recovered['state'], 'paused')
+            self.assertIn('interrupted export', recovered['reason'])
+            self.assertEqual(recovered['nextFrame'], 2 if complete else 0)
+
+    def test_repair_requested_during_recovery_survives_report_publication(self):
+        def scan():
+            self.store.recovery_pending = True
+            self.store.last_recovery = self.store._empty_recovery_report()
+            return dict(self.store.last_recovery)
+        with mock.patch.object(self.store, '_recover_stale_encoders', side_effect=scan):
+            self.store.recover_stale_encoders()
+        self.assertTrue(self.store.recovery_pending)
+        self.store.recover_stale_encoders()
+        self.assertFalse(self.store.recovery_pending)
+
+    def test_overlapping_recovery_does_not_consume_pending_repair(self):
+        self.store.recovery_pending = True
+        self.store.recovery_running = True
+        with self.store.recovery_lock, mock.patch.object(self.store, '_recover_stale_encoders') as scan:
+            self.store.recover_stale_encoders()
+            scan.assert_not_called()
+            self.assertTrue(self.store.recovery_pending)
+            self.assertTrue(self.store.recovery_running)
+        self.store.recovery_running = False
+
+    def test_recovery_does_not_rewrite_already_idle_manifests(self):
+        self.store.create(request())
+        self.ready_job()
+        self.store.processes_for_path = lambda _path: []
+        with mock.patch.object(self.store, '_save', side_effect=AssertionError('Unchanged recovery must not write')):
+            report = self.store.recover_stale_encoders()
+        self.assertEqual(report['failed'], 0)
+
+    def test_failed_stop_of_late_starting_encoder_keeps_ownership_and_lease(self):
+        spawning, release, interrupted = threading.Event(), threading.Event(), threading.Event()
+        processes, errors = [], []
+        class ResistantProcess:
+            pid = 23456
+            def __init__(self, *_args, **_kwargs):
+                spawning.set();release.wait(2)
+                self.stdin = io.BytesIO();self.returncode = None;self.resist = True
+                processes.append(self)
+            def poll(self): return self.returncode
+            def kill(self):
+                if self.resist: raise OSError('stuck scratch I/O')
+                self.returncode = -9
+            def wait(self, timeout=None): return self.returncode
+        self.store.popen = ResistantProcess
+        job = self.store.create(request())
+        lease = self.store.resume(job['id'])['lease']
+        original = self.store._interrupt_active_segment
+        def interrupt(job_id):
+            original(job_id)
+            if threading.current_thread().name == 'late-pauser': interrupted.set()
+        self.store._interrupt_active_segment = interrupt
+        def invoke(action):
+            try: action()
+            except Exception as error: errors.append(error)
+        writer = threading.Thread(target=lambda: invoke(lambda: self.store.write_frame(job['id'],0,b'png',lease)))
+        pauser = threading.Thread(name='late-pauser',target=lambda: invoke(lambda: self.store.pause(job['id'],lease=lease)))
+        writer.start();self.assertTrue(spawning.wait(2));pauser.start()
+        try:
+            self.assertTrue(interrupted.wait(2))
+        finally:
+            release.set();writer.join(2);pauser.join(2)
+        self.assertFalse(writer.is_alive());self.assertFalse(pauser.is_alive())
+        self.assertEqual(len(errors),2)
+        self.assertTrue(all('could not be stopped' in str(error) for error in errors))
+        self.assertIn(job['id'],self.store.active);self.assertIn(job['id'],self.store.owners)
+        self.assertEqual(self.store.leases[job['id']]['token'],lease)
+        self.assertIn('activeEncoder',json.loads(self.manifest(job).read_text()))
+        processes[0].resist = False
+        self.store.pause(job['id'],lease=lease)
+
+    def test_failed_pause_or_discard_releases_idle_owner_for_retry(self):
+        for operation, method in ((self.store.pause, '_save'), (self.store.pause, '_load'),
+                                  (self.store.discard, '_remove_job_directory')):
+            with self.subTest(operation=operation.__name__, failure=method):
+                job = self.store.create(request())
+                self.store.resume(job['id'])
+                with mock.patch.object(self.store, method, side_effect=OSError('unmounted scratch')):
+                    with self.assertRaisesRegex(OSError, 'unmounted'):
+                        operation(job['id'])
+                self.assertNotIn(job['id'], self.store.owners)
+                self.assertNotIn(job['id'], self.store.leases)
+                self.assertTrue(self.store.recovery_pending)
+                # Mount restored: no false 'active in another server' lock conflict.
+                resumed = self.store.resume(job['id'])
+                self.assertTrue(resumed['lease'])
+                self.store.pause(job['id'])
+
+    def test_recovery_never_pauses_a_live_owner_between_checkpoints(self):
+        job = self.store.create(request())
+        self.store.resume(job['id'])
+        other = VideoJobStore(self.root, '/fake/ffmpeg')
+        other.processes_for_path = mock.Mock(side_effect=AssertionError('Live owner must not be scanned'))
+        report = other.recover_stale_encoders()
+        self.assertEqual(report['skippedActive'], 1)
+        self.assertEqual(other.get(job['id'])['state'], 'active')
+
     def test_resume_reserves_transition_against_pause_discard_and_resume(self):
         job = self.store.create(request())
         entered, release = threading.Event(), threading.Event()
@@ -900,6 +1009,48 @@ class VideoJobStoreTest(unittest.TestCase):
                 self.assertNotIn('scratchPath', metadata)
                 self.assertFalse(self.manifest(job).parent.exists())
                 self.assertEqual(store.list_jobs(), [])
+
+    def test_second_resume_or_finish_cannot_cancel_or_unlock_a_finalizer(self):
+        job = self.ready_job()
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        def concat(command, **_kwargs):
+            entered.set();release.wait(2)
+            Path(command[-1]).write_bytes(b'joined')
+            return mock.Mock(returncode=0)
+        self.store.run = concat
+        def finish():
+            try: self.store.finish(job['id'])
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=finish);worker.start()
+        self.assertTrue(entered.wait(2))
+        owner = self.store.owners[job['id']]
+        try:
+            for operation in (self.store.resume, self.store.finish):
+                with self.assertRaisesRegex(ValueError, 'finalizing'):
+                    operation(job['id'])
+            self.assertIs(self.store.owners[job['id']], owner)
+            self.assertFalse(owner.closed)
+            self.assertNotIn(job['id'], self.store.stopping)
+        finally:
+            release.set();worker.join(2)
+        self.assertFalse(worker.is_alive());self.assertEqual(errors, [])
+        self.assertNotIn(job['id'], self.store.finishing)
+        self.assertNotIn(job['id'], self.store.owners)
+
+    def test_early_finalize_rejection_keeps_live_lease_but_failed_setup_releases_owner(self):
+        incomplete = self.store.create(request())
+        self.store.resume(incomplete['id'])
+        with self.assertRaisesRegex(ValueError, 'durable frames'):
+            self.store.finish(incomplete['id'])
+        self.assertIn(incomplete['id'], self.store.leases)
+        self.assertIn(incomplete['id'], self.store.owners)
+        complete = self.ready_job()
+        with mock.patch.object(self.store, '_save', side_effect=OSError('injected setup failure')):
+            with self.assertRaisesRegex(OSError, 'setup failure'):
+                self.store.finish(complete['id'])
+        self.assertNotIn(complete['id'], self.store.owners)
+        self.assertNotIn(complete['id'], self.store.finishing)
 
     def test_discard_wins_race_with_finalization_before_publish(self):
         job = self.ready_job('mp4')

@@ -464,6 +464,23 @@ class StudioAPITest(unittest.TestCase):
         finally:
             server.FFMPEG_ENCODER_ERROR = previous
 
+    def test_preflight_repairs_active_metadata_after_failed_idle_pause(self):
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
+            code, started = self.request('POST', '/api/video/start', {
+                'width':64,'height':64,'fps':24,'frames':1,'quality':'draft'})
+            self.assertEqual(code,201)
+            store = server.video_store()
+            store.processes_for_path = lambda _path: []
+            with mock.patch.object(store, '_save', side_effect=OSError('unmounted scratch')):
+                code, _ = self.request('POST','/api/video/pause',{'id':started['id'],'lease':started['lease']})
+                self.assertEqual(code,500)
+            self.assertTrue(store.recovery_pending)
+            self.assertNotIn(started['id'],store.owners)
+            code, capabilities = self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertTrue(capabilities['available'])
+            self.assertFalse(store.recovery_pending)
+            self.assertEqual(store.get(started['id'])['state'],'paused')
+
     def test_video_pause_accepts_bounded_failure_reason(self):
         with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
             code, started = self.request('POST', '/api/video/start', {

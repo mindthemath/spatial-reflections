@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 import fcntl
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -82,6 +83,7 @@ class VideoJobStore:
         self.leases = {}
         self.owners = {}
         self.stopping = set()
+        self.finishing = set()
         self.server_owner = None
         self.popen = subprocess.Popen
         self.run = subprocess.run
@@ -90,6 +92,8 @@ class VideoJobStore:
         self.processes_for_path = self._processes_for_path
         self.kill_pid = self._kill_pid
         self.last_recovery = self._empty_recovery_report()
+        self.recovery_lock = threading.Lock()
+        self.recovery_pending = False
         self.recovery_running = False
 
     @staticmethod
@@ -171,11 +175,19 @@ class VideoJobStore:
             return None
 
     def recover_stale_encoders(self):
-        self.recovery_running = True
+        if not self.recovery_lock.acquire(blocking=False):
+            return dict(self.last_recovery)
+        with self.lock:
+            self.recovery_running = True
+            # Consume only requests preceding this scan. Requests made during the
+            # scan must survive its report publication and trigger another pass.
+            self.recovery_pending = False
         try:
             return self._recover_stale_encoders()
         finally:
-            self.recovery_running = False
+            with self.lock:
+                self.recovery_running = False
+            self.recovery_lock.release()
 
     def _recover_stale_encoders(self):
         report = self._empty_recovery_report()
@@ -205,6 +217,7 @@ class VideoJobStore:
                     manifest, job = self._load(job_id)
                     encoder = job.get('activeEncoder')
                     if not isinstance(encoder, dict):
+                        previous_state = job.get('state')
                         expected_pending = manifest.parent / f".segment-{len(job['segments']):06d}.pending.mkv"
                         pending_files = set(manifest.parent.glob('.segment-*.pending.mkv'))
                         pending_files.add(expected_pending)
@@ -223,12 +236,15 @@ class VideoJobStore:
                             (manifest.parent / '.concat.txt').unlink(missing_ok=True)
                             self._remove_pending_output(job_id)
                             job['state'] = 'ready'
-                        elif recovered_pids:
+                        elif recovered_pids or job.get('state') == 'active':
+                            # Holding the recovery owner lock proves no live job
+                            # owner exists, even in pre-frame/checkpoint gaps.
                             job['state'] = 'paused'
+                            job['error'] = 'Recovered an interrupted export between checkpoints'
                         if recovered_pids:
                             report['recovered'] += len(recovered_pids)
                             job['error'] = 'Recovered an encoder left by an interrupted server'
-                        if recovered_pids or job.get('state') == 'ready':
+                        if recovered_pids or job.get('state') != previous_state:
                             self._save(manifest, job)
                         continue
                     pid = int(encoder.get('pid', 0))
@@ -588,10 +604,38 @@ class VideoJobStore:
             finally:
                 stream.close()
 
+    def _release_idle_owner(self, job_id):
+        with self.stop_lock:
+            if job_id in self.finishing:
+                return False
+            with self.lock:
+                if job_id in self.active or job_id in self.leases or job_id not in self.owners:
+                    return False
+            self._release_owner(job_id)
+            return True
+
+    @contextmanager
+    def _idle_owner_guard(self, job_id):
+        failed = False
+        try:
+            yield
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            released = self._release_idle_owner(job_id)
+            if released and failed:
+                # A failed filesystem transition may have left active metadata
+                # without a runtime. Preflight retries recovery once storage heals.
+                with self.lock:
+                    self.recovery_pending = True
+
     def resume(self, job_id, render_context=None, encoder_error=None):
         # Reserve the complete transition before examining/removing leases. Pause
         # and discard must not interrupt this resume (or release its owner lock).
         with self.stop_lock:
+            if job_id in self.finishing:
+                raise ValueError('Video export is finalizing in another request')
             if job_id in self.stopping:
                 raise ValueError('Video export is stopping in another request')
             self.stopping.add(job_id)
@@ -607,6 +651,7 @@ class VideoJobStore:
                 raise ValueError('Video export is already active in another browser')
         self._interrupt_active_segment(job_id)
         with self._job_lock(job_id):
+            self._release_idle_owner(job_id)
             manifest, job = self._load(job_id)
             self._remove_pending_output(job_id)
             if job.get('activeEncoder'):
@@ -651,7 +696,8 @@ class VideoJobStore:
             runtime = self.active.pop(job_id, None)
             previous_lease = self.leases.pop(job_id, None)
         if not runtime:
-            self._release_owner(job_id)
+            # A finalizer can own this job without a checkpoint encoder/lease.
+            # Its owner must not be released outside the serial job transition.
             return
         process = runtime.get('process')
         stopped = not process or process.poll() is not None
@@ -670,6 +716,8 @@ class VideoJobStore:
                 self.active[job_id] = runtime
                 if previous_lease:
                     self.leases[job_id] = previous_lease
+                elif runtime.get('lease'):
+                    self.leases[job_id] = {'token': runtime['lease'], 'lastActivity': self.clock()}
             raise ValueError('Checkpoint encoder could not be stopped; retry pause or restart the server for recovery')
         if process and process.stdin:
             try:
@@ -708,7 +756,10 @@ class VideoJobStore:
             # Kill the encoder before taking the per-job lock. A frame writer may be
             # blocked in the pipe, and killing ffmpeg is what wakes that writer.
             self._interrupt_active_segment(job_id)
-            with self._job_lock(job_id):
+            with self._job_lock(job_id), self._idle_owner_guard(job_id):
+                # A frame writer may have created a runtime after the first
+                # interrupt removed its lease and before we obtained the job lock.
+                self._interrupt_active_segment(job_id)
                 manifest, job = self._load(job_id)
                 for path in manifest.parent.glob('.segment-*.pending.mkv'):
                     path.unlink(missing_ok=True)
@@ -1044,7 +1095,8 @@ class VideoJobStore:
             self.stopping.add(job_id)
         try:
             self._interrupt_active_segment(job_id)
-            with self._job_lock(job_id):
+            with self._job_lock(job_id), self._idle_owner_guard(job_id):
+                self._interrupt_active_segment(job_id)
                 with self.lock:
                     index = self._read_index()
                     entry = index['jobs'].get(job_id)
@@ -1088,6 +1140,25 @@ class VideoJobStore:
                 self.stopping.discard(job_id)
 
     def finish(self, job_id):
+        with self.stop_lock:
+            if job_id in self.stopping:
+                raise ValueError('Video export is being cancelled')
+            if job_id in self.finishing:
+                raise ValueError('Video export is finalizing in another request')
+            self.finishing.add(job_id)
+        try:
+            return self._finish_exclusive(job_id)
+        finally:
+            # Early validation/filesystem failures must not leak finalizer
+            # ownership, but never release a live checkpoint/lease on rejection.
+            with self.lock:
+                still_rendering = job_id in self.active or job_id in self.leases
+            if not still_rendering:
+                self._release_owner(job_id)
+            with self.stop_lock:
+                self.finishing.discard(job_id)
+
+    def _finish_exclusive(self, job_id):
         with self._job_lock(job_id):
             with self.stop_lock:
                 if job_id in self.stopping:
@@ -1096,7 +1167,6 @@ class VideoJobStore:
                 runtime = self.active.get(job_id)
                 if runtime:
                     raise ValueError('Video export still has an active checkpoint')
-                self.leases.pop(job_id, None)
             manifest, job = self._load(job_id)
             self._verify_segments(manifest, job)
             request = job['request']
@@ -1108,6 +1178,7 @@ class VideoJobStore:
             if video_format not in ('mp4', 'mkv'):
                 raise ValueError('Unsupported video format')
             with self.lock:
+                self.leases.pop(job_id, None)
                 owns_job = job_id in self.owners
             if not owns_job:
                 self._acquire_owner(manifest, job_id)

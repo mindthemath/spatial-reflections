@@ -229,8 +229,9 @@ def video_capabilities():
               else 'ffmpeg is not installed or is not on the server PATH')
     if ffmpeg:
         store = video_store()
-        if (not store.recovery_running and store.last_recovery['failed']
-                and not store.last_recovery['indexFailed']):
+        if (not store.recovery_running and
+                (store.recovery_pending is True or (store.last_recovery['failed']
+                 and not store.last_recovery['indexFailed']))):
             store.recover_stale_encoders()
         recovery = store.last_recovery
         if store.recovery_running:
