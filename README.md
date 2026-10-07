@@ -22,6 +22,17 @@ make serve
 - Viewer: **http://localhost:1313/**
 - Studio: **http://localhost:1313/studio/**
 
+`make serve` uses port 1313; run directly, `studio/server.py` defaults to port 8000. It listens on `localhost` only unless you pass `--host 0.0.0.0` (alias `--bind`; `-p` for `--port`).
+
+### Docker
+
+```sh
+make run           # builds the image; mounts raw/ (read-only), exports/ and videos/ from this checkout
+make run-isolated  # no mounts: only the bundled fallback faces, and exports/videos are lost on exit
+```
+
+Both serve at **http://localhost:8000/**. The image includes ffmpeg with `libx264`, so video export works out of the box.
+
 Put original photographs in `raw/`. The server has no Python dependencies. Both the viewer and Studio use the pinned Three.js runtime under `vendor/`, so the complete local design, image export and viewer workflow requires no internet connection. This is a trusted local workstation app, not a public production service.
 
 ## Studio → viewer workflow
