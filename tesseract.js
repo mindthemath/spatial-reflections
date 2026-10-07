@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { installSkyboxLibrary } from './viewer-skyboxes.js';
+import { installVisualMusic } from './visual-music.js';
 
 // Main Three.js scene setup
 let scene, camera, renderer, controls;
 let tesseract;
+let visualMusic;
 let currentShape = 'tesseract';
 let rotationSpeed = 0.005;
 let time = 0;
@@ -224,8 +226,12 @@ function init() {
     // Add keyboard controls
     window.addEventListener('keydown', onKeyDown, false);
     
-    // Add UI controls, then connect the export library to the existing Chrome environment.
+    // Add UI controls, then connect the soundtrack and export library to the scene.
     createControls();
+    visualMusic = installVisualMusic({
+        mount: document.getElementById('controlPanelContent'),
+        canvas: renderer.domElement
+    });
     createEnvironmentMap();
     
     // Initialize file upload for loading views
@@ -3266,8 +3272,9 @@ function animate(timestamp) {
     // Update the tesseract projection
     updateTesseractProjection();
     
-    // Render the scene
+    // Render the scene, then let the soundtrack inspect the actual final pixels.
     renderer.render(scene, camera);
+    visualMusic?.tick({frame: timelineFrame, fps: exportFps, paused: animationPaused});
 }
 
 // Initialize file upload handler for loading views

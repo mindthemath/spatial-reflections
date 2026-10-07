@@ -69,6 +69,7 @@ test-fast:
 	node studio/test_video_resume_ui.cjs
 	node studio/test_video_export_form.cjs
 	node studio/test_drag_drop.cjs
+	node studio/test_visual_music.mjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
 	python3 -m unittest discover -s studio -p 'test_video_simple.py'
 	cd studio && python3 -m unittest test_server.ServerStartupTest

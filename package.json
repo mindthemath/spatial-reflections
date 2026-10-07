@@ -6,8 +6,8 @@
     "test": "make test",
     "test:fast": "make test-fast",
     "test:vendor": "node scripts/sync-vendor.mjs --check",
-    "test:syntax": "node --check tesseract.js && node --check viewer-skyboxes.js && node --check studio/studio.js && node --check studio/pipeline.js && node --check studio/test_browser.cjs && node --check studio/test_video_capture.cjs && node --check studio/test_lifecycle.cjs",
-    "test:unit": "node studio/test_resolution.cjs && make test-python",
+    "test:syntax": "node --check tesseract.js && node --check viewer-skyboxes.js && node --check visual-music-core.js && node --check visual-music.js && node --check studio/studio.js && node --check studio/pipeline.js && node --check studio/test_browser.cjs && node --check studio/test_video_capture.cjs && node --check studio/test_lifecycle.cjs",
+    "test:unit": "node studio/test_resolution.cjs && node studio/test_visual_music.mjs && make test-python",
     "test:browser": "make test-browser",
     "sync:vendor": "node scripts/sync-vendor.mjs"
   },
