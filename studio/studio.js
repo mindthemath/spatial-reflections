@@ -66,7 +66,7 @@ async function refreshLibrary(){
     library=(await response.json()).images;$('library').replaceChildren();
     for(const source of library){
         const button=document.createElement('button');button.className='photo';
-        const img=document.createElement('img');img.src=url(source.path);img.loading='lazy';
+        const img=document.createElement('img');img.src=url(source.path);img.loading='lazy';img.alt='';
         const label=document.createElement('span');label.textContent=source.path.slice(4);button.append(img,label);button.onclick=()=>addNode('source',source);$('library').append(button);
     }
     if(!library.length)$('library').textContent='No images yet. Add photos to raw/, then refresh.';
@@ -82,11 +82,11 @@ function addNode(type,source,{x,y,settings}={}){
 function drawGraph(){
     $('nodes').replaceChildren();
     for(const node of state.nodes){
-        const el=document.createElement('article');el.className=`node ${node.type}${selectedNodes.has(node.id)?' selected':''}`;el.dataset.id=node.id;el.style.left=node.x+'px';el.style.top=node.y+'px';
+        const el=document.createElement('article');el.className=`node ${node.type}${selectedNodes.has(node.id)?' selected':''}`;el.dataset.id=node.id;el.setAttribute('role','group');el.setAttribute('aria-label',node.type==='source'?`${title(node)} ${node.source.path}`:title(node));el.style.left=node.x+'px';el.style.top=node.y+'px';
         const header=document.createElement('h3');header.textContent=title(node);
         const body=document.createElement('div');body.className='body';
         if(node.type==='source'){
-            const img=document.createElement('img');img.src=url(node.source.path);body.append(img,document.createTextNode(node.source.path));
+            const img=document.createElement('img');img.src=url(node.source.path);img.alt='';body.append(img,document.createTextNode(node.source.path));
         }else if(node.type==='crop')body.textContent=`Zoom ${node.settings.zoom.toFixed(2)} · ${node.settings.rotation}°`;
         else if(node.type==='light')body.textContent=node.legacy?'Legacy grade · preserved':`EV ${node.settings.exposure>=0?'+':''}${node.settings.exposure.toFixed(2)} · light & color`;
         else if(node.type==='info'){body.classList.add('info-summary');body.textContent=infoSummary(node.id);}
@@ -284,8 +284,8 @@ function inspect(){
         }
         for(const [key,label,min,max,step]of node.type==='crop'?CROP_FIELDS:LIGHT_FIELDS){
             const container=document.createElement('label');container.textContent=label;container.className='adjustment';
-            const number=document.createElement('input');number.type='number';number.min=min;number.max=max;number.step=step;number.value=node.settings[key];number.disabled=!!node.legacy;
-            const range=document.createElement('input');range.type='range';range.min=min;range.max=max;range.step=step;range.value=node.settings[key];range.disabled=!!node.legacy;
+            const number=document.createElement('input');number.type='number';number.setAttribute('aria-label',label);number.min=min;number.max=max;number.step=step;number.value=node.settings[key];number.disabled=!!node.legacy;
+            const range=document.createElement('input');range.type='range';range.setAttribute('aria-label',`${label} slider`);range.min=min;range.max=max;range.step=step;range.value=node.settings[key];range.disabled=!!node.legacy;
             const apply=value=>{if(value===''||!Number.isFinite(Number(value)))return;node.settings[key]=Math.min(max,Math.max(min,Number(value)));range.value=number.value=node.settings[key];schedule();};
             number.onchange=()=>{apply(number.value);checkpoint();drawGraph();};range.oninput=()=>apply(range.value);range.onchange=()=>{checkpoint();drawGraph();};
             container.ondblclick=e=>{if(e.target===number)return;apply((node.type==='crop'?cropDefaults():lightDefaults())[key]);checkpoint();drawGraph();};container.append(number,range);root.append(container);

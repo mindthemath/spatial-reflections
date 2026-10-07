@@ -784,12 +784,15 @@ function createControls() {
     const speedContainer = document.createElement('div');
     speedContainer.style.marginBottom = '10px';
     
-    motionStepLabel = document.createElement('div');
+    motionStepLabel = document.createElement('label');
+    motionStepLabel.htmlFor = 'viewer-motion-step';
+    motionStepLabel.style.display = 'block';
     motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
     motionStepLabel.style.marginBottom = '5px';
     speedContainer.appendChild(motionStepLabel);
     
     motionStepSlider = document.createElement('input');
+    motionStepSlider.id = 'viewer-motion-step';
     motionStepSlider.type = 'range';
     motionStepSlider.min = '0';
     motionStepSlider.max = '10';
@@ -856,7 +859,9 @@ function createControls() {
     const shaderContainer = document.createElement('div');
     shaderContainer.style.marginBottom = '10px';
     
-    const shaderLabel = document.createElement('div');
+    const shaderLabel = document.createElement('label');
+    shaderLabel.htmlFor = 'viewer-shader';
+    shaderLabel.style.display = 'block';
     shaderLabel.textContent = 'Shader Type:';
     shaderLabel.style.marginBottom = '5px';
     shaderContainer.appendChild(shaderLabel);
@@ -902,7 +907,9 @@ function createControls() {
     const lightingContainer = document.createElement('div');
     lightingContainer.style.marginBottom = '10px';
     
-    const lightingLabel = document.createElement('div');
+    const lightingLabel = document.createElement('label');
+    lightingLabel.htmlFor = 'viewer-lighting';
+    lightingLabel.style.display = 'block';
     lightingLabel.textContent = 'Lighting:';
     lightingLabel.style.marginBottom = '5px';
     lightingContainer.appendChild(lightingLabel);
@@ -937,8 +944,10 @@ function createControls() {
     lightingSelect.appendChild(quadOption);
     
     // Light distance control
-    const distanceLabel = document.createElement('div');
+    const distanceLabel = document.createElement('label');
     distanceLabel.id = 'viewer-light-distance-label';
+    distanceLabel.htmlFor = 'viewer-light-distance';
+    distanceLabel.style.display = 'block';
     distanceLabel.textContent = `Light Distance: ${lightDistance.toFixed(1)}`;
     distanceLabel.style.marginTop = '5px';
     distanceLabel.style.marginBottom = '5px';
@@ -1142,6 +1151,7 @@ function createControls() {
 
     timelineSlider = document.createElement('input');
     timelineSlider.type = 'range';
+    timelineSlider.setAttribute('aria-label', 'Timeline frame');
     timelineSlider.min = '0';
     timelineSlider.max = '0';
     timelineSlider.step = '1';
@@ -1163,10 +1173,11 @@ function createControls() {
     frameButtons.style.display = 'flex';
     frameButtons.style.gap = '5px';
     frameButtons.style.marginTop = '6px';
-    [['− Frame', -1], ['+ Frame', 1]].forEach(([label, direction]) => {
+    [['− Frame', -1, 'Previous frame'], ['+ Frame', 1, 'Next frame']].forEach(([label, direction, name]) => {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = label;
+        button.setAttribute('aria-label', name);
         button.style.flex = '1';
         button.style.padding = '4px';
         button.addEventListener('click', () => {
@@ -3263,6 +3274,7 @@ function animate(timestamp) {
 function initFileUpload() {
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
+    fileInput.setAttribute('aria-label', 'Load saved view (PNG screenshot)');
     fileInput.accept = 'image/png';
     fileInput.style.display = 'none';
     document.body.appendChild(fileInput);
