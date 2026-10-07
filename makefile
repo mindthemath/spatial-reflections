@@ -13,6 +13,16 @@ unstick:
 static:
 	python3 -m http.server --directory site 1315
 
+build:
+	docker build -t spatial-reflections .
+
+run:
+	docker run --rm -ti -p 8000:8000 \
+		-v $$(pwd)/raw:/app/raw:ro \
+		-v $$(pwd)/exports:/app/exports:rw \
+		-v $$(pwd)/videos:/app/videos:rw \
+		spatial-reflections
+
 install:
 	bun install
 	bunx playwright install chromium

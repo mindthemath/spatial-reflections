@@ -721,7 +721,7 @@ class StudioHTTPServer(ThreadingHTTPServer):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', type=int, default=1313)
+    parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--video-mode', choices=('resumable', 'simple'), default='resumable',
                         help='simple: one-shot encoding; cancellation discards partial output')
     args = parser.parse_args()
