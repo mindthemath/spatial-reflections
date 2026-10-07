@@ -1,4 +1,4 @@
-.PHONY: serve static build run run-isolated install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser _test-all _test-browser unstick
+.PHONY: serve static build run run-isolated install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser _test-all _test-browser unstick build run run-isolated
 
 TEST_GUARD = python3 scripts/test_guard.py
 
