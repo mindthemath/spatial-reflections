@@ -1,4 +1,6 @@
 // Browser integration test. Uses the Bun-managed Playwright dependency and never touches real raw/ or exports/.
+const {ensureGuard,bounded,stopServer,installCleanup}=require('./test_lifecycle.cjs');
+ensureGuard(__filename,{network:true,timeout:300});
 const {chromium}=require('playwright');
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict'),{spawn}=require('child_process');
 (async()=>{
@@ -6,11 +8,40 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
  fs.cpSync(__dirname,path.join(root,'studio'),{recursive:true});fs.mkdirSync(path.join(root,'raw'));
  for(const file of ['index.html','tesseract.js','viewer-skyboxes.js','skybox-paths.js'])fs.copyFileSync(path.join(__dirname,'..',file),path.join(root,file));
  fs.cpSync(path.join(__dirname,'..','vendor'),path.join(root,'vendor'),{recursive:true});
- const server=spawn('python3',['-c',`import sys;sys.path.insert(0,${JSON.stringify(__dirname)});import server;from pathlib import Path;server.ROOT=Path(${JSON.stringify(root)});http=server.ThreadingHTTPServer(('localhost',0),server.Handler);print(http.server_port,flush=True);http.serve_forever()`]);
- let browser;
+ const fixture=`
+import signal,sys
+sys.path.insert(0,${JSON.stringify(__dirname)})
+import server
+from pathlib import Path
+server.ROOT=Path(${JSON.stringify(root)})
+server.VIDEO_MODE=${JSON.stringify(process.env.TESSERACT_TEST_VIDEO_MODE || 'resumable')}
+http=server.StudioHTTPServer(('localhost',0),server.Handler)
+def stop(*_): raise KeyboardInterrupt()
+signal.signal(signal.SIGTERM,stop)
+try:
+    print(http.server_port,flush=True)
+    http.serve_forever()
+except KeyboardInterrupt:
+    pass
+finally:
+    server.pause_all_videos()
+    http.server_close()
+`;
+ const server=spawn('python3',['-c',fixture]);
+ let browser,serverErrors='';
+ // Drain stderr continuously. Per-frame HTTP logs must never fill the pipe and
+ // block the test server; retain only a small diagnostic tail.
+ server.stderr.on('data',data=>{serverErrors=(serverErrors+data.toString()).slice(-8192);});
+ const cleanup=installCleanup(async()=>{
+  try{if(browser)await bounded(browser.close(),10000,'Chromium shutdown');}
+  finally{await stopServer(server);fs.rmSync(root,{recursive:true,force:true});}
+ });
  try{
-  const port=await new Promise((resolve,reject)=>{server.stdout.once('data',data=>resolve(Number(data.toString().trim())));server.once('error',reject);});
-  browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),args:['--use-gl=angle','--use-angle=swiftshader']});
+  const port=await bounded(new Promise((resolve,reject)=>{
+   let output='';server.stdout.on('data',data=>{output+=data.toString();const line=output.split('\n')[0];if(/^\d+$/.test(line))resolve(Number(line));});
+   server.once('error',reject);server.once('exit',code=>reject(new Error(`Test server exited (${code}): ${serverErrors}`)));
+  }),10000,'Test server startup');
+  browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),timeout:15000,args:['--renderer-process-limit=2','--use-gl=angle','--use-angle=swiftshader']});
   const context=await browser.newContext({viewport:{width:1700,height:1100}});
   const page=await context.newPage(),errors=[];let starting=true,failStartup;
   const startupFailure=new Promise((_,reject)=>{failStartup=reject;});
@@ -76,20 +107,31 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+  const dragOverlay=await viewer.evaluate(()=>{
+   const zone=document.getElementById('drop-zone');
+   const emit=type=>window.dispatchEvent(new DragEvent(type,{bubbles:true,cancelable:true,clientX:200,clientY:200}));
+   emit('dragenter');emit('dragover');const shown=zone.style.display;
+   emit('dragleave');const left=zone.style.display;
+   emit('dragenter');emit('dragover');window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
+   return {shown,left,cancelled:zone.style.display};
+  });
+  assert.deepEqual(dragOverlay,{shown:'block',left:'none',cancelled:'none'});
   // Video export defaults to a 30s clip inside the loop, and still rejects an empty window before encoding.
   await viewer.locator('#rotation-xw').fill('10');await viewer.locator('details').filter({hasText:'Video timing'}).locator('summary').click();
   await viewer.locator('#open-video-export').click();await viewer.waitForSelector('#video-export-dialog[open]');await viewer.waitForFunction(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes'||document.querySelector('#video-export-status').classList.contains('error'));
   assert.deepEqual(await viewer.locator('#video-export-dialog').evaluate(dialog=>JSON.parse(dialog.dataset.encoderRecovery)),{recovered:0,alreadyExited:0,refused:0,skippedActive:0,failed:0,indexFailed:false});
-  assert.equal(await viewer.locator('#video-export-checkpoint').inputValue(),'60');assert(await viewer.locator('#video-export-scratch').isVisible());
+  const renderEnvironment=await viewer.locator('#video-export-dialog').evaluate(dialog=>JSON.parse(JSON.parse(dialog.dataset.renderSignature).environment));assert.equal(renderEnvironment.kind,'export');assert.equal(Object.keys(renderEnvironment.faces).length,6);assert(Object.values(renderEnvironment.faces).every(hash=>/^[a-f0-9]{64}$/.test(hash)));
+  const simpleVideo=process.env.TESSERACT_TEST_VIDEO_MODE==='simple';
+  if(!simpleVideo){assert.equal(await viewer.locator('#video-export-checkpoint').inputValue(),'60');assert(await viewer.locator('#video-export-scratch').isVisible());}
   assert.equal(await viewer.locator('#video-export-range').inputValue(),'clip');assert.match(await viewer.locator('#video-export-summary').innerText(),/Clip/);assert.match(await viewer.locator('#video-export-summary').innerText(),/30\.00 s/);assert.match(await viewer.locator('#video-export-summary').innerText(),/estimated MP4 size/);
   await viewer.locator('#video-export-range').selectOption('full');assert(!(await viewer.locator('#video-export-clip-fields').isVisible()));assert.equal(await viewer.locator('#video-export-range option[value="full"]').innerText(),'Whole loop');assert.doesNotMatch(await viewer.locator('#video-export-summary').innerText(),/[Pp]erfect/);
-  await viewer.locator('#video-export-checkpoint').fill('0');assert.match(await viewer.locator('#video-export-summary').innerText(),/No checkpoints/);assert.match(await viewer.locator('#video-export-summary').innerText(),/restarts from frame 0/);
-  await viewer.locator('#video-export-range').selectOption('clip');assert(await viewer.locator('#video-export-clip-fields').isVisible());await viewer.locator('#video-export-checkpoint').fill('60');
+  if(!simpleVideo){await viewer.locator('#video-export-checkpoint').fill('0');assert.match(await viewer.locator('#video-export-summary').innerText(),/No checkpoints/);assert.match(await viewer.locator('#video-export-summary').innerText(),/restarts from frame 0/);}
+  await viewer.locator('#video-export-range').selectOption('clip');assert(await viewer.locator('#video-export-clip-fields').isVisible());if(!simpleVideo)await viewer.locator('#video-export-checkpoint').fill('60');
   await viewer.locator('#video-export-duration').fill('5');assert.match(await viewer.locator('#video-export-status').innerText(),/5\.00 s clip is selected/);
   await viewer.locator('#video-export-format').selectOption('mkv');assert.match(await viewer.locator('#video-export-summary').innerText(),/H\.264 MKV/);
   await viewer.locator('#video-export-range').selectOption('clip');await viewer.locator('#video-export-duration').fill('0');assert.match(await viewer.locator('#video-export-summary').innerText(),/at least one frame/);
   // Exercise the complete browser → streamed PNG → ffmpeg path when ffmpeg is available on the test host.
-  if(await viewer.evaluate(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes')){
+  if(await viewer.evaluate(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes'&&document.querySelector('#video-export-dialog').dataset.videoMode!=='simple')){
    await viewer.locator('#video-export-duration').fill('0.02');await viewer.locator('#video-export-resolution').selectOption('1280x720');await viewer.locator('#video-export-quality').selectOption('draft');
    await viewer.locator('#confirm-video-export').click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});assert.match(await viewer.locator('#video-export-status').innerText(),/^Export complete/);assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.endsWith('.mkv')));
    let pauseAcknowledged=false;
@@ -103,11 +145,13 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
    await viewer.locator('#video-export-duration').fill('2');
    await viewer.locator('#confirm-video-export').click();
    await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Rendering + encoding'));
+   assert.equal(await viewer.locator('#video-resume-jobs').evaluate(section=>section.inert),true);
    await viewer.locator('#cancel-video-export').click();
    await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('paused'));
    assert(pauseAcknowledged,'pause UI completed before the server acknowledged it');
    const pausedCard=viewer.locator('.video-resume-job').filter({hasText:'browser-pause'});
    await pausedCard.waitFor();assert(!(await pausedCard.locator('.resume-video-export').isDisabled()));
+   assert.equal(await viewer.locator('#video-resume-jobs').evaluate(section=>section.inert),false);
    await pausedCard.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await pausedCard.waitFor({state:'detached'});
 
    await viewer.locator('#video-export-name').fill('browser-cancel');
@@ -118,6 +162,25 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
    await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('cancelled and discarded'));
    assert.equal(await viewer.evaluate(()=>fetch('/api/video/jobs').then(response=>response.json()).then(value=>value.jobs.length)),0);
    assert(!fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-cancel-')));
+   await viewer.route('**/api/video/frame?*',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'injected frame failure'})}),{times:1});
+   await viewer.route('**/api/video/pause',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'injected pause failure'})}),{times:1});
+   await viewer.locator('#video-export-name').fill('browser-failed-pause');await viewer.locator('#video-export-duration').fill('0.02');
+   await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Could not pause'));
+   assert.doesNotMatch(await viewer.locator('#video-export-status').innerText(),/Export paused/);
+   const failedPause=viewer.locator('.video-resume-job').filter({hasText:'browser-failed-pause'});await failedPause.waitFor();
+   await failedPause.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await failedPause.waitFor({state:'detached'});
+   await viewer.route('**/api/video/frame?*',async route=>{
+    const query=new URL(route.request().url()).searchParams;
+    const paused=await context.request.post(`http://localhost:${port}/api/video/pause`,{data:{id:query.get('id'),lease:query.get('lease'),reason:'libx264 diagnostic: injected scratch full'}});
+    assert(paused.ok());await route.fulfill({status:400,json:{error:'Checkpoint encoder failed'}});
+   },{times:1});
+   await viewer.locator('#video-export-name').fill('browser-encoder-failure');await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Export paused'));
+   assert.doesNotMatch(await viewer.locator('#video-export-status').innerText(),/Could not pause|lease is no longer active/);
+   const encoderFailure=viewer.locator('.video-resume-job').filter({hasText:'browser-encoder-failure'});await encoderFailure.waitFor();
+   assert.match(await encoderFailure.innerText(),/libx264 diagnostic: injected scratch full/);
+   await encoderFailure.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await encoderFailure.waitFor({state:'detached'});
    const pausedId=await viewer.evaluate(async()=>{
     const dialog=document.querySelector('#video-export-dialog'),signature=dialog.dataset.renderSignature;
     const request={name:'browser-resume',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
@@ -127,14 +190,107 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
    });
    await viewer.locator('#close-video-export').click();await viewer.locator('#open-video-export').click();await viewer.waitForSelector(`.video-resume-job[data-job-id="${pausedId}"]`);
    await viewer.locator(`.video-resume-job[data-job-id="${pausedId}"] .resume-video-export`).click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-resume-')&&file.endsWith('.mp4')));
+   // Legacy signatures cannot resume rendering, but fully durable jobs must
+   // finalize through the actual UI without requiring a matching environment.
+   const legacyId=await viewer.evaluate(async()=>{
+    const signature=JSON.parse(document.querySelector('#video-export-dialog').dataset.renderSignature);delete signature.environment;
+    const request={name:'browser-legacy-finalize',width:64,height:64,fps:24,frames:1,quality:'draft',format:'mp4',checkpointSeconds:1,sourceUrl:location.pathname+location.search,renderSignature:JSON.stringify(signature),viewerState:{}};
+    const start=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    if(!start.ok)throw new Error(await start.text());
+    const started=await start.json();
+    const canvas=document.createElement('canvas');canvas.width=canvas.height=64;canvas.getContext('2d').fillRect(0,0,64,64);
+    const png=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
+    const frame=await fetch(`/api/video/frame?id=${started.id}&frame=0&lease=${started.lease}`,{method:'POST',headers:{'Content-Type':'image/png'},body:png});
+    if(!frame.ok)throw new Error(await frame.text());
+    await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});
+    return started.id;
+   });
+   const finalizeContext=await browser.newContext({viewport:{width:800,height:600}}),finalizePage=await finalizeContext.newPage();
+   finalizePage.on('pageerror',error=>errors.push(error.message));
+   await finalizePage.goto(`http://localhost:${port}/?skybox=exports%2Fmissing-legacy-environment`);
+   await finalizePage.waitForFunction(()=>document.querySelector('#skybox-status')?.classList.contains('error'));
+   await finalizePage.route('**/api/video/capabilities',async route=>{
+    const response=await route.fetch();const capabilities=await response.json();
+    await route.fulfill({json:{...capabilities,available:false,canManage:true,reason:'injected missing libx264'}});
+   });
+   await finalizePage.locator('details').filter({hasText:'Video timing'}).locator('summary').click();
+   await finalizePage.locator('#open-video-export').click();
+   const legacy=finalizePage.locator(`.video-resume-job[data-job-id="${legacyId}"]`);await legacy.waitFor();
+   assert.equal(await legacy.locator('.restore-video-export').count(),0);assert.equal(await legacy.locator('.resume-video-export').innerText(),'Finalize');
+   await finalizePage.route('**/api/video/finish',async route=>{
+    const request=route.request().postDataJSON();
+    // Simulate a concat failure after the server consumed the rendering lease.
+    const paused=await finalizeContext.request.post(`http://localhost:${port}/api/video/pause`,{data:{id:request.id}});
+    assert(paused.ok());await route.fulfill({status:500,json:{error:'injected concat failure'}});
+   });
+   await legacy.locator('.resume-video-export').click();
+   await finalizePage.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Finalization failed; checkpoints retained'));
+   assert.doesNotMatch(await finalizePage.locator('#video-export-status').innerText(),/Could not pause|lease is no longer active|Export paused/);
+   await finalizePage.unroute('**/api/video/finish');await legacy.waitFor();
+   await legacy.locator('.resume-video-export').click();await finalizePage.waitForSelector('#video-export-result a',{timeout:30000});
+   assert(fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('browser-legacy-finalize-')&&file.endsWith('.mp4')));
+   await finalizeContext.close();
    const mismatchId=await viewer.evaluate(async()=>{
-    const request={name:'mismatch',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:'different-render',startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
+    const signature=JSON.parse(document.querySelector('#video-export-dialog').dataset.renderSignature);signature.shader='different-render';
+    const request={name:'mismatch',width:1280,height:720,fps:60,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:JSON.stringify(signature),startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState:{}};
     const started=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}).then(r=>r.json());
     await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});
     return started.id;
    });
    await viewer.locator('#close-video-export').click();await viewer.locator('#open-video-export').click();const mismatch=viewer.locator(`.video-resume-job[data-job-id="${mismatchId}"]`);await mismatch.waitFor();assert(await mismatch.locator('.resume-video-export').isDisabled());assert.match(await mismatch.innerText(),/settings do not match/i);
    await mismatch.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await mismatch.waitFor({state:'detached'});
+   const restorableId=await viewer.evaluate(async()=>{
+    const dialog=document.querySelector('#video-export-dialog'),signature=dialog.dataset.renderSignature,viewerState=JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1'));
+    viewerState.panelExpanded=false;viewerState.videoTimingExpanded=false;viewerState.animationPaused=true;
+    const request={name:'restore-settings',width:1280,height:720,fps:viewerState.exportFps,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState};
+    const started=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}).then(r=>r.json());
+    await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});return started.id;
+   });
+   await viewer.locator('#close-video-export').click();await viewer.locator('#viewer-shader').selectOption('rough');await viewer.locator('#open-video-export').click();
+   const restorable=viewer.locator(`.video-resume-job[data-job-id="${restorableId}"]`);await restorable.waitFor();assert(await restorable.locator('.resume-video-export').isDisabled());
+   await viewer.locator('#video-export-resolution').selectOption('1920x1080');await viewer.locator('#video-export-quality').selectOption('high');
+   await restorable.locator('.restore-video-export').click();await viewer.waitForFunction(id=>{const button=document.querySelector(`.video-resume-job[data-job-id="${id}"] .resume-video-export`);return button&&!button.disabled;},restorableId);assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+   assert.equal(await viewer.locator('#video-export-resolution').inputValue(),'1280x720');assert.equal(await viewer.locator('#video-export-quality').inputValue(),'draft');
+   assert.equal(await viewer.locator('#controlPanelContent').evaluate(element=>element.hidden),false);
+   const restoredPreferences=await viewer.evaluate(()=>JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1')));
+   assert.equal(restoredPreferences.panelExpanded,true);assert.equal(restoredPreferences.videoTimingExpanded,true);
+   await restorable.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await restorable.waitFor({state:'detached'});
+  }
+  if(await viewer.evaluate(()=>document.querySelector('#video-export-dialog').dataset.videoMode==='simple')){
+   assert(await viewer.locator('#video-export-checkpoint').isHidden());assert(await viewer.locator('#video-export-scratch').isHidden());
+   await viewer.locator('#video-export-name').fill('simple-browser');await viewer.locator('#video-export-start').fill('0.5');await viewer.locator('#video-export-duration').fill('0.02');
+   assert.match(await viewer.locator('#video-export-summary').innerText(),/SIMPLE MODE/);
+   await viewer.locator('#video-export-resolution').selectOption('1280x720');await viewer.locator('#video-export-format').selectOption('mp4');await viewer.locator('#video-export-quality').selectOption('draft');
+   await viewer.locator('#confirm-video-export').click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});
+   const movie=fs.readdirSync(path.join(root,'videos')).find(file=>file.startsWith('simple-browser-')&&file.endsWith('.mp4'));assert(movie);
+   const stem=path.join(root,'videos',movie.slice(0,-4));
+   const metadata=JSON.parse(fs.readFileSync(`${stem}.json`,'utf8'));
+   assert.equal(metadata.videoMode,'simple');assert.equal(metadata.poster.file,path.basename(`${stem}.png`));
+   assert.equal(metadata.frames,1);assert(metadata.startFrame>0);assert(metadata.renderSignature);assert(metadata.viewerState);
+   assert.equal(metadata.viewerState.shader,'chrome');
+   await viewer.locator('#close-video-export').click();
+   await viewer.locator('#viewer-shader').selectOption('rough');await viewer.locator('#rotation-xw').fill('3');
+   const pngBase64=fs.readFileSync(`${stem}.png`).toString('base64');
+   const restoreMessages=[];viewer.on('console',message=>{restoreMessages.push(message.text());if(restoreMessages.length>20)restoreMessages.shift();});
+   await viewer.evaluate(({pngBase64,name})=>{
+    const bytes=Uint8Array.from(atob(pngBase64),char=>char.charCodeAt(0));
+    const transfer=new DataTransfer();transfer.items.add(new File([bytes],name,{type:'image/png'}));
+    window.dispatchEvent(new DragEvent('drop',{dataTransfer:transfer,bubbles:true,cancelable:true}));
+   },{pngBase64,name:path.basename(`${stem}.png`)});
+   try{await viewer.waitForFunction(frame=>{const state=JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1'));return state.shader==='chrome'&&state.animationPaused&&state.timelineFrame===frame;},metadata.startFrame,{timeout:5000});}
+   catch(error){throw new Error(`PNG restore failed: ${restoreMessages.join('\n')}\nSaved: ${await viewer.evaluate(()=>localStorage.getItem('tesseract.viewer-settings.v1'))}`,{cause:error});}
+   const restored=await viewer.evaluate(()=>JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1')));
+   assert.deepEqual(restored.rotationCoefficients,metadata.viewerState.rotationCoefficients);
+   assert.deepEqual(restored.camera,metadata.viewerState.camera);assert.equal(restored.exportFps,metadata.fps);
+   await viewer.locator('#open-video-export').click();
+   await viewer.locator('#video-export-name').fill('simple-browser-cancel');
+   await viewer.locator('#video-export-duration').fill('2');await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Rendering + encoding'));
+   assert.equal(await viewer.locator('#cancel-video-export').innerText(),'Cancel export');assert(await viewer.locator('#discard-active-video-export').isHidden());
+   await viewer.locator('#cancel-video-export').click();await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('cancelled and discarded'));
+   assert(!fs.existsSync(path.join(root,'videos','.checkpoints')));assert(!fs.existsSync(path.join(root,'videos','.video-jobs.json')));
+   assert(!fs.readdirSync(path.join(root,'videos')).some(file=>file.startsWith('.simple-')));
+   assert(await viewer.locator('#video-resume-jobs').isHidden());
   }
   if(await viewer.locator('#video-export-dialog').isVisible())await viewer.locator('#close-video-export').click();
   const cameraBefore=await viewer.locator('#viewer-camera-info').innerText();
@@ -202,5 +358,5 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
   assert(fs.existsSync(path.join(root,'exports',folder,'pipeline.json')));assert(fs.existsSync(path.join(root,'raw','a.png')));
   await Promise.all([page.waitForEvent('load'),page.locator('#reload-app').click()]);await page.waitForSelector('.photo');assert.equal(await page.locator('.node').count(),1);assert.equal((await capture()).edges.length,0);
   assert.deepEqual(errors,[]);console.log('PASS: Studio graph/export, viewer gallery, publish-dialog keyboard isolation, offline vendored runtime, failure retention, persistence and Studio reopen.');
- }finally{if(browser)await browser.close();server.kill();fs.rmSync(root,{recursive:true,force:true});}
+ }finally{await cleanup();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

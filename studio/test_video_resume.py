@@ -518,6 +518,214 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertRegex(str(write_errors[0]), 'lease')
         self.assertNotIn(job['id'], self.store.active)
 
+    def test_recovery_pauses_ownerless_active_jobs_without_encoder_markers(self):
+        for complete in (False, True):
+            job = self.ready_job() if complete else self.store.create(request())
+            manifest = json.loads(self.manifest(job).read_text())
+            manifest['state'] = 'active'
+            self.write_manifest(job, manifest)
+            self.store.processes_for_path = lambda _path: []
+            self.store.recover_stale_encoders()
+            recovered = self.store.get(job['id'])
+            self.assertEqual(recovered['state'], 'paused')
+            self.assertIn('interrupted export', recovered['reason'])
+            self.assertEqual(recovered['nextFrame'], 2 if complete else 0)
+
+    def test_failed_live_encoder_cleanup_requests_recovery_after_storage_heals(self):
+        class Encoder:
+            pid=23456
+            def __init__(self,*_args,**_kwargs): self.stdin=io.BytesIO();self.returncode=None
+            def poll(self): return self.returncode
+            def kill(self): self.returncode=-9
+            def wait(self,timeout=None): return self.returncode
+        for action in ('pause','fail','unlink'):
+            with self.subTest(action=action):
+                self.store.popen=Encoder
+                job=self.store.create(request());lease=self.store.resume(job['id'])['lease']
+                self.store.write_frame(job['id'],0,b'png',lease)
+                runtime=self.store.active[job['id']];stderr=runtime['stderrStream']
+                self.assertIn('activeEncoder',json.loads(self.manifest(job).read_text()))
+                if action=='unlink':
+                    runtime['pending']=mock.Mock(unlink=mock.Mock(side_effect=OSError('scratch unplugged')))
+                    with self.assertRaisesRegex(OSError,'scratch unplugged'): self.store.pause(job['id'],lease=lease)
+                else:
+                    with mock.patch.object(self.store,'_save',side_effect=OSError('scratch unplugged')):
+                        with self.assertRaisesRegex(OSError,'scratch unplugged'):
+                            if action=='pause': self.store.pause(job['id'],lease=lease)
+                            else: self.store._fail_active_segment(job['id'],runtime,'encoder failed')
+                self.assertTrue(self.store.recovery_pending);self.assertTrue(stderr.closed)
+                self.assertNotIn(job['id'],self.store.owners);self.assertNotIn(job['id'],self.store.active)
+                self.assertNotIn(job['id'],self.store.leases)
+                # Restored mount: stale PID metadata is repaired without restart.
+                self.store.processes_for_path=lambda _path: []
+                self.store.process_command=lambda _pid: ''
+                report=self.store.recover_stale_encoders();self.assertEqual(report['failed'],0)
+                self.assertEqual(self.store.get(job['id'])['state'],'paused')
+                self.store.resume(job['id']);self.store.pause(job['id'])
+
+    def test_transient_start_marker_save_failure_leaves_job_paused(self):
+        class Encoder:
+            pid=23456
+            def __init__(self,*_args,**_kwargs): self.stdin=io.BytesIO();self.returncode=None
+            def poll(self): return self.returncode
+            def kill(self): self.returncode=-9
+            def wait(self,timeout=None): return self.returncode
+        self.store.popen=Encoder
+        job=self.store.create(request());lease=self.store.resume(job['id'])['lease']
+        original=self.store._save;calls=[]
+        def save(manifest,data):
+            calls.append(True)
+            if len(calls)==1: raise OSError('transient marker write failure')
+            return original(manifest,data)
+        with mock.patch.object(self.store,'_save',side_effect=save):
+            with self.assertRaisesRegex(OSError,'transient marker'):
+                self.store.write_frame(job['id'],0,b'png',lease)
+        self.assertEqual(self.store.get(job['id'])['state'],'paused')
+        self.assertNotIn(job['id'],self.store.owners);self.assertNotIn(job['id'],self.store.leases)
+        self.store.resume(job['id']);self.store.pause(job['id'])
+
+    def test_repair_requested_during_recovery_survives_report_publication(self):
+        def scan():
+            self.store.recovery_pending = True
+            self.store.last_recovery = self.store._empty_recovery_report()
+            return dict(self.store.last_recovery)
+        with mock.patch.object(self.store, '_recover_stale_encoders', side_effect=scan):
+            self.store.recover_stale_encoders()
+        self.assertTrue(self.store.recovery_pending)
+        self.store.recover_stale_encoders()
+        self.assertFalse(self.store.recovery_pending)
+
+    def test_overlapping_recovery_does_not_consume_pending_repair(self):
+        self.store.recovery_pending = True
+        self.store.recovery_running = True
+        with self.store.recovery_lock, mock.patch.object(self.store, '_recover_stale_encoders') as scan:
+            self.store.recover_stale_encoders()
+            scan.assert_not_called()
+            self.assertTrue(self.store.recovery_pending)
+            self.assertTrue(self.store.recovery_running)
+        self.store.recovery_running = False
+
+    def test_recovery_does_not_rewrite_already_idle_manifests(self):
+        self.store.create(request())
+        self.ready_job()
+        self.store.processes_for_path = lambda _path: []
+        with mock.patch.object(self.store, '_save', side_effect=AssertionError('Unchanged recovery must not write')):
+            report = self.store.recover_stale_encoders()
+        self.assertEqual(report['failed'], 0)
+
+    def test_failed_stop_of_late_starting_encoder_keeps_ownership_and_lease(self):
+        spawning, release, interrupted = threading.Event(), threading.Event(), threading.Event()
+        processes, errors = [], []
+        class ResistantProcess:
+            pid = 23456
+            def __init__(self, *_args, **_kwargs):
+                spawning.set();release.wait(2)
+                self.stdin = io.BytesIO();self.returncode = None;self.resist = True
+                processes.append(self)
+            def poll(self): return self.returncode
+            def kill(self):
+                if self.resist: raise OSError('stuck scratch I/O')
+                self.returncode = -9
+            def wait(self, timeout=None): return self.returncode
+        self.store.popen = ResistantProcess
+        job = self.store.create(request())
+        lease = self.store.resume(job['id'])['lease']
+        original = self.store._interrupt_active_segment
+        def interrupt(job_id):
+            original(job_id)
+            if threading.current_thread().name == 'late-pauser': interrupted.set()
+        self.store._interrupt_active_segment = interrupt
+        def invoke(action):
+            try: action()
+            except Exception as error: errors.append(error)
+        writer = threading.Thread(target=lambda: invoke(lambda: self.store.write_frame(job['id'],0,b'png',lease)))
+        pauser = threading.Thread(name='late-pauser',target=lambda: invoke(lambda: self.store.pause(job['id'],lease=lease)))
+        writer.start();self.assertTrue(spawning.wait(2));pauser.start()
+        try:
+            self.assertTrue(interrupted.wait(2))
+        finally:
+            release.set();writer.join(2);pauser.join(2)
+        self.assertFalse(writer.is_alive());self.assertFalse(pauser.is_alive())
+        self.assertEqual(len(errors),2)
+        self.assertTrue(all('could not be stopped' in str(error) for error in errors))
+        self.assertIn(job['id'],self.store.active);self.assertIn(job['id'],self.store.owners)
+        self.assertEqual(self.store.leases[job['id']]['token'],lease)
+        self.assertIn('activeEncoder',json.loads(self.manifest(job).read_text()))
+        processes[0].resist = False
+        self.store.pause(job['id'],lease=lease)
+
+    def test_failed_pause_or_discard_releases_idle_owner_for_retry(self):
+        for operation, method in ((self.store.pause, '_save'), (self.store.pause, '_load'),
+                                  (self.store.discard, '_remove_job_directory')):
+            with self.subTest(operation=operation.__name__, failure=method):
+                job = self.store.create(request())
+                self.store.resume(job['id'])
+                with mock.patch.object(self.store, method, side_effect=OSError('unmounted scratch')):
+                    with self.assertRaisesRegex(OSError, 'unmounted'):
+                        operation(job['id'])
+                self.assertNotIn(job['id'], self.store.owners)
+                self.assertNotIn(job['id'], self.store.leases)
+                self.assertTrue(self.store.recovery_pending)
+                # Mount restored: no false 'active in another server' lock conflict.
+                resumed = self.store.resume(job['id'])
+                self.assertTrue(resumed['lease'])
+                self.store.pause(job['id'])
+
+    def test_recovery_never_pauses_a_live_owner_between_checkpoints(self):
+        job = self.store.create(request())
+        self.store.resume(job['id'])
+        other = VideoJobStore(self.root, '/fake/ffmpeg')
+        other.processes_for_path = mock.Mock(side_effect=AssertionError('Live owner must not be scanned'))
+        report = other.recover_stale_encoders()
+        self.assertEqual(report['skippedActive'], 1)
+        self.assertEqual(other.get(job['id'])['state'], 'active')
+
+    def test_resume_reserves_transition_against_pause_discard_and_resume(self):
+        job = self.store.create(request())
+        entered, release = threading.Event(), threading.Event()
+        original = self.store._resume_exclusive
+        errors = []
+        def delayed(*args):
+            entered.set()
+            release.wait(2)
+            return original(*args)
+        self.store._resume_exclusive = delayed
+        def resume():
+            try: self.store.resume(job['id'])
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=resume)
+        worker.start()
+        self.assertTrue(entered.wait(2))
+        try:
+            for operation in (self.store.pause, self.store.discard, self.store.resume):
+                with self.assertRaisesRegex(ValueError, 'stopping'):
+                    operation(job['id'])
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertIn(job['id'], self.store.owners)
+        self.assertIn(job['id'], self.store.leases)
+        self.assertNotIn(job['id'], self.store.stopping)
+
+    def test_missing_encoder_allows_only_fully_verified_finalization(self):
+        incomplete = self.store.create(request())
+        with self.assertRaisesRegex(ValueError, 'libx264 unavailable'):
+            self.store.resume(incomplete['id'], encoder_error='libx264 unavailable')
+        self.assertNotIn(incomplete['id'], self.store.owners)
+        self.assertNotIn(incomplete['id'], self.store.leases)
+        complete = self.ready_job()
+        result = self.store.resume(complete['id'], encoder_error='libx264 unavailable')
+        self.assertEqual(result['nextFrame'], result['frames'])
+        self.store.pause(complete['id'])
+        # Repair can change a superficially complete job back to needing frames.
+        (self.manifest(complete).parent / 'segment-000001.mkv').unlink()
+        with self.assertRaisesRegex(ValueError, 'libx264 unavailable'):
+            self.store.resume(complete['id'], encoder_error='libx264 unavailable')
+        self.assertNotIn(complete['id'], self.store.owners)
+        self.assertNotIn(complete['id'], self.store.leases)
+
     def test_resume_cannot_race_past_pause_transition(self):
         job = self.store.create(request())
         active = self.store.resume(job['id'])
@@ -590,6 +798,7 @@ class VideoJobStoreTest(unittest.TestCase):
             def __init__(self, command, **_kwargs):
                 self.stdin = io.BytesIO()
                 self.output = Path(command[-1])
+                self.command = command
                 self.returncode = None
                 processes.append(self)
 
@@ -607,19 +816,64 @@ class VideoJobStoreTest(unittest.TestCase):
         self.store.popen = FakeProcess
         job = self.store.create(request(fps=2, frames=6, checkpointSeconds=2))
         lease = self.store.resume(job['id'])['lease']
-        for frame in range(3):
-            progress = self.store.write_frame(job['id'], frame, b'png', lease)
-            self.assertEqual(progress['durableFrame'], 0)
+        with mock.patch.dict('os.environ', {'TESSERACT_TEST_ENCODER_THREADS': '2'}):
+            for frame in range(3):
+                progress = self.store.write_frame(job['id'], frame, b'png', lease)
+                self.assertEqual(progress['durableFrame'], 0)
         progress = self.store.write_frame(job['id'], 3, b'png', lease)
         self.assertEqual(progress['durableFrame'], 4)
         self.assertTrue(progress['checkpointed'])
         self.assertEqual(len(processes), 1)
+        command = processes[0].command
+        thread_flags = [index for index, arg in enumerate(command) if arg == '-threads']
+        self.assertEqual(len(thread_flags), 2)
+        self.assertLess(thread_flags[0], command.index('-i'), 'PNG decoder input scope')
+        self.assertGreater(thread_flags[1], command.index('-c:v'), 'H.264 encoder output scope')
+        self.assertEqual([command[index + 1] for index in thread_flags], ['2', '2'])
+        self.assertEqual(command[command.index('-filter_threads') + 1], '1')
+        color_filter = command[command.index('-vf') + 1]
+        self.assertIn('scale=in_range=pc:out_range=tv:out_color_matrix=bt709', color_filter)
+        self.assertIn('setparams=range=limited:color_primaries=bt709:color_trc=iec61966-2-1:colorspace=bt709', color_filter)
+        for flag in ('-color_range', '-colorspace', '-color_primaries', '-color_trc'):
+            self.assertEqual(command[command.index(flag) + 1],
+                             'tv' if flag == '-color_range' else 'iec61966-2-1' if flag == '-color_trc' else 'bt709')
         persisted = json.loads(self.manifest(job).read_text())
         self.assertEqual(persisted['nextFrame'], 4)
         self.assertEqual(persisted['segments'][0]['frames'], 4)
         self.assertEqual(persisted['segments'][0]['firstFrame'], 0)
         self.store.write_frame(job['id'], 4, b'png', lease)
         self.assertEqual(len(processes), 2)
+
+    def test_existing_bt709_and_untagged_jobs_keep_their_color_policy(self):
+        commands = []
+        class Encoder:
+            def __init__(self, command, **kwargs):
+                commands.append(command)
+                self.stdin = io.BytesIO()
+                self.returncode = None
+            def poll(self): return self.returncode
+            def kill(self): self.returncode = -9
+            def wait(self, timeout=None): return self.returncode
+        self.store.popen = Encoder
+        for profile in ('bt709-limited-v1', None):
+            job = self.store.create(request(fps=2, frames=4, checkpointSeconds=2))
+            manifest = json.loads(self.manifest(job).read_text())
+            if profile:
+                manifest['request']['colorProfile'] = profile
+            else:
+                manifest['request'].pop('colorProfile')
+            self.write_manifest(job, manifest)
+            lease = self.store.resume(job['id'])['lease']
+            self.store.write_frame(job['id'], 0, b'png', lease)
+            command = commands[-1]
+            if profile:
+                self.assertEqual(command[command.index('-color_trc') + 1], 'bt709')
+                self.assertIn('color_trc=bt709', command[command.index('-vf') + 1])
+            else:
+                self.assertNotIn('-color_trc', command)
+                self.assertNotIn('-vf', command)
+            self.store.pause(job['id'], lease=lease)
+            self.store.discard(job['id'])
 
     def test_zero_checkpoint_seconds_only_durably_saves_completed_export(self):
         processes = []
@@ -656,12 +910,53 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertTrue(progress['checkpointed'])
         self.assertEqual(len(processes), 1)
 
+    def test_failed_stop_preserves_encoder_ownership_and_closes_stderr_copy(self):
+        class ResistantProcess:
+            pid = 23456
+            def __init__(self, command, **kwargs):
+                self.stdin = io.BytesIO()
+                self.returncode = None
+                self.fail_stop = True
+                kwargs['stderr'].write(b'resistant encoder diagnostic')
+                kwargs['stderr'].flush()
+            def poll(self): return self.returncode
+            def kill(self):
+                if self.fail_stop: raise OSError('injected termination failure')
+                self.returncode = -9
+            def wait(self, timeout=None): return self.returncode
+        self.store.popen = ResistantProcess
+        job = self.store.create(request(frames=2))
+        lease = self.store.resume(job['id'])['lease']
+        self.store.write_frame(job['id'], 0, b'png', lease)
+        runtime = self.store.active[job['id']]
+        stream, log = runtime['stderrStream'], runtime['stderrPath']
+        with self.assertRaisesRegex(ValueError, 'could not be stopped'):
+            self.store.pause(job['id'], lease=lease)
+        self.assertTrue(stream.closed)
+        self.assertTrue(log.exists())
+        self.assertIs(self.store.active[job['id']], runtime)
+        self.assertIn('activeEncoder', json.loads(self.manifest(job).read_text()))
+        # The frame-failure path must retain ownership and log as well.
+        self.store._fail_active_segment(job['id'], runtime, 'injected frame failure')
+        self.assertIs(self.store.active[job['id']], runtime)
+        self.assertIn('activeEncoder', json.loads(self.manifest(job).read_text()))
+        runtime['process'].fail_stop = False
+        paused = self.store.pause(job['id'], lease=lease)
+        self.assertEqual(paused['state'], 'paused')
+        self.assertNotIn('could not be stopped', paused.get('reason') or '')
+        self.assertIn('injected frame failure', paused['reason'])
+        self.assertIn('resistant encoder diagnostic', paused['reason'])
+        self.assertNotIn(job['id'], self.store.active)
+        self.assertFalse(log.exists())
+
     def test_encoder_failure_pauses_at_last_durable_frame(self):
         class FailingProcess:
-            def __init__(self, command, **_kwargs):
+            def __init__(self, command, **kwargs):
                 self.stdin = io.BytesIO()
                 self.output = Path(command[-1])
                 self.returncode = None
+                kwargs['stderr'].write(b'libx264 test diagnostic')
+                kwargs['stderr'].flush()
 
             def poll(self):
                 return self.returncode
@@ -682,6 +977,8 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(persisted['state'], 'paused')
         self.assertEqual(persisted['nextFrame'], 0)
         self.assertEqual(persisted['segments'], [])
+        self.assertIn('libx264 test diagnostic', persisted['error'])
+        self.assertEqual(list(self.manifest(job).parent.glob('*.stderr.log')), [])
 
     def test_pause_discards_only_active_segment(self):
         class WaitingProcess:
@@ -797,6 +1094,260 @@ class VideoJobStoreTest(unittest.TestCase):
                 self.assertNotIn('scratchPath', metadata)
                 self.assertFalse(self.manifest(job).parent.exists())
                 self.assertEqual(store.list_jobs(), [])
+
+    def test_invalid_or_complete_frame_request_does_not_spawn_encoder(self):
+        job=self.store.create(request())
+        lease=self.store.resume(job['id'])['lease']
+        with mock.patch.object(self.store,'popen') as spawn:
+            with self.assertRaisesRegex(ValueError,'Expected frame 0'):
+                self.store.write_frame(job['id'],1,b'png',lease)
+            spawn.assert_not_called()
+        self.store.pause(job['id'])
+        ready=self.ready_job();active=self.store.resume(ready['id']);lease=active['lease']
+        with mock.patch.object(self.store,'popen') as spawn:
+            with self.assertRaisesRegex(ValueError,'already received all frames'):
+                self.store.write_frame(ready['id'],active['nextFrame'],b'png',lease)
+            spawn.assert_not_called()
+        self.store.pause(ready['id'])
+
+    def test_finder_metadata_does_not_block_finish_or_discard(self):
+        for action in ('finish','discard'):
+            job=self.ready_job();directory=self.manifest(job).parent
+            (directory/'.DS_Store').write_bytes(b'Finder metadata')
+            quarantine=directory/'quarantine';quarantine.mkdir()
+            (quarantine/'.DS_Store').write_bytes(b'Finder metadata')
+            if action=='finish':
+                def concat(command,**_kwargs):
+                    Path(command[-1]).write_bytes(b'joined')
+                    return mock.Mock(returncode=0)
+                self.store.run=concat;self.store.finish(job['id'])
+            else: self.store.discard(job['id'])
+            self.assertFalse(directory.exists())
+
+    def test_foreign_store_cannot_modify_owned_finalizer_files(self):
+        job = self.ready_job()
+        entered, release = threading.Event(), threading.Event()
+        errors, pending = [], []
+        def concat(command, **_kwargs):
+            path = Path(command[-1]);path.write_bytes(b'in progress');pending.append(path)
+            entered.set();release.wait(2)
+            path.write_bytes(b'joined')
+            return mock.Mock(returncode=0)
+        self.store.run = concat
+        def finish():
+            try: self.store.finish(job['id'])
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=finish);worker.start();self.assertTrue(entered.wait(2))
+        foreign = VideoJobStore(self.root,'/fake/ffmpeg')
+        try:
+            for operation in (foreign.resume, foreign.finish, foreign.discard):
+                with self.assertRaisesRegex(ValueError,'active in another server'):
+                    operation(job['id'])
+                self.assertTrue(pending[0].exists())
+                self.assertTrue(self.manifest(job).exists())
+        finally:
+            release.set();worker.join(2)
+        self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
+        self.assertEqual(foreign.owners,{})
+
+    def test_resume_refreshes_activity_after_slow_verification(self):
+        now=[0.0];self.store.clock=lambda:now[0]
+        job=self.ready_job();original=self.store._verify_segments
+        def verify(*args,**kwargs):
+            now[0]+=600
+            self.assertEqual(self.store.pause_stale_jobs(),[],'Timer interrupted a reserved resume')
+            return original(*args,**kwargs)
+        with mock.patch.object(self.store,'_verify_segments',side_effect=verify):
+            self.store.resume(job['id'])
+        self.assertEqual(self.store.leases[job['id']]['lastActivity'],600)
+        self.assertEqual(self.store.pause_stale_jobs(),[])
+        self.store.pause(job['id'])
+
+    def test_idle_timer_does_not_wait_for_or_cancel_slow_finalization(self):
+        now=[0.0];self.store.clock=lambda:now[0]
+        job=self.ready_job();self.store.resume(job['id'])
+        verifying,release=threading.Event(),threading.Event()
+        original=self.store._verify_segments;errors,timed=[],[]
+        def verify(*args,**kwargs):
+            original(*args,**kwargs);now[0]+=600;verifying.set();release.wait(5)
+        def concat(command,**_kwargs):
+            Path(command[-1]).write_bytes(b'joined');return mock.Mock(returncode=0)
+        def finish():
+            try:self.store.finish(job['id'])
+            except Exception as error:errors.append(error)
+        self.store.run=concat
+        with mock.patch.object(self.store,'_verify_segments',side_effect=verify):
+            worker=threading.Thread(target=finish);worker.start()
+            timer=threading.Thread(target=lambda:timed.append(self.store.pause_stale_jobs()))
+            try:
+                self.assertTrue(verifying.wait(2));timer.start();timer.join(.5)
+                self.assertFalse(timer.is_alive(),'Idle cleanup blocked the accept loop on a finalizer')
+                self.assertEqual(timed,[[]]);self.assertNotIn(job['id'],self.store.stopping)
+                self.assertIn(job['id'],self.store.leases)
+            finally:
+                release.set();worker.join(2)
+                if timer.ident is not None:timer.join(2)
+        self.assertEqual(errors,[]);self.assertFalse(worker.is_alive())
+        self.assertTrue(list((self.root/'videos').glob('*.mp4')))
+
+    def test_idle_pause_rechecks_transition_and_activity_after_candidate_collection(self):
+        now=[0.0];self.store.clock=lambda:now[0]
+        job=self.store.create(request());self.store.resume(job['id']);now[0]=600
+        original=self.store.pause
+        for race in ('finishing','stopping','activity'):
+            self.store.leases[job['id']]['lastActivity']=0
+            def pause(*args,**kwargs):
+                if race=='activity':self.store.leases[job['id']]['lastActivity']=600
+                else:getattr(self.store,race).add(job['id'])
+                try:return original(*args,**kwargs)
+                finally:
+                    if race!='activity':getattr(self.store,race).discard(job['id'])
+            with self.subTest(race=race),mock.patch.object(self.store,'pause',side_effect=pause):
+                self.assertEqual(self.store.pause_stale_jobs(),[])
+                self.assertIn(job['id'],self.store.leases)
+        self.store.pause(job['id'])
+
+    def test_pause_serializes_with_an_exited_encoders_checkpoint_commit(self):
+        partial,commit_release,pause_waiting=threading.Event(),threading.Event(),threading.Event()
+        saves,errors=[],[]
+        class Encoder:
+            pid=23456
+            def __init__(self,command,**_kwargs):
+                self.stdin=io.BytesIO();self.pending=Path(command[-1]);self.returncode=None
+            def poll(self): return self.returncode
+            def wait(self,timeout=None):
+                self.pending.write_bytes(b'checkpoint');self.returncode=0;return 0
+            def kill(self): self.returncode=-9
+        class AuditedLock:
+            def __init__(self): self.lock=threading.RLock()
+            def __enter__(self):
+                if threading.current_thread().name=='checkpoint-pauser': pause_waiting.set()
+                return self.lock.__enter__()
+            def __exit__(self,*args): return self.lock.__exit__(*args)
+        self.store.popen=Encoder
+        job=self.store.create(request(frames=2,fps=2,checkpointSeconds=1))
+        lease=self.store.resume(job['id'])['lease'];self.store.write_frame(job['id'],0,b'png',lease)
+        audited=AuditedLock();self.store.job_locks[job['id']]=audited
+        original_save=self.store._save
+        def save(manifest,data):
+            saves.append((audited.lock._is_owned(),data['nextFrame'],sum(segment['frames'] for segment in data['segments'])))
+            return original_save(manifest,data)
+        def commit(job_id,runtime):
+            runtime['process'].stdin.close();runtime['process'].wait()
+            path=runtime['pending'].with_name('segment-000000.mkv');runtime['pending'].replace(path)
+            data=runtime['job'];data['segments'].append({'index':0,'firstFrame':0,'frames':2,'file':path.name,'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()})
+            # Model the real finalizer between appending a segment and updating
+            # nextFrame. The exited encoder must not permit an unlocked save here.
+            partial.set();commit_release.wait(5)
+            data['nextFrame']=2;data['state']='ready';self.store._save(runtime['manifest'],data)
+            with self.store.lock: self.store.active.pop(job_id,None)
+        self.store._save=save;self.store._finalize_segment=commit
+        def invoke(action):
+            try: action()
+            except Exception as error: errors.append(error)
+        writer=threading.Thread(target=lambda:invoke(lambda:self.store.write_frame(job['id'],1,b'png',lease)))
+        pauser=threading.Thread(name='checkpoint-pauser',target=lambda:invoke(lambda:self.store.pause(job['id'],lease=lease)))
+        writer.start()
+        try:
+            self.assertTrue(partial.wait(2));pauser.start();self.assertTrue(pause_waiting.wait(2))
+            self.assertEqual(saves,[],'Interrupt saved the partially updated checkpoint without its job lock')
+        finally:
+            commit_release.set();writer.join(2)
+            if pauser.ident is not None: pauser.join(2)
+        self.assertFalse(writer.is_alive());self.assertFalse(pauser.is_alive());self.assertEqual(errors,[])
+        self.assertTrue(all(owned and next_frame==frames for owned,next_frame,frames in saves))
+        persisted=json.loads(self.manifest(job).read_text());self.assertEqual(persisted['nextFrame'],2)
+        self.store._verify_segments(self.manifest(job),persisted,repair=True)
+        self.assertEqual(self.store.get(job['id'])['state'],'paused')
+
+    def test_finish_cleanup_does_not_release_a_waiting_discards_new_owner(self):
+        job=self.ready_job()
+        concat_entered,concat_release=threading.Event(),threading.Event()
+        interrupted,discard_entered,discard_release=threading.Event(),threading.Event(),threading.Event()
+        helper_exited,wrapper_release=threading.Event(),threading.Event()
+        errors,discard_owners=[],[]
+        original_finish=self.store._finish_exclusive
+        original_interrupt=self.store._interrupt_active_segment
+        original_remove=self.store._remove_job_directory
+        def concat(command,**_kwargs):
+            concat_entered.set();concat_release.wait(5)
+            Path(command[-1]).write_bytes(b'joined')
+            return mock.Mock(returncode=0)
+        def finish_helper(job_id):
+            try: return original_finish(job_id)
+            finally: helper_exited.set();wrapper_release.wait(5)
+        def interrupt(job_id):
+            original_interrupt(job_id)
+            if threading.current_thread().name=='waiting-discard': interrupted.set()
+        def remove(manifest,job_id):
+            discard_owners.append(self.store.owners[job_id])
+            discard_entered.set();discard_release.wait(5)
+            return original_remove(manifest,job_id)
+        def invoke(action):
+            try: action()
+            except Exception as error: errors.append(error)
+        self.store.run=concat;self.store._finish_exclusive=finish_helper
+        self.store._interrupt_active_segment=interrupt;self.store._remove_job_directory=remove
+        finisher=threading.Thread(target=lambda:invoke(lambda:self.store.finish(job['id'])))
+        discarder=threading.Thread(name='waiting-discard',target=lambda:invoke(lambda:self.store.discard(job['id'])))
+        finisher.start()
+        try:
+            self.assertTrue(concat_entered.wait(2));discarder.start()
+            self.assertTrue(interrupted.wait(2));concat_release.set()
+            self.assertTrue(helper_exited.wait(2));self.assertTrue(discard_entered.wait(2))
+            owner=discard_owners[0];self.assertFalse(owner.closed)
+            wrapper_release.set();finisher.join(2)
+            self.assertFalse(finisher.is_alive())
+            self.assertIs(self.store.owners[job['id']],owner);self.assertFalse(owner.closed)
+        finally:
+            concat_release.set();wrapper_release.set();discard_release.set()
+            finisher.join(2)
+            if discarder.ident is not None: discarder.join(2)
+        self.assertFalse(discarder.is_alive());self.assertTrue(discard_owners[0].closed)
+        self.assertEqual(len(errors),1);self.assertIn('cancelled before publishing',str(errors[0]))
+        self.assertEqual(self.store.owners,{});self.assertEqual(self.store.finishing_owners,{})
+
+    def test_second_resume_or_finish_cannot_cancel_or_unlock_a_finalizer(self):
+        job = self.ready_job()
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        def concat(command, **_kwargs):
+            entered.set();release.wait(2)
+            Path(command[-1]).write_bytes(b'joined')
+            return mock.Mock(returncode=0)
+        self.store.run = concat
+        def finish():
+            try: self.store.finish(job['id'])
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=finish);worker.start()
+        self.assertTrue(entered.wait(2))
+        owner = self.store.owners[job['id']]
+        try:
+            for operation in (self.store.resume, self.store.finish):
+                with self.assertRaisesRegex(ValueError, 'finalizing'):
+                    operation(job['id'])
+            self.assertIs(self.store.owners[job['id']], owner)
+            self.assertFalse(owner.closed)
+            self.assertNotIn(job['id'], self.store.stopping)
+        finally:
+            release.set();worker.join(2)
+        self.assertFalse(worker.is_alive());self.assertEqual(errors, [])
+        self.assertNotIn(job['id'], self.store.finishing)
+        self.assertNotIn(job['id'], self.store.owners)
+
+    def test_early_finalize_rejection_keeps_live_lease_but_failed_setup_releases_owner(self):
+        incomplete = self.store.create(request())
+        self.store.resume(incomplete['id'])
+        with self.assertRaisesRegex(ValueError, 'durable frames'):
+            self.store.finish(incomplete['id'])
+        self.assertIn(incomplete['id'], self.store.leases)
+        self.assertIn(incomplete['id'], self.store.owners)
+        complete = self.ready_job()
+        with mock.patch.object(self.store, '_save', side_effect=OSError('injected setup failure')):
+            with self.assertRaisesRegex(OSError, 'setup failure'):
+                self.store.finish(complete['id'])
+        self.assertNotIn(complete['id'], self.store.owners)
+        self.assertNotIn(complete['id'], self.store.finishing)
 
     def test_discard_wins_race_with_finalization_before_publish(self):
         job = self.ready_job('mp4')

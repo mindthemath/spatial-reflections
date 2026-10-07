@@ -15,7 +15,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from video_resume import VideoJobStore
+# Lazy selection keeps the simple fallback independent of the resume module.
+VideoJobStore = None
+VIDEO_MODE = 'resumable'
 
 ROOT = Path(__file__).resolve().parent.parent
 FACES = ('px', 'nx', 'py', 'ny', 'pz', 'nz')
@@ -28,10 +30,12 @@ VIDEO_FORMATS = ('mp4', 'mkv')
 MAX_VIDEO_FRAME_BYTES = 100 * 1024 * 1024
 MAX_VIDEO_FRAMES = 10_000_000
 VIDEO_FRAME_READ_TIMEOUT = 30
-VIDEO_JOBS = {}
-VIDEO_JOBS_LOCK = threading.Lock()
 VIDEO_STORE = None
 VIDEO_STORE_LOCK = threading.Lock()
+FFMPEG_ENCODER_ERROR = None
+# None means an embedded/test server has not run CLI startup. CLI startup pins
+# its binary (or its absence); changing it requires ownership/recovery preflight.
+VIDEO_FFMPEG_BOOTSTRAP = None
 
 
 def hash_file(path):
@@ -204,27 +208,52 @@ def video_clip_labels():
     return labels
 
 
+def ffmpeg_encoder_error(ffmpeg):
+    try:
+        completed = subprocess.run(
+            [str(ffmpeg), '-hide_banner', '-encoders'],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f'Could not inspect ffmpeg encoders: {error}'
+    if completed.returncode != 0:
+        return 'ffmpeg could not list its encoders'
+    if not re.search(r'^\s*V\S*\s+libx264\s', completed.stdout, re.MULTILINE):
+        return 'ffmpeg does not provide the required libx264 H.264 encoder'
+    return None
+
+
 def video_capabilities():
     ffmpeg = shutil.which('ffmpeg')
     recovery = {
         'recovered': 0, 'alreadyExited': 0, 'refused': 0,
         'skippedActive': 0, 'failed': 0, 'indexFailed': False,
     }
-    available = bool(ffmpeg)
-    reason = None if ffmpeg else 'ffmpeg is not installed or is not on the server PATH'
+    available = bool(ffmpeg) and not FFMPEG_ENCODER_ERROR
+    reason = (FFMPEG_ENCODER_ERROR if ffmpeg
+              else 'ffmpeg is not installed or is not on the server PATH')
+    store = None
     if ffmpeg:
-        store = video_store()
-        if (not store.recovery_running and store.last_recovery['failed']
-                and not store.last_recovery['indexFailed']):
-            store.recover_stale_encoders()
-        recovery = store.last_recovery
-        if store.recovery_running:
+        try:
+            store = video_store()
+        except (ValueError, OSError) as error:
             available = False
-            reason = 'Encoder startup recovery is still running; retry in a moment'
-        elif recovery['indexFailed']:
-            available = False
-            reason = 'Encoder startup recovery could not inspect the durable job index'
-    return {'available': available, 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
+            reason = str(error)
+        if store is not None:
+            if (not store.recovery_running and
+                    (store.recovery_pending is True or (store.last_recovery['failed']
+                     and not store.last_recovery['indexFailed']))):
+                store.recover_stale_encoders()
+            recovery = store.last_recovery
+            if store.recovery_running:
+                available = False
+                reason = 'Encoder startup recovery is still running; retry in a moment'
+            elif recovery['indexFailed']:
+                available = False
+                reason = 'Encoder startup recovery could not inspect the durable job index'
+    can_manage = store is not None and not (store.recovery_running or recovery['indexFailed'])
+    return {'available': available, 'canManage': can_manage, 'videoMode': VIDEO_MODE,
+            'resumable': VIDEO_MODE == 'resumable', 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
             'qualities': list(VIDEO_QUALITIES), 'formats': list(VIDEO_FORMATS),
             'freeBytes': shutil.disk_usage(ROOT).free,
             'clips': video_clip_labels(),
@@ -232,17 +261,60 @@ def video_capabilities():
             'reason': reason}
 
 
-def video_store():
+def check_video_recovery(store, job_id=None, lease=None):
+    reason = ('Encoder recovery is still running; retry preflight before modifying jobs'
+              if store.recovery_running else
+              'Encoder startup recovery could not inspect the durable job index'
+              if store.last_recovery['indexFailed'] else None)
+    if not reason:
+        return
+    # A background repair pass skips live owner locks. Do not interrupt healthy
+    # uploads or their pause requests; an old tab after restart has no valid lease.
+    with store.lock:
+        active = store.leases.get(job_id)
+        if lease and active and active['token'] == lease and job_id in store.owners:
+            return
+    raise ValueError(reason)
+
+
+def start_video_recovery():
+    # Ownership and crash recovery are required even when this ffmpeg cannot
+    # encode new H.264 frames. Existing jobs can still be managed/stream-copied.
+    store = video_store()
+    store.claim_server()
+    if VIDEO_MODE == 'simple':
+        return
+    store.recovery_running = True
+    threading.Thread(target=store.recover_stale_encoders,
+                     name='video-encoder-recovery', daemon=True).start()
+    return store
+
+
+def video_store(for_control=False):
     global VIDEO_STORE
+    if for_control:
+        with VIDEO_STORE_LOCK:
+            if VIDEO_STORE is not None and VIDEO_STORE.root == ROOT.resolve():
+                return VIDEO_STORE
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
     root = ROOT.resolve()
+    if (VIDEO_FFMPEG_BOOTSTRAP is not None
+            and str(Path(ffmpeg).resolve()) != VIDEO_FFMPEG_BOOTSTRAP):
+        raise ValueError('Restart the Studio server after installing or changing ffmpeg')
     with VIDEO_STORE_LOCK:
         if VIDEO_STORE is None or VIDEO_STORE.root != root or VIDEO_STORE.ffmpeg != str(ffmpeg):
             if VIDEO_STORE is not None:
                 VIDEO_STORE.pause_all()
-            VIDEO_STORE = VideoJobStore(root, ffmpeg)
+            if VIDEO_MODE == 'simple':
+                from video_simple import SimpleVideoBackend
+                factory = SimpleVideoBackend
+            else:
+                factory = VideoJobStore
+                if factory is None:
+                    from video_resume import VideoJobStore as factory
+            VIDEO_STORE = factory(root, ffmpeg)
         # Keep dependency injection and unittest patches applied to subprocess.
         VIDEO_STORE.popen = subprocess.Popen
         VIDEO_STORE.run = subprocess.run
@@ -275,12 +347,26 @@ def start_video(request):
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise ValueError('Video export requires ffmpeg on the local server PATH')
+    if FFMPEG_ENCODER_ERROR:
+        raise ValueError(FFMPEG_ENCODER_ERROR)
     store = video_store()
     if store.recovery_running:
         raise ValueError('Encoder startup recovery is still running')
     if store.last_recovery['indexFailed']:
         raise ValueError('Encoder startup recovery failed; inspect the video job index')
     width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
+    if VIDEO_MODE == 'simple':
+        parent = ROOT / 'videos'
+        parent.mkdir(exist_ok=True)
+        if estimate > shutil.disk_usage(parent).free * 0.9:
+            raise ValueError('Estimated video exceeds output disk space')
+        active = store.start({**request, 'width': width, 'height': height, 'fps': fps,
+                              'frames': frames, 'quality': quality, 'format': video_format,
+                              'bitRate': bit_rate, 'estimatedBytes': estimate,
+                              'checkpointSeconds': 0, 'scratchPath': '',
+                              'colorProfile': 'srgb-limited-v1'})
+        active.update({'estimatedBytes': estimate, 'bitRate': bit_rate})
+        return active
     checkpoint_seconds = int(request.get('checkpointSeconds', 60))
     request = {
         **request, 'width': width, 'height': height, 'fps': fps,
@@ -320,54 +406,12 @@ def start_video(request):
     return active
 
 
-def video_job(job_id):
-    if not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{32}', job_id):
-        raise ValueError('Invalid video export id')
-    with VIDEO_JOBS_LOCK:
-        job = VIDEO_JOBS.get(job_id)
-    if not job:
-        raise ValueError('Video export is missing or already complete')
-    return job
-
-
-def remove_video_job(job_id):
-    with VIDEO_JOBS_LOCK:
-        return VIDEO_JOBS.pop(job_id, None)
-
-
-def cancel_video(job_id):
-    job = remove_video_job(job_id)
-    if not job:
-        return
-    # Never wait for the frame-write lock here. A disconnected browser can leave
-    # its request thread blocked in a pipe write; killing ffmpeg must remain able
-    # to interrupt that write immediately.
-    process = job['process']
-    # Kill only. Closing stdin here deadlocks when the frame thread is blocked
-    # inside that same buffered write; the broken pipe wakes the writer instead.
-    if process.poll() is None:
-        process.kill()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-    job['pending'].unlink(missing_ok=True)
-
-
-def cancel_all_videos():
-    with VIDEO_JOBS_LOCK:
-        job_ids = list(VIDEO_JOBS)
-    for job_id in job_ids:
-        try:
-            cancel_video(job_id)
-        except (OSError, subprocess.SubprocessError):
-            pass
+def pause_all_videos():
     if VIDEO_STORE is not None:
         VIDEO_STORE.pause_all()
 
 
-atexit.register(cancel_all_videos)
+atexit.register(pause_all_videos)
 
 
 def finish_video(job_id):
@@ -437,7 +481,12 @@ class Handler(SimpleHTTPRequestHandler):
         if path == '/api/video/capabilities':
             return self.send_json(200, video_capabilities())
         if path == '/api/video/jobs':
-            return self.send_json(200, {'jobs': video_store().list_jobs()})
+            try:
+                return self.send_json(200, {'jobs': video_store(for_control=True).list_jobs()})
+            except ValueError as error:
+                return self.send_json(400, {'error': str(error)})
+            except OSError as error:
+                return self.send_json(500, {'error': str(error)})
         if path == '/api/exports':
             exports = []
             parent = ROOT / 'exports'
@@ -483,6 +532,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.close_connection = True
             return self.send_json(403, {'error': 'Cross-origin writes are not allowed'})
         try:
+            if route.path.startswith('/api/video/') and route.path not in ('/api/video/pause', '/api/video/cancel'):
+                store = video_store()
+                query = parse_qs(route.query) if route.path in ('/api/video/frame', '/api/video/poster') else {}
+                check_video_recovery(store, query.get('id', [None])[0], query.get('lease', [None])[0])
             if route.path == '/api/video/poster':
                 query = parse_qs(route.query)
                 job_id = query.get('id', [''])[0]
@@ -523,6 +576,8 @@ class Handler(SimpleHTTPRequestHandler):
                     raise ValueError(f"Resume frame must be {request['width']}×{request['height']} pixels")
                 return self.send_json(201, store.write_poster(job_id, data, lease))
             if route.path == '/api/video/frame':
+                if FFMPEG_ENCODER_ERROR:
+                    raise ValueError(FFMPEG_ENCODER_ERROR)
                 query = parse_qs(route.query)
                 job_id = query.get('id', [''])[0]
                 lease = query.get('lease', [''])[0]
@@ -595,19 +650,24 @@ class Handler(SimpleHTTPRequestHandler):
             if route.path == '/api/video/finish':
                 return self.send_json(201, finish_video(request.get('id')))
             if route.path == '/api/video/cancel':
-                video_store().discard(request.get('id'))
+                store = video_store(for_control=True)
+                check_video_recovery(store, request.get('id'), request.get('lease'))
+                store.discard(request.get('id'))
                 return self.send_json(200, {'cancelled': True})
             if route.path == '/api/video/pause':
+                store = video_store(for_control=True)
+                check_video_recovery(store, request.get('id'), request.get('lease'))
                 reason = request.get('reason')
                 if reason is not None:
                     if not isinstance(reason, str) or len(reason) > 500:
                         raise ValueError('Video pause reason must be text under 500 characters')
                     reason = ' '.join(reason.split()) or None
-                paused = video_store().pause(
+                paused = store.pause(
                     request.get('id'), reason or 'Browser paused the export', request.get('lease'))
                 return self.send_json(200, paused)
             if route.path == '/api/video/resume':
-                return self.send_json(200, video_store().resume(request.get('id'), request))
+                return self.send_json(200, video_store().resume(
+                    request.get('id'), request, encoder_error=FFMPEG_ENCODER_ERROR))
             if route.path == '/api/publish':
                 return self.send_json(201, publish_work(request))
             if route.path == '/api/export/start':
@@ -633,11 +693,16 @@ class Handler(SimpleHTTPRequestHandler):
         except (ConnectionError, BrokenPipeError):
             return
         except (ValueError, KeyError, TypeError, StopIteration) as error:
+            # Some validation failures occur before a request body is consumed.
+            # Never reuse that HTTP/1.1 connection: unread bytes could otherwise
+            # be parsed as the beginning of the next request.
+            self.close_connection = True
             try:
                 self.send_json(400, {'error': str(error)})
             except (ConnectionError, BrokenPipeError, OSError):
                 return
         except OSError as error:
+            self.close_connection = True
             try:
                 self.send_json(500, {'error': str(error)})
             except (ConnectionError, BrokenPipeError, OSError):
@@ -657,25 +722,28 @@ class StudioHTTPServer(ThreadingHTTPServer):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=1313)
+    parser.add_argument('--video-mode', choices=('resumable', 'simple'), default='resumable',
+                        help='simple: one-shot encoding; cancellation discards partial output')
     args = parser.parse_args()
+    VIDEO_MODE = args.video_mode
     http = StudioHTTPServer(('localhost', args.port), Handler)
-    if shutil.which('ffmpeg'):
-        store = video_store()
+    ffmpeg = shutil.which('ffmpeg')
+    VIDEO_FFMPEG_BOOTSTRAP = str(Path(ffmpeg).resolve()) if ffmpeg else ''
+    if ffmpeg:
+        FFMPEG_ENCODER_ERROR = ffmpeg_encoder_error(ffmpeg)
+    if ffmpeg:
         try:
-            store.claim_server()
+            start_video_recovery()
         except Exception:
             http.server_close()
             raise
-        store.recovery_running = True
-        threading.Thread(
-            target=store.recover_stale_encoders,
-            name='video-encoder-recovery',
-            daemon=True,
-        ).start()
     print(f'Viewer: http://localhost:{args.port}/\nStudio: http://localhost:{args.port}/studio/')
     try:
         http.serve_forever()
     finally:
         if VIDEO_STORE is not None:
-            VIDEO_STORE.release_server()
+            try:
+                VIDEO_STORE.pause_all()
+            finally:
+                VIDEO_STORE.release_server()
         http.server_close()

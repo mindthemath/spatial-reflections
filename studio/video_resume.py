@@ -11,8 +11,15 @@ import threading
 import time
 import uuid
 import fcntl
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+if __package__:
+    from .video_color import COLOR_PROFILE, browser_video_color_args
+else:
+    from video_color import COLOR_PROFILE, browser_video_color_args
 
 
 SCHEMA_VERSION = 1
@@ -82,6 +89,8 @@ class VideoJobStore:
         self.leases = {}
         self.owners = {}
         self.stopping = set()
+        self.finishing = set()
+        self.finishing_owners = {}
         self.server_owner = None
         self.popen = subprocess.Popen
         self.run = subprocess.run
@@ -90,6 +99,8 @@ class VideoJobStore:
         self.processes_for_path = self._processes_for_path
         self.kill_pid = self._kill_pid
         self.last_recovery = self._empty_recovery_report()
+        self.recovery_lock = threading.Lock()
+        self.recovery_pending = False
         self.recovery_running = False
 
     @staticmethod
@@ -171,11 +182,19 @@ class VideoJobStore:
             return None
 
     def recover_stale_encoders(self):
-        self.recovery_running = True
+        if not self.recovery_lock.acquire(blocking=False):
+            return dict(self.last_recovery)
+        with self.lock:
+            self.recovery_running = True
+            # Consume only requests preceding this scan. Requests made during the
+            # scan must survive its report publication and trigger another pass.
+            self.recovery_pending = False
         try:
             return self._recover_stale_encoders()
         finally:
-            self.recovery_running = False
+            with self.lock:
+                self.recovery_running = False
+            self.recovery_lock.release()
 
     def _recover_stale_encoders(self):
         report = self._empty_recovery_report()
@@ -205,6 +224,7 @@ class VideoJobStore:
                     manifest, job = self._load(job_id)
                     encoder = job.get('activeEncoder')
                     if not isinstance(encoder, dict):
+                        previous_state = job.get('state')
                         expected_pending = manifest.parent / f".segment-{len(job['segments']):06d}.pending.mkv"
                         pending_files = set(manifest.parent.glob('.segment-*.pending.mkv'))
                         pending_files.add(expected_pending)
@@ -223,12 +243,15 @@ class VideoJobStore:
                             (manifest.parent / '.concat.txt').unlink(missing_ok=True)
                             self._remove_pending_output(job_id)
                             job['state'] = 'ready'
-                        elif recovered_pids:
+                        elif recovered_pids or job.get('state') == 'active':
+                            # Holding the recovery owner lock proves no live job
+                            # owner exists, even in pre-frame/checkpoint gaps.
                             job['state'] = 'paused'
+                            job['error'] = 'Recovered an interrupted export between checkpoints'
                         if recovered_pids:
                             report['recovered'] += len(recovered_pids)
                             job['error'] = 'Recovered an encoder left by an interrupted server'
-                        if recovered_pids or job.get('state') == 'ready':
+                        if recovered_pids or job.get('state') != previous_state:
                             self._save(manifest, job)
                         continue
                     pid = int(encoder.get('pid', 0))
@@ -395,6 +418,7 @@ class VideoJobStore:
             'frames': frames,
             'checkpointSeconds': checkpoint_seconds,
             'scratchPath': str(scratch_base),
+            'colorProfile': COLOR_PROFILE,
         }
         job = {
             'schemaVersion': SCHEMA_VERSION,
@@ -477,14 +501,15 @@ class VideoJobStore:
         if not job_dir.exists():
             return job_dir
         removable = re.compile(
-            r'(?:job\.json|\.owner\.lock|\.concat\.txt|'
+            r'(?:job\.json|\.owner\.lock|\.concat\.txt|\.DS_Store|'
             r'segment-\d{6}\.mkv|\.segment-\d{6}\.pending\.mkv|'
+            r'\.segment-\d{6}\.stderr\.log|'
             r'\.job\.json\.[a-f0-9]{32}\.tmp)'
         )
         for path in job_dir.iterdir():
             if path.name == 'quarantine' and path.is_dir() and not path.is_symlink():
                 for quarantined in path.iterdir():
-                    if (not SEGMENT_NAME.fullmatch(quarantined.name)
+                    if ((not SEGMENT_NAME.fullmatch(quarantined.name) and quarantined.name != '.DS_Store')
                             or (quarantined.is_dir() and not quarantined.is_symlink())):
                         raise ValueError(
                             'Video export quarantine contains an unexpected entry: '
@@ -556,6 +581,8 @@ class VideoJobStore:
 
         for path in job_dir.glob('.segment-*.pending.mkv'):
             path.unlink(missing_ok=True)
+        for path in job_dir.glob('.segment-*.stderr.log'):
+            path.unlink(missing_ok=True)
         for path in job_dir.glob('segment-*.mkv'):
             if path.resolve() not in recorded:
                 path.unlink(missing_ok=True)
@@ -575,8 +602,10 @@ class VideoJobStore:
         with self.lock:
             self.owners[job_id] = stream
 
-    def _release_owner(self, job_id):
+    def _release_owner(self, job_id, expected=None):
         with self.lock:
+            if expected is not None and self.owners.get(job_id) is not expected:
+                return
             stream = self.owners.pop(job_id, None)
         if stream:
             try:
@@ -584,35 +613,77 @@ class VideoJobStore:
             finally:
                 stream.close()
 
-    def resume(self, job_id, render_context=None):
+    def _release_idle_owner(self, job_id):
         with self.stop_lock:
+            with self.lock:
+                owner = self.owners.get(job_id)
+                if not owner or job_id in self.active or job_id in self.leases:
+                    return False
+                if job_id in self.finishing and self.finishing_owners.get(job_id) is owner:
+                    return False
+            self._release_owner(job_id, owner)
+            return True
+
+    def _request_idle_recovery(self, job_id):
+        with self.lock:
+            if job_id not in self.active and job_id not in self.leases:
+                self.recovery_pending = True
+
+    @contextmanager
+    def _idle_owner_guard(self, job_id):
+        failed = False
+        try:
+            yield
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            try:
+                self._release_idle_owner(job_id)
+            finally:
+                if failed:
+                    # Another cleanup path may already have released the owner.
+                    self._request_idle_recovery(job_id)
+
+    def resume(self, job_id, render_context=None, encoder_error=None):
+        # Reserve the complete transition before examining/removing leases. Pause
+        # and discard must not interrupt this resume (or release its owner lock).
+        with self.stop_lock:
+            if job_id in self.finishing:
+                raise ValueError('Video export is finalizing in another request')
             if job_id in self.stopping:
                 raise ValueError('Video export is stopping in another request')
+            self.stopping.add(job_id)
+        try:
+            return self._resume_exclusive(job_id, render_context, encoder_error)
+        finally:
+            with self.stop_lock:
+                self.stopping.discard(job_id)
+
+    def _resume_exclusive(self, job_id, render_context, encoder_error):
         with self.lock:
             if job_id in self.leases:
                 raise ValueError('Video export is already active in another browser')
         self._interrupt_active_segment(job_id)
         with self._job_lock(job_id):
-            with self.stop_lock:
-                if job_id in self.stopping:
-                    raise ValueError('Video export is stopping in another request')
+            self._release_idle_owner(job_id)
             manifest, job = self._load(job_id)
-            self._remove_pending_output(job_id)
             if job.get('activeEncoder'):
+                self._request_idle_recovery(job_id)
                 raise ValueError(
                     'Video encoder recovery is incomplete; retry preflight before resuming'
                 )
             self._acquire_owner(manifest, job_id)
             lease = uuid.uuid4().hex
             try:
-                with self.stop_lock:
-                    if job_id in self.stopping:
-                        raise ValueError('Video export is stopping in another request')
-                    with self.lock:
-                        if job_id in self.leases:
-                            raise ValueError('Video export is already active in another browser')
-                        self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
+                with self.lock:
+                    if job_id in self.leases:
+                        raise ValueError('Video export is already active in another browser')
+                    self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
+                self._remove_pending_output(job_id)
                 self._verify_segments(manifest, job, repair=True)
+                if job['nextFrame'] < job['request']['frames'] and encoder_error:
+                    raise ValueError(encoder_error)
                 if job['nextFrame'] < job['request']['frames'] and render_context is not None:
                     source_url = render_context.get('sourceUrl')
                     render_signature = render_context.get('renderSignature')
@@ -629,6 +700,8 @@ class VideoJobStore:
                 self._save(manifest, job)
                 result = self._public(manifest, job)
                 result['lease'] = lease
+                with self.lock:
+                    self.leases[job_id]['lastActivity'] = self.clock()
                 return result
             except Exception:
                 with self.lock:
@@ -639,9 +712,10 @@ class VideoJobStore:
     def _interrupt_active_segment(self, job_id):
         with self.lock:
             runtime = self.active.pop(job_id, None)
-            self.leases.pop(job_id, None)
+            previous_lease = self.leases.pop(job_id, None)
         if not runtime:
-            self._release_owner(job_id)
+            # A finalizer can own this job without a checkpoint encoder/lease.
+            # Its owner must not be released outside the serial job transition.
             return
         process = runtime.get('process')
         stopped = not process or process.poll() is not None
@@ -652,30 +726,73 @@ class VideoJobStore:
                 stopped = True
             except Exception:
                 pass
-        if stopped and process and process.stdin:
+        if not stopped:
+            # Do not lose ownership of an encoder that resisted termination, or
+            # wait on the job lock while its frame writer may still be blocked.
+            self._consume_encoder_stderr(runtime, stopped=False)
+            with self.lock:
+                self.active[job_id] = runtime
+                if previous_lease:
+                    self.leases[job_id] = previous_lease
+                elif runtime.get('lease'):
+                    self.leases[job_id] = {'token': runtime['lease'], 'lastActivity': self.clock()}
+            raise ValueError('Checkpoint encoder could not be stopped; retry pause or restart the server for recovery')
+        failed = True
+        try:
+            if process and process.stdin:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            # Killing/closing first wakes a blocked pipe writer. Only then wait
+            # for its serial transition: it may be hashing/committing an exited
+            # encoder's checkpoint and mutating this same runtime job dictionary.
+            with self._job_lock(job_id):
+                pending = runtime.get('pending')
+                if pending:
+                    pending.unlink(missing_ok=True)
+                detail = self._consume_encoder_stderr(runtime)
+                runtime_job = runtime.get('job')
+                runtime_manifest = runtime.get('manifest')
+                if runtime_job and runtime_manifest:
+                    runtime_job.pop('activeEncoder', None)
+                    runtime_job['state'] = 'paused'
+                    if 'stopFailureMessage' in runtime:
+                        runtime_job['error'] = runtime.pop('stopFailureMessage')
+                    if detail:
+                        original = runtime_job.get('error')
+                        runtime_job['error'] = f'{original}: {detail}' if original else f'Checkpoint encoder diagnostic: {detail}'
+                    try:
+                        self._save(runtime_manifest, runtime_job)
+                    except (OSError, ValueError):
+                        return  # The serial transition retries; preflight also repairs.
+                failed = False
+        finally:
             try:
-                process.stdin.close()
-            except OSError:
-                pass
-        pending = runtime.get('pending')
-        if pending:
-            pending.unlink(missing_ok=True)
-        runtime_job = runtime.get('job')
-        runtime_manifest = runtime.get('manifest')
-        if runtime_job and runtime_manifest:
-            runtime_job.pop('activeEncoder', None)
-            try:
-                self._save(runtime_manifest, runtime_job)
-            except OSError:
-                pass
-        self._release_owner(job_id)
+                self._consume_encoder_stderr(runtime, stopped=False)
+            finally:
+                try:
+                    self._release_owner(job_id)
+                finally:
+                    if failed:
+                        self._request_idle_recovery(job_id)
 
-    def pause(self, job_id, reason=None, lease=None):
+    def pause(self, job_id, reason=None, lease=None, *, _idle_before=None):
         with self.lock:
             active_lease = self.leases.get(job_id)
             if lease is not None and (not active_lease or active_lease['token'] != lease):
                 raise ValueError('Video export lease is no longer active')
         with self.stop_lock:
+            if _idle_before is not None:
+                # Recheck and reserve atomically: finish/resume may have started
+                # after the timer collected candidates. Explicit pause still
+                # deliberately cancels a finalizer.
+                if job_id in self.finishing or job_id in self.stopping:
+                    return None
+                with self.lock:
+                    current = self.leases.get(job_id)
+                    if not current or current['lastActivity'] > _idle_before:
+                        return None
             if job_id in self.stopping:
                 raise ValueError('Video export is already stopping')
             self.stopping.add(job_id)
@@ -683,7 +800,10 @@ class VideoJobStore:
             # Kill the encoder before taking the per-job lock. A frame writer may be
             # blocked in the pipe, and killing ffmpeg is what wakes that writer.
             self._interrupt_active_segment(job_id)
-            with self._job_lock(job_id):
+            with self._job_lock(job_id), self._idle_owner_guard(job_id):
+                # A frame writer may have created a runtime after the first
+                # interrupt removed its lease and before we obtained the job lock.
+                self._interrupt_active_segment(job_id)
                 manifest, job = self._load(job_id)
                 for path in manifest.parent.glob('.segment-*.pending.mkv'):
                     path.unlink(missing_ok=True)
@@ -716,25 +836,61 @@ class VideoJobStore:
             raise ValueError(
                 f'Not enough scratch space for the next checkpoint ({free_bytes:,} bytes free)'
             )
+        # Preserve each job's pinned transfer/range policy, including older
+        # BT.709 and untagged profiles. Concat advertises the first segment's
+        # metadata, so changing policy during resume would mislabel later frames.
+        color_args = []
+        if request.get('colorProfile') == COLOR_PROFILE:
+            color_args = browser_video_color_args()
+        elif request.get('colorProfile') == 'bt709-limited-v1':
+            color_args = [
+                '-vf', ('scale=in_range=pc:out_range=tv:out_color_matrix=bt709,'
+                        'setparams=range=limited:color_primaries=bt709:'
+                        'color_trc=bt709:colorspace=bt709'),
+                '-color_range', 'tv', '-colorspace', 'bt709',
+                '-color_primaries', 'bt709', '-color_trc', 'bt709',
+            ]
+        # The guarded test runner constrains only test codecs. Normal exports
+        # retain their usual ffmpeg threading policy. ffmpeg options are scoped:
+        # input-side -threads bounds PNG decoding; output-side -threads bounds
+        # libx264 encoding. Both occurrences are necessary, not duplicates.
+        test_threads = os.environ.get('TESSERACT_TEST_ENCODER_THREADS')
+        thread_args = []
+        if test_threads:
+            count = int(test_threads)
+            if not 1 <= count <= 4:
+                raise ValueError('Test encoder threads must be between 1 and 4')
+            thread_args = ['-threads', str(count)]
         command = [
             self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+            *(['-filter_threads', '1'] if thread_args else []), *thread_args,
             '-f', 'image2pipe', '-framerate', str(request['fps']),
-            '-vcodec', 'png', '-i', 'pipe:0', '-an',
-            '-c:v', 'libx264', '-preset', 'medium',
+            '-vcodec', 'png', '-i', 'pipe:0', '-an', *color_args,
+            '-c:v', 'libx264', '-preset', 'medium', *thread_args,
             '-b:v', str(bit_rate), '-maxrate', str(round(bit_rate * 1.5)),
             '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',
             '-f', 'matroska', str(pending),
         ]
-        process = self.popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        stderr_path = manifest.parent / f'.segment-{segment_index:06d}.stderr.log'
+        stderr_path.unlink(missing_ok=True)
+        stderr_stream = stderr_path.open('xb')
+        try:
+            process = self.popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=stderr_stream,
+            )
+        except Exception:
+            stderr_stream.close()
+            stderr_path.unlink(missing_ok=True)
+            raise
         runtime = {
             'manifest': manifest,
             'job': job,
             'lease': lease,
             'process': process,
             'pending': pending,
+            'stderrPath': stderr_path,
+            'stderrStream': stderr_stream,
             'firstFrame': job['nextFrame'],
             'written': 0,
         }
@@ -755,6 +911,29 @@ class VideoJobStore:
             raise
         return runtime
 
+    @staticmethod
+    def _consume_encoder_stderr(runtime, stopped=True):
+        stream = runtime.pop('stderrStream', None)
+        # A live encoder still owns its stderr fd. Close our copy, but retain the
+        # log and path for a later successful stop/recovery instead of unlinking.
+        path = runtime.pop('stderrPath', None) if stopped else None
+        if stream and not stream.closed:
+            try:
+                stream.flush()
+            except OSError:
+                pass
+            stream.close()
+        detail = ''
+        if path:
+            try:
+                with path.open('rb') as error_stream:
+                    error_stream.seek(max(0, path.stat().st_size - 4096))
+                    detail = error_stream.read().decode(errors='replace').strip()
+            except OSError:
+                pass
+            path.unlink(missing_ok=True)
+        return detail
+
     def _fail_active_segment(self, job_id, runtime, message):
         process = runtime['process']
         stopped = process.poll() is not None
@@ -765,22 +944,43 @@ class VideoJobStore:
                 stopped = True
             except Exception:
                 pass
-        if stopped and process.stdin:
+        if not stopped:
+            self._consume_encoder_stderr(runtime, stopped=False)
+            job = runtime['job']
+            runtime['stopFailureMessage'] = message
+            job['error'] = f'{message}; encoder could not be stopped, retry pause or restart the server for recovery'
+            self._save(runtime['manifest'], job)
+            return
+        failed = True
+        try:
+            if process.stdin:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            if runtime.get('pending'):
+                runtime['pending'].unlink(missing_ok=True)
+            detail = self._consume_encoder_stderr(runtime)
+            if detail:
+                message = f'{message}: {detail}'
+            job = runtime['job']
+            job.pop('activeEncoder', None)
+            job['state'] = 'paused'
+            job['error'] = message
+            self._save(runtime['manifest'], job)
+            failed = False
+        finally:
             try:
-                process.stdin.close()
-            except OSError:
-                pass
-        if runtime.get('pending'):
-            runtime['pending'].unlink(missing_ok=True)
-        with self.lock:
-            self.active.pop(job_id, None)
-            self.leases.pop(job_id, None)
-        self._release_owner(job_id)
-        job = runtime['job']
-        job.pop('activeEncoder', None)
-        job['state'] = 'paused'
-        job['error'] = message
-        self._save(runtime['manifest'], job)
+                self._consume_encoder_stderr(runtime, stopped=False)
+            finally:
+                with self.lock:
+                    self.active.pop(job_id, None)
+                    self.leases.pop(job_id, None)
+                try:
+                    self._release_owner(job_id)
+                finally:
+                    if failed:
+                        self._request_idle_recovery(job_id)
 
     def _finalize_segment(self, job_id, runtime):
         process = runtime['process']
@@ -793,6 +993,7 @@ class VideoJobStore:
         if return_code != 0 or not runtime['pending'].is_file():
             self._fail_active_segment(job_id, runtime, 'Checkpoint encoder exited before finalizing the segment')
             raise ValueError('Checkpoint encoder failed')
+        self._consume_encoder_stderr(runtime)
 
         try:
             with runtime['pending'].open('rb') as stream:
@@ -880,6 +1081,11 @@ class VideoJobStore:
                 runtime = self.active.get(job_id)
             if runtime is None:
                 manifest, job = self._load(job_id)
+                expected = job['nextFrame']
+                if int(frame_index) != expected:
+                    raise ValueError(f'Expected frame {expected}, received {frame_index}')
+                if expected >= job['request']['frames']:
+                    raise ValueError('Video export already received all frames')
                 runtime = self._start_segment(manifest, job, lease)
                 with self.lock:
                     current = self.leases.get(job_id)
@@ -921,17 +1127,21 @@ class VideoJobStore:
 
     def pause_stale_jobs(self, now=None):
         current = self.clock() if now is None else float(now)
-        with self.lock:
+        with self.stop_lock, self.lock:
             stale = [
                 job_id for job_id, lease in self.leases.items()
                 if current - lease['lastActivity'] >= self.idle_timeout
+                and job_id not in self.finishing and job_id not in self.stopping
             ]
+        paused = []
         for job_id in stale:
             try:
-                self.pause(job_id, 'Export paused after five minutes without a frame')
+                if self.pause(job_id, 'Export paused after five minutes without a frame',
+                              _idle_before=current - self.idle_timeout) is not None:
+                    paused.append(job_id)
             except Exception:
                 pass
-        return stale
+        return paused
 
     def pause_all(self):
         with self.lock:
@@ -951,7 +1161,8 @@ class VideoJobStore:
             self.stopping.add(job_id)
         try:
             self._interrupt_active_segment(job_id)
-            with self._job_lock(job_id):
+            with self._job_lock(job_id), self._idle_owner_guard(job_id):
+                self._interrupt_active_segment(job_id)
                 with self.lock:
                     index = self._read_index()
                     entry = index['jobs'].get(job_id)
@@ -961,6 +1172,12 @@ class VideoJobStore:
                     raise ValueError('Video export index entry is invalid')
                 manifest = self._validated_manifest_path(
                     job_id, entry.get('manifest', ''))
+                with self.lock:
+                    owns_job = job_id in self.owners
+                # Missing scratch storage has no reachable checkpoint tree to
+                # mutate. Preserve explicit removal of unavailable index entries.
+                if not owns_job and manifest.parent.is_dir():
+                    self._acquire_owner(manifest, job_id)
                 poster_name = entry.get('poster')
                 poster_path = None
                 if (isinstance(poster_name, str)
@@ -995,6 +1212,37 @@ class VideoJobStore:
                 self.stopping.discard(job_id)
 
     def finish(self, job_id):
+        with self.stop_lock:
+            if job_id in self.stopping:
+                raise ValueError('Video export is being cancelled')
+            if job_id in self.finishing:
+                raise ValueError('Video export is finalizing in another request')
+            self.finishing.add(job_id)
+            with self.lock:
+                self.finishing_owners[job_id] = self.owners.get(job_id)
+        failed = True
+        try:
+            result = self._finish_exclusive(job_id)
+            failed = False
+            return result
+        finally:
+            # A waiting discard may have acquired a DIFFERENT owner after the
+            # exclusive helper released its lock. Never release that new stream.
+            with self.lock:
+                still_rendering = job_id in self.active or job_id in self.leases
+                owner = self.finishing_owners.get(job_id)
+            try:
+                if not still_rendering and owner is not None:
+                    self._release_owner(job_id, owner)
+            finally:
+                with self.stop_lock:
+                    with self.lock:
+                        self.finishing_owners.pop(job_id, None)
+                    self.finishing.discard(job_id)
+                if failed:
+                    self._request_idle_recovery(job_id)
+
+    def _finish_exclusive(self, job_id):
         with self._job_lock(job_id):
             with self.stop_lock:
                 if job_id in self.stopping:
@@ -1003,8 +1251,13 @@ class VideoJobStore:
                 runtime = self.active.get(job_id)
                 if runtime:
                     raise ValueError('Video export still has an active checkpoint')
-                self.leases.pop(job_id, None)
             manifest, job = self._load(job_id)
+            with self.lock:
+                owns_job = job_id in self.owners
+            if not owns_job:
+                self._acquire_owner(manifest, job_id)
+            with self.lock:
+                self.finishing_owners[job_id] = self.owners.get(job_id)
             self._verify_segments(manifest, job)
             request = job['request']
             if job['nextFrame'] != request['frames']:
@@ -1015,9 +1268,7 @@ class VideoJobStore:
             if video_format not in ('mp4', 'mkv'):
                 raise ValueError('Unsupported video format')
             with self.lock:
-                owns_job = job_id in self.owners
-            if not owns_job:
-                self._acquire_owner(manifest, job_id)
+                self.leases.pop(job_id, None)
 
             filename = self.output_filename(job_id)
             self.videos.mkdir(parents=True, exist_ok=True)

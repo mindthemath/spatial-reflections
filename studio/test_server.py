@@ -38,8 +38,10 @@ class StudioAPITest(unittest.TestCase):
         self.http = ThreadingHTTPServer(('localhost', 0), server.Handler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
+        self.connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
 
     def tearDown(self):
+        self.connection.close()
         self.http.shutdown()
         self.http.server_close()
         self.thread.join()
@@ -53,23 +55,57 @@ class StudioAPITest(unittest.TestCase):
         self.temp.cleanup()
 
     def request(self, method, path, payload=None, headers=None):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
-        connection.request(method, path, json.dumps(payload) if payload is not None else None, headers or {})
-        response = connection.getresponse()
-        status, data = response.status, json.loads(response.read())
-        connection.close()
-        return status, data
+        return self.raw_request(method, path, json.dumps(payload) if payload is not None else None, headers)
 
     def raw_request(self, method, path, body, headers=None):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
-        connection.request(method, path, body, headers or {})
-        response = connection.getresponse()
-        status, data = response.status, json.loads(response.read())
-        connection.close()
-        return status, data
+        self.connection.request(method, path, body, headers or {})
+        response = self.connection.getresponse()
+        return response.status, json.loads(response.read())
+
+    def test_simple_mode_is_one_shot_and_never_constructs_resume_store(self):
+        class Encoder:
+            def __init__(self,command,**_kwargs):self.stdin=io.BytesIO();self.output=Path(command[-1]);self.returncode=None
+            def poll(self):return self.returncode
+            def kill(self):self.returncode=-9
+            def wait(self,timeout=None):
+                if self.returncode is None:self.output.write_bytes(b'movie');self.returncode=0
+                return self.returncode
+        with mock.patch.object(server,'VIDEO_MODE','simple'), \
+             mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess,'Popen',Encoder), \
+             mock.patch.object(server,'ffmpeg_encoder_error',return_value=None), \
+             mock.patch.object(server,'VideoJobStore',side_effect=AssertionError('Resume backend must not be used')):
+            code,caps=self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertEqual(caps['videoMode'],'simple');self.assertFalse(caps['resumable'])
+            code,job=self.request('POST','/api/video/start',{'name':'one-shot','width':64,'height':64,'fps':24,'frames':1,'scratchPath':'/not/a/directory','checkpointSeconds':99999})
+            self.assertEqual(code,201)
+            frame=server.PNG_SIGNATURE+(13).to_bytes(4,'big')+b'IHDR'+(64).to_bytes(4,'big')+(64).to_bytes(4,'big')
+            code,_=self.raw_request('POST',f"/api/video/poster?id={job['id']}&lease={job['lease']}",frame,{'Content-Type':'image/png'})
+            self.assertEqual(code,201)
+            code,_=self.raw_request('POST',f"/api/video/frame?id={job['id']}&frame=0&lease={job['lease']}",frame,{'Content-Type':'image/png'})
+            self.assertEqual(code,201)
+            code,result=self.request('POST','/api/video/finish',{'id':job['id']})
+            self.assertEqual(code,201);self.assertEqual((server.ROOT/result['url'].lstrip('/')).read_bytes(),b'movie')
+            output=server.ROOT/result['url'].lstrip('/')
+            self.assertEqual(output.with_suffix('.png').read_bytes(),frame)
+            metadata=json.loads(output.with_suffix('.json').read_text())
+            self.assertEqual(metadata['file'],output.name);self.assertEqual(metadata['videoMode'],'simple')
+            code,value=self.request('GET','/api/video/jobs');self.assertEqual(code,200);self.assertEqual(value['jobs'],[])
+            code,error=self.request('POST','/api/video/resume',{'id':job['id']})
+            self.assertEqual(code,400);self.assertIn('no resume',error['error'])
+            self.assertFalse((server.ROOT/'videos'/'.checkpoints').exists())
+            self.assertFalse((server.ROOT/'videos'/'.video-jobs.json').exists())
+            server.VIDEO_STORE.release_server()
+
+    def test_request_helpers_reuse_connection(self):
+        self.request('GET', '/api/video/capabilities')
+        first_socket = self.connection.sock
+        self.assertIsNotNone(first_socket)
+        self.raw_request('GET', '/api/video/capabilities', None)
+        self.assertIs(self.connection.sock, first_socket)
 
     def test_http_connection_is_reused_between_requests(self):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
         connection.request('GET', '/api/video/capabilities')
         first = connection.getresponse()
         self.assertEqual(first.status, 200)
@@ -155,7 +191,7 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(code, 201)
         folder = started['folder']
         for face in server.FACES:
-            connection = http.client.HTTPConnection('localhost', self.http.server_port)
+            connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
             connection.request('POST', f'/api/export/face?folder={folder}&face={face}', PNG, {'Content-Type': 'image/png'})
             response = connection.getresponse()
             self.assertEqual(response.status, 201)
@@ -210,8 +246,16 @@ class StudioAPITest(unittest.TestCase):
                                                   {'Content-Type': 'image/png'})
                 self.assertEqual(code, 201)
                 self.assertEqual(progress['frame'], index + 1)
-            code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
-            self.assertEqual(code, 201)
+            self.request('POST', '/api/video/pause', {'id': started['id'], 'lease': started['lease']})
+            with mock.patch.object(server, 'FFMPEG_ENCODER_ERROR', 'libx264 unavailable'):
+                code, capabilities = self.request('GET', '/api/video/capabilities')
+                self.assertFalse(capabilities['available'])
+                self.assertTrue(capabilities['canManage'])
+                code, resumed = self.request('POST', '/api/video/resume', {'id': started['id']})
+                self.assertEqual(code, 200)
+                self.assertEqual(resumed['nextFrame'], 2)
+                code, completed = self.request('POST', '/api/video/finish', {'id': started['id']})
+                self.assertEqual(code, 201)
         video = server.ROOT / completed['url'].lstrip('/')
         self.assertEqual(video.read_bytes(), b'fake mp4')
         self.assertTrue((video.with_suffix('.png')).is_file())
@@ -361,39 +405,6 @@ class StudioAPITest(unittest.TestCase):
             self.assertEqual(code, 400)
             self.assertIn('scratch', result['error'].lower())
 
-    def test_video_cancel_does_not_wait_for_frame_lock(self):
-        class FakeProcess:
-            def __init__(self):
-                self.stdin = io.BytesIO()
-                self.returncode = None
-                self.killed = False
-
-            def poll(self):
-                return self.returncode
-
-            def kill(self):
-                self.killed = True
-                self.returncode = -9
-
-            def wait(self, timeout=None):
-                return self.returncode
-
-        job_id = 'a' * 32
-        frame_lock = threading.Lock()
-        frame_lock.acquire()
-        process = FakeProcess()
-        pending = server.ROOT / 'blocked.pending.mp4'
-        pending.write_bytes(b'partial')
-        with server.VIDEO_JOBS_LOCK:
-            server.VIDEO_JOBS[job_id] = {'process': process, 'lock': frame_lock, 'pending': pending}
-        cancelled = threading.Thread(target=server.cancel_video, args=(job_id,))
-        cancelled.start()
-        cancelled.join(timeout=1)
-        frame_lock.release()
-        self.assertFalse(cancelled.is_alive(), 'Cancellation waited for the blocked frame lock')
-        self.assertTrue(process.killed)
-        self.assertFalse(pending.exists())
-
     def test_stalled_video_frame_upload_unblocks(self):
         class FakeFFmpeg:
             def __init__(self, command, **_kwargs):
@@ -464,6 +475,153 @@ class StudioAPITest(unittest.TestCase):
             server.validate_video_request({
                 'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60,
                 'quality': 'standard', 'format': 'avi'})
+
+    def test_ffmpeg_preflight_requires_libx264(self):
+        supported = mock.Mock(returncode=0, stdout=' V....D libx264 H.264 encoder')
+        missing = mock.Mock(returncode=0, stdout=' V....D h264_videotoolbox H.264 encoder')
+        with mock.patch.object(server.subprocess, 'run', return_value=supported):
+            self.assertIsNone(server.ffmpeg_encoder_error('/fake/ffmpeg'))
+        with mock.patch.object(server.subprocess, 'run', return_value=missing):
+            self.assertIn('libx264', server.ffmpeg_encoder_error('/fake/ffmpeg'))
+        previous = server.FFMPEG_ENCODER_ERROR
+        server.FFMPEG_ENCODER_ERROR = 'ffmpeg does not provide the required libx264 H.264 encoder'
+        try:
+            with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
+                code, capabilities = self.request('GET', '/api/video/capabilities')
+                self.assertEqual(code, 200)
+                self.assertFalse(capabilities['available'])
+                self.assertTrue(capabilities['canManage'])
+                self.assertIn('libx264', capabilities['reason'])
+                code, rejected = self.raw_request('POST', '/api/video/frame', PNG, {'Content-Type': 'image/png'})
+                self.assertEqual(code, 400)
+                self.assertIn('libx264', rejected['error'])
+                self.assertIsNone(self.connection.sock, 'Rejected unread frame body must close the connection')
+        finally:
+            server.FFMPEG_ENCODER_ERROR = previous
+
+    def test_background_recovery_keeps_live_upload_and_pause_usable(self):
+        entered, release = threading.Event(), threading.Event()
+        class FakeEncoder:
+            def __init__(self,command,**_kwargs):
+                self.stdin=io.BytesIO();self.output=Path(command[-1]);self.returncode=None
+            def poll(self): return self.returncode
+            def wait(self,timeout=None):
+                self.output.write_bytes(b'checkpoint');self.returncode=0;return 0
+            def kill(self): self.returncode=-9
+        with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess,'Popen',FakeEncoder):
+            code,started=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1,'quality':'draft'})
+            self.assertEqual(code,201);store=server.video_store()
+            code,cancelled=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1,'quality':'draft'})
+            self.assertEqual(code,201)
+            def scan():
+                entered.set();release.wait(3)
+                return store._empty_recovery_report()
+            with mock.patch.object(store,'_recover_stale_encoders',side_effect=scan):
+                worker=threading.Thread(target=store.recover_stale_encoders);worker.start()
+                self.assertTrue(entered.wait(2))
+                try:
+                    frame=server.PNG_SIGNATURE+(13).to_bytes(4,'big')+b'IHDR'+(64).to_bytes(4,'big')+(64).to_bytes(4,'big')
+                    code,_=self.raw_request('POST',f"/api/video/frame?id={started['id']}&frame=0&lease={started['lease']}",frame,{'Content-Type':'image/png'})
+                    self.assertEqual(code,201)
+                    code,_=self.request('POST','/api/video/pause',{'id':started['id'],'lease':started['lease']})
+                    self.assertEqual(code,200)
+                    code,_=self.request('POST','/api/video/cancel',{'id':cancelled['id'],'lease':cancelled['lease']})
+                    self.assertEqual(code,200)
+                    code,error=self.request('POST','/api/video/resume',{'id':started['id']})
+                    self.assertEqual(code,400);self.assertIn('recovery is still running',error['error'])
+                finally:
+                    release.set();worker.join(2)
+                self.assertFalse(worker.is_alive())
+
+    def test_encoder_install_after_cli_startup_requires_restart(self):
+        with mock.patch.object(server,'VIDEO_FFMPEG_BOOTSTRAP',''), \
+             mock.patch.object(server.shutil,'which',return_value='/new/ffmpeg'), \
+             mock.patch.object(server,'VideoJobStore') as factory:
+            code,value=self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertFalse(value['available']);self.assertFalse(value['canManage'])
+            self.assertIn('Restart the Studio server',value['reason'])
+            code,error=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1})
+            self.assertEqual(code,400);self.assertIn('Restart the Studio server',error['error'])
+            code,error=self.request('GET','/api/video/jobs')
+            self.assertEqual(code,400);self.assertIn('Restart the Studio server',error['error'])
+            factory.assert_not_called()
+
+    def test_existing_jobs_can_be_paused_or_cancelled_after_encoder_path_changes(self):
+        with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'):
+            jobs=[]
+            for _ in range(2):
+                code,job=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':1})
+                self.assertEqual(code,201);jobs.append(job)
+        with mock.patch.object(server,'VIDEO_FFMPEG_BOOTSTRAP','/fake/ffmpeg'), \
+             mock.patch.object(server.shutil,'which',return_value='/new/ffmpeg'), \
+             mock.patch.object(server,'VideoJobStore') as factory:
+            code,value=self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertFalse(value['available'])
+            code,value=self.request('GET','/api/video/jobs')
+            self.assertEqual(code,200);self.assertEqual(len(value['jobs']),2)
+            code,_=self.request('POST','/api/video/pause',{'id':jobs[0]['id'],'lease':jobs[0]['lease']})
+            self.assertEqual(code,200)
+            code,_=self.request('POST','/api/video/cancel',{'id':jobs[1]['id'],'lease':jobs[1]['lease']})
+            self.assertEqual(code,200);factory.assert_not_called()
+
+    def test_video_mutations_wait_for_startup_recovery(self):
+        with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'):
+            store = server.video_store();store.recovery_running = True
+            try:
+                for route in ('start','resume','pause','cancel','finish'):
+                    code, error = self.request('POST',f'/api/video/{route}',{'id':'0'*32})
+                    self.assertEqual(code,400);self.assertIn('recovery is still running',error['error'])
+                    self.assertIsNone(self.connection.sock)
+                code,error = self.raw_request('POST','/api/video/frame',PNG,{'Content-Type':'image/png'})
+                self.assertEqual(code,400);self.assertIn('recovery is still running',error['error'])
+            finally:
+                store.recovery_running = False
+            store.last_recovery['indexFailed'] = True
+            code,error = self.request('POST','/api/video/resume',{'id':'0'*32})
+            self.assertEqual(code,400);self.assertIn('durable job index',error['error'])
+
+    def test_preflight_repairs_pid_metadata_after_failed_live_pause(self):
+        class Encoder:
+            pid=23456
+            def __init__(self,*_args,**_kwargs): self.stdin=io.BytesIO();self.returncode=None
+            def poll(self): return self.returncode
+            def kill(self): self.returncode=-9
+            def wait(self,timeout=None): return self.returncode
+        with mock.patch.object(server.shutil,'which',return_value='/fake/ffmpeg'), \
+             mock.patch.object(server.subprocess,'Popen',Encoder):
+            code,started=self.request('POST','/api/video/start',{'width':64,'height':64,'fps':24,'frames':2,'quality':'draft','sourceUrl':'/','renderSignature':'render-v1'})
+            self.assertEqual(code,201)
+            frame=server.PNG_SIGNATURE+(13).to_bytes(4,'big')+b'IHDR'+(64).to_bytes(4,'big')+(64).to_bytes(4,'big')
+            code,_=self.raw_request('POST',f"/api/video/frame?id={started['id']}&frame=0&lease={started['lease']}",frame,{'Content-Type':'image/png'})
+            self.assertEqual(code,201);store=server.video_store()
+            store.processes_for_path=lambda _path: [];store.process_command=lambda _pid: ''
+            with mock.patch.object(store,'_save',side_effect=OSError('scratch unplugged')):
+                code,_=self.request('POST','/api/video/pause',{'id':started['id'],'lease':started['lease']})
+                self.assertEqual(code,500)
+            self.assertTrue(store.recovery_pending)
+            code,capabilities=self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertTrue(capabilities['available'])
+            self.assertEqual(store.get(started['id'])['state'],'paused')
+            code,resumed=self.request('POST','/api/video/resume',{'id':started['id'],'sourceUrl':'/','renderSignature':'render-v1'})
+            self.assertEqual(code,200);self.assertTrue(resumed['lease'])
+
+    def test_preflight_repairs_active_metadata_after_failed_idle_pause(self):
+        with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
+            code, started = self.request('POST', '/api/video/start', {
+                'width':64,'height':64,'fps':24,'frames':1,'quality':'draft'})
+            self.assertEqual(code,201)
+            store = server.video_store()
+            store.processes_for_path = lambda _path: []
+            with mock.patch.object(store, '_save', side_effect=OSError('unmounted scratch')):
+                code, _ = self.request('POST','/api/video/pause',{'id':started['id'],'lease':started['lease']})
+                self.assertEqual(code,500)
+            self.assertTrue(store.recovery_pending)
+            self.assertNotIn(started['id'],store.owners)
+            code, capabilities = self.request('GET','/api/video/capabilities')
+            self.assertEqual(code,200);self.assertTrue(capabilities['available'])
+            self.assertFalse(store.recovery_pending)
+            self.assertEqual(store.get(started['id'])['state'],'paused')
 
     def test_video_pause_accepts_bounded_failure_reason(self):
         with mock.patch.object(server.shutil, 'which', return_value='/fake/ffmpeg'):
@@ -584,7 +742,7 @@ class StudioAPITest(unittest.TestCase):
     def test_studio_code_bypasses_cache(self):
         (server.ROOT / 'studio').mkdir()
         (server.ROOT / 'studio' / 'app.js').write_text('const version = 3;')
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
         connection.request('GET', '/studio/app.js', headers={'If-Modified-Since': 'Wed, 01 Jan 2099 00:00:00 GMT'})
         response = connection.getresponse()
         self.assertEqual(response.status, 200)
@@ -615,12 +773,59 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(self.request('POST', '/api/export', self.payload(), {'Origin': 'https://example.com'})[0], 403)
 
     def test_rejected_request_with_unread_body_closes_connection(self):
-        connection = http.client.HTTPConnection('localhost', self.http.server_port)
+        connection = http.client.HTTPConnection('localhost', self.http.server_port, timeout=10)
         connection.request('POST', '/api/export', json.dumps(self.payload()), {'Origin': 'https://example.com'})
         response = connection.getresponse()
         self.assertEqual(response.status, 403)
         response.read()
         self.assertIsNone(connection.sock)
+
+
+class ServerStartupTest(unittest.TestCase):
+    def test_cli_refuses_lazy_store_after_encoder_install_or_path_change(self):
+        old=mock.Mock()
+        for bootstrap in ('','/old/ffmpeg'):
+            with self.subTest(bootstrap=bootstrap), \
+                 mock.patch.object(server,'VIDEO_FFMPEG_BOOTSTRAP',bootstrap), \
+                 mock.patch.object(server,'VIDEO_STORE',old), \
+                 mock.patch.object(server.shutil,'which',return_value='/new/ffmpeg'), \
+                 mock.patch.object(server,'VideoJobStore') as factory:
+                with self.assertRaisesRegex(ValueError,'Restart the Studio server'):
+                    server.video_store()
+                factory.assert_not_called();old.pause_all.assert_not_called()
+                old.release_server.assert_not_called()
+
+    def test_recovery_gate_allows_only_a_known_live_owner_lease(self):
+        store=mock.Mock(recovery_running=True,lock=threading.RLock(),leases={},owners={},last_recovery={'indexFailed':False})
+        with self.assertRaisesRegex(ValueError,'recovery is still running'):
+            server.check_video_recovery(store,'job','old-nonce')
+        store.leases['job']={'token':'nonce'};store.owners['job']=mock.Mock()
+        server.check_video_recovery(store,'job','nonce')
+        with self.assertRaises(ValueError): server.check_video_recovery(store,'job','old-nonce')
+        store.recovery_running=False;store.last_recovery['indexFailed']=True
+        server.check_video_recovery(store,'job','nonce')
+        with self.assertRaisesRegex(ValueError,'durable job index'):
+            server.check_video_recovery(store)
+
+    def test_missing_encoder_still_claims_ownership_and_starts_recovery(self):
+        store = mock.Mock()
+        with mock.patch.object(server, 'video_store', return_value=store), \
+             mock.patch.object(server, 'FFMPEG_ENCODER_ERROR', 'libx264 unavailable'), \
+             mock.patch.object(server.threading, 'Thread') as thread:
+            self.assertIs(server.start_video_recovery(), store)
+            store.claim_server.assert_called_once()
+            self.assertTrue(store.recovery_running)
+            self.assertEqual(thread.call_args.kwargs['target'], store.recover_stale_encoders)
+            thread.return_value.start.assert_called_once()
+
+    def test_ownership_failure_never_starts_recovery(self):
+        store = mock.Mock()
+        store.claim_server.side_effect = ValueError('already owned')
+        with mock.patch.object(server, 'video_store', return_value=store), \
+             mock.patch.object(server.threading, 'Thread') as thread:
+            with self.assertRaisesRegex(ValueError, 'already owned'):
+                server.start_video_recovery()
+            thread.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -10,7 +10,7 @@ Install the locked JavaScript tooling and Chromium once, and synchronize the ven
 make install
 ```
 
-Video export additionally requires an `ffmpeg` executable with H.264 (`libx264`) support on `PATH`. It is called as a subprocess; the Python server remains standard-library-only and does not install or import third-party Python packages.
+Video export additionally requires an `ffmpeg` executable with H.264 (`libx264`) support on `PATH`. Restart the Studio server after installing ffmpeg or changing its executable path so encoder capability, project ownership and recovery are checked together. It is called as a subprocess; the Python server remains standard-library-only and does not install or import third-party Python packages.
 
 Then start the local application:
 
@@ -62,7 +62,7 @@ site/work/<slug>/
 
 A slug is never silently replaced; choose another slug if that directory already exists. The publish operation also rebuilds `site/catalog.json`, which the gallery at `site/index.html` reads. Published viewer settings come from embedded configuration rather than browser storage, so one work cannot inherit another work's camera or shader.
 
-All resources used by an individual work are relative to its own directory. You can copy `site/work/<slug>/` wholesale to an S3 bucket or any other static web server without changing a base URL. It contains no Studio/API dependency and makes no network requests for runtime libraries. Serve the directory over HTTP rather than opening `index.html` as a `file://` URL; ES modules are commonly blocked or restricted from local files. This layout is intended to support a future BrightSign packaging workflow with little or no transformation, though device-specific browser/WebGL validation is still required.
+All resources used by an individual work are relative to its own directory. You can copy `site/work/<slug>/` wholesale to an S3 bucket or any other static web server without changing a base URL. It contains no Studio/API dependency and makes no network requests for runtime libraries. Serve the directory over HTTP rather than opening `index.html` as a `file://` URL; ES modules are commonly blocked or restricted from local files. Published environments also load on plain HTTP origins without Web Crypto; SHA-256 hashing is optional only for this static playback path. Export-capable skybox loading still requires Web Crypto (HTTPS or localhost) to verify content and protect resume identity. This layout is intended to support a future BrightSign packaging workflow with little or no transformation, though device-specific browser/WebGL validation is still required.
 
 Preview the gallery locally with:
 
@@ -106,11 +106,68 @@ The collapsed **Video timing** section provides export FPS, loop frame count, du
 
 **Export video…** opens a confirmation dialog for MP4 or MKV container, resolution, quality and range. The default is a 30-second MP4 clip starting at the current frame, shortened to fit when the loop is shorter than 30 seconds. Whole-loop export remains available. A clip window uses a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a bitrate-based size estimate before any work begins. If that file name already labels a clip in `videos/`, the viewer asks before adding another.
 
-Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Capture uses a reusable OffscreenCanvas with promise-based PNG encoding where supported, falling back to synchronous capture for compatibility. A failed or timed-out offscreen encoder is bypassed for the rest of that export, rather than repeatedly waiting or accumulating pending frame copies. The selected skybox must finish loading before export; its actual face hashes are part of the resume signature, and environment changes are locked during rendering. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+
+New exports preserve the browser's sRGB transfer curve, convert full-range RGB to limited-range BT.709 YUV, and explicitly tag the sRGB transfer (`iec61966-2-1`), BT.709 matrix and BT.709/sRGB primaries in H.264 and the container. This labels the source curve accurately; it does not bake in a gamma/brightness adjustment. MP4/MKV tests verify the tags and decoded RGB sample fidelity. Existing jobs pinned to the previous BT.709 transfer profile, and untagged legacy jobs, retain their original conversion so resuming never mixes color policies. Color-managed playback (including Finder Quick Look) still needs visual comparison; players that ignore transfer tags can differ. Checkpoint encoder failures preserve the last 4 KB of diagnostics in the interrupted job's reason.
+
+### One-shot fallback
+
+Resumable export remains the default. To select a separate, simpler backend,
+restart Studio with either:
+
+```sh
+make serve VIDEO_MODE=simple
+# or
+python3 studio/server.py --port 1313 --video-mode simple
+```
+
+The dialog identifies **Simple mode**: deterministic PNG capture, one H.264
+encoder, explicit sRGB/BT.709 color, and publication only after successful encoding. The movie
+is saved with a same-named JSON settings sidecar and a metadata-bearing PNG of
+the clip's starting frame. Drag that PNG onto the viewer to restore its view,
+timing, and render settings (use the original skybox/environment). Cancel,
+leaving the page, or encoder failure discards partial progress; restart from
+frame 0. There are no checkpoints, resume, custom scratch folders, or startup
+recovery. Existing resumable jobs remain untouched and hidden; restart with
+`--video-mode resumable` (or plain `make serve`) to manage them again.
+
+Use local project/output storage for this fallback. An abrupt server/machine
+crash can leave hidden `videos/.simple-*` directories. Simple mode deliberately
+does not scan or delete them on restart; remove leftovers only after confirming
+their old encoders have exited. Multi-hour and network-share endurance remain
+unvalidated.
+
+`make test-video-encoder` checks real encoding; `make test-video-simple-browser`
+checks browser export/cancellation. `make test` checks both modes. Tests remain
+standard-library `unittest`: pytest would not replace the owned-process guard
+and bounded cleanup.
+
+### Video validation commands
+
+```sh
+make test-fast           # routine editing: no Chromium, networking or real encoder
+make test-python         # durable store, API and real ffmpeg recovery tests
+make test-browser        # isolated capture + complete browser integration
+make test-video-capture  # pixel integrity and capture-fallback test; no HTTP server
+make test-video-encoder  # store + real encoder tests without localhost networking
+make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4"
+# Longer encoder validation is opt-in; duration is output video seconds:
+make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4" VIDEO_SOAK_SECONDS=600
+```
+
+Use `make test-fast` during development and select `test-video-capture` or `test-video-encoder` only for relevant changes. Run `make test-browser` once for final integration validation; do not automatically retry failed full browser suites.
+
+Resource-heavy targets share a per-user nonblocking lock across checkout directories, a wall-clock timeout, and an owned-process cleanup guard. Concurrent runs are refused rather than queued. Network-heavy targets refuse to start at 8,000 or more host `TIME_WAIT` sockets; nested stages recheck pressure before proceeding. Browser tests also use this guard when invoked directly. The guard attempts graceful cleanup, then terminates only the invocation's process group and recorded descendants whose PID/start time still match—not the user's server or browser. Test encoders are limited to two threads; production exports keep their normal thread policy.
+
+Browser cleanup is awaited on success, failure and SIGINT/SIGTERM. The temporary server pauses its jobs before exit, stderr is continuously drained with an 8 KB diagnostic tail, and temporary files are removed only after server exit. The API test helpers reuse an HTTP connection per test and close it during teardown. The export API already supports HTTP/1.1 keep-alive for sequential browser uploads.
+
+The soak uses three samples from an existing artwork video at 1080p/30 FPS, two mid-checkpoint store-restart/resume cycles (asserting actual rollback and rerender), exact frame count and duration checks, sRGB-transfer/BT.709 verification and encoder-leak checks. It uses temporary storage and does not alter the source. The default six-second run is deliberately bounded; it is not a claim of multi-hour browser endurance. Long hidden-tab/4K exports still need workload-specific endurance validation.
 
 ### Long-running video recovery
 
-Every video export is resumable. The default checkpoint interval is 60 seconds and can be changed from 1 to 3,600 seconds. A browser navigation, server shutdown, encoder failure, or five minutes without a frame pauses the job and preserves completed checkpoints. Reopen the same viewer URL with the same camera and render settings, open **Export video…**, and use **Resume**. The active incomplete checkpoint is rerendered, so an interruption loses at most one checkpoint interval—not the preceding hours. **Pause export** is recoverable; **Discard** permanently removes the checkpoints and requires confirmation.
+In the default resumable mode, new video exports are resumable. Interrupted jobs created before verified environment signatures cannot be securely resumed by this viewer: the dialog explains this and does not offer a misleading settings-restore button. Use the previous viewer runtime to finish those jobs, or start a new export. Already-rendered legacy jobs can still be finalized without rendering more frames. When a verified job's skybox or viewer URL differs, load its original environment/URL first; settings restoration only repairs camera/render settings once environment identity matches. The default checkpoint interval is 60 seconds and can be changed from 1 to 3,600 seconds. A browser navigation, server shutdown, encoder failure, or five minutes without a frame pauses the job and preserves completed checkpoints. Reopen the same viewer URL with the same camera and render settings, open **Export video…**, and use **Resume**. The active incomplete checkpoint is rerendered, so an interruption loses at most one checkpoint interval—not the preceding hours. **Pause export** is recoverable; **Discard** permanently removes the checkpoints and requires confirmation.
+
+When ffmpeg is present but lacks libx264, the server still claims project ownership and performs crash recovery. New/remaining-frame encoding is blocked, but completed checkpoints can still be finalized via stream copy and jobs can be discarded from the dialog.
 
 The server records the active ffmpeg PID and its exact checkpoint path in the durable job manifest. On startup it terminates only ffmpeg processes whose command matches that job-owned path, removes the incomplete checkpoint, and leaves unrelated or PID-reused processes untouched. The export preflight reports any startup cleanup. This also recognizes checkpoint encoders created before PID tracking was added; `make unstick` remains a manual diagnostic fallback.
 

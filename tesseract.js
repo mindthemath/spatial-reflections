@@ -20,6 +20,9 @@ let videoExportAbort = null;
 let videoExportStopAction = null;
 let videoExportStopPromise = null;
 let videoExportStopJobId = null;
+let videoCaptureSurface = null;
+let videoCaptureContext = null;
+let videoCaptureFallback = false;
 let loopTiming = { period: 0, frameCount: 1, timeStep: 0, exact: true };
 let lastAnimationTimestamp = null;
 let frameAccumulator = 0;
@@ -52,6 +55,7 @@ let exportFpsSelect;
 let videoExportButton;
 let videoExportDialog;
 let videoExportDialogRequest = 0;
+let videoResumeJobsRequest = 0;
 let panelExpanded = true;
 let videoTimingExpanded = false;
 let savedCameraPosition = { x: 3, y: 3, z: 3 };
@@ -250,6 +254,7 @@ function createEnvironmentMap() {
             updateMaterialsWithEnvMap();
             previous?.dispose();
         },
+        onStateChange: refreshVideoEnvironmentState,
         confirmAction,
         onSwitchChrome: () => {
             const select = document.getElementById('viewer-shader');
@@ -264,29 +269,51 @@ function setupDragAndDropHandlers() {
     const dropZone = document.getElementById('drop-zone');
     if (!dropZone) return;
     
-    // Handle drag over
+    let dragDepth = 0;
+    let dragTimeout = null;
+    const hideDropZone = () => {
+        dragDepth = 0;
+        clearTimeout(dragTimeout);
+        dragTimeout = null;
+        dropZone.style.display = 'none';
+    };
+    const showDropZone = () => {
+        dropZone.style.display = 'block';
+        clearTimeout(dragTimeout);
+        // External drags cancelled by the OS may send no dragleave/dragend.
+        // Active drags keep sending dragover, including while stationary.
+        dragTimeout = setTimeout(hideDropZone, 1200);
+    };
+    window.addEventListener('dragenter', () => {
+        dragDepth += 1;
+        showDropZone();
+    });
     window.addEventListener('dragover', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        dropZone.style.display = 'block';
+        showDropZone();
     });
-    
-    // Handle drag leave
     window.addEventListener('dragleave', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        const rect = document.body.getBoundingClientRect();
-        if (e.clientX <= rect.left || e.clientX >= rect.right || 
-            e.clientY <= rect.top || e.clientY >= rect.bottom) {
-            dropZone.style.display = 'none';
-        }
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0 || e.clientX <= 0 || e.clientX >= window.innerWidth ||
+            e.clientY <= 0 || e.clientY >= window.innerHeight) hideDropZone();
+    });
+    window.addEventListener('dragend', hideDropZone);
+    window.addEventListener('blur', hideDropZone);
+    window.addEventListener('keydown', e => {
+        if (e.key === 'Escape') hideDropZone();
+    }, true);
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) hideDropZone();
     });
     
     // Handle drop
     window.addEventListener('drop', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        dropZone.style.display = 'none';
+        hideDropZone();
         
         if (e.dataTransfer.files.length > 0) {
             const file = e.dataTransfer.files[0];
@@ -356,7 +383,7 @@ function readMetadataFromPNG(file) {
                         
                         // Reconstruct string from pixel data
                         let dataString = "";
-                        for (let i = 1; i < 500; i++) { // Limit to reasonable number of pixels
+                        for (let i = 1; i < canvas.width; i++) { // Read the complete metadata row
                             const pixelIndex = i * 4;
                             if (pixelIndex >= pixelData.length) break;
                             
@@ -509,6 +536,16 @@ function applyViewSettings(metadata) {
     console.log("Applying view settings from metadata:", metadata);
     
     try {
+        if (metadata.render) {
+            const { camera: renderCamera, ...renderSettings } = metadata.render;
+            restoreVideoRenderSettings({
+                ...renderSettings,
+                exportFps: metadata.render.fps,
+                videoExportWidth: metadata.video?.width,
+                videoExportHeight: metadata.video?.height,
+                videoExportQuality: metadata.video?.quality
+            });
+        }
         // Set camera position
         if (metadata.camera && metadata.camera.position) {
             camera.position.set(
@@ -844,6 +881,7 @@ function createControls() {
     
     // Lighting type selector
     const lightingSelect = document.createElement('select');
+    lightingSelect.id = 'viewer-lighting';
     lightingSelect.style.width = '100%';
     lightingSelect.style.padding = '3px';
     lightingSelect.style.backgroundColor = '#222';
@@ -872,11 +910,13 @@ function createControls() {
     
     // Light distance control
     const distanceLabel = document.createElement('div');
+    distanceLabel.id = 'viewer-light-distance-label';
     distanceLabel.textContent = `Light Distance: ${lightDistance.toFixed(1)}`;
     distanceLabel.style.marginTop = '5px';
     distanceLabel.style.marginBottom = '5px';
     
     const distanceSlider = document.createElement('input');
+    distanceSlider.id = 'viewer-light-distance';
     distanceSlider.type = 'range';
     distanceSlider.min = '0.1';
     distanceSlider.max = '20';
@@ -965,21 +1005,6 @@ function createControls() {
     lightingContainer.appendChild(distanceLabel);
     lightingContainer.appendChild(distanceSlider);
     controlPanel.appendChild(lightingContainer);
-    
-    // Helper function to update all materials
-    function updateMaterials() {
-        const previousMaterials = new Set([...faces, ...vertices].map(object => object.material));
-        const newMaterial = createShaderMaterial();
-        
-        faces.forEach(face => {
-            face.material = newMaterial;
-        });
-        
-        vertices.forEach(vertex => {
-            vertex.material = newMaterial;
-        });
-        previousMaterials.forEach(material => material.dispose());
-    }
     
     // Add rotation controls
     const rotationControls = document.createElement('div');
@@ -1311,6 +1336,52 @@ function createControls() {
     updateCameraInfo();
 }
 
+function updateMaterials() {
+    const previousMaterials = new Set([...faces, ...vertices].map(object => object.material).filter(Boolean));
+    const newMaterial = createShaderMaterial();
+    faces.forEach(face => { face.material = newMaterial; });
+    vertices.forEach(vertex => { vertex.material = newMaterial; });
+    previousMaterials.forEach(material => {
+        if (material !== newMaterial) material.dispose();
+    });
+}
+
+function restoreVideoRenderSettings(saved) {
+    // Restoring render settings should not collapse the current controls or
+    // change the user's preview play/pause preference.
+    const {panelExpanded, videoTimingExpanded, animationPaused, ...renderSettings} = saved || {};
+    applyViewerSettings(renderSettings);
+}
+
+function syncViewerControlsFromState() {
+    if (motionStepSlider) motionStepSlider.value = String(rotationSpeed * 1000);
+    if (motionStepLabel) motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
+    const rotationControls = document.getElementById('rotationControls');
+    if (rotationControls) {
+        const sliders = rotationControls.querySelectorAll('input[type="range"]');
+        const values = rotationControls.querySelectorAll('span');
+        ['xw', 'yw', 'zw'].forEach((axis, index) => {
+            if (sliders[index]) sliders[index].value = String(rotationCoefficients[axis] * 20);
+            if (values[index]) values[index].textContent = rotationCoefficients[axis].toFixed(2);
+        });
+    }
+    const shader = document.getElementById('viewer-shader');
+    if (shader) shader.value = currentShader;
+    const lighting = document.getElementById('viewer-lighting');
+    if (lighting) lighting.value = currentLighting;
+    const distance = document.getElementById('viewer-light-distance');
+    if (distance) distance.value = String(lightDistance);
+    const distanceLabel = document.getElementById('viewer-light-distance-label');
+    if (distanceLabel) distanceLabel.textContent = `Light Distance: ${lightDistance.toFixed(1)}`;
+    const vertexToggle = document.getElementById('vertexToggle');
+    if (vertexToggle) vertexToggle.checked = showVertices;
+    if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
+    const resolution = document.getElementById('video-export-resolution');
+    if (resolution) resolution.value = `${videoExportWidth}x${videoExportHeight}`;
+    const quality = document.getElementById('video-export-quality');
+    if (quality) quality.value = videoExportQuality;
+}
+
 const COEFFICIENT_SCALE = 1000000;
 
 function greatestCommonDivisor(a, b) {
@@ -1501,7 +1572,8 @@ function videoRenderSignature() {
             position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
         },
-        fps: exportFps
+        fps: exportFps,
+        environment: skyboxLibrary?.getRenderState().identity || null
     });
 }
 
@@ -1624,8 +1696,22 @@ async function openVideoExportDialog() {
     try {
         const value = await videoControlApi('/api/video/capabilities', { cache: 'no-store' });
         if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
-        if (!value.available) throw new Error(value.reason || 'Video service is unavailable');
-        videoExportDialog.dataset.serverAvailable = 'yes';
+        if (!value.available && !value.canManage) throw new Error(value.reason || 'Video service is unavailable');
+        videoExportDialog.dataset.serverAvailable = value.available ? 'yes' : 'no';
+        videoExportDialog.dataset.videoMode = value.videoMode || 'resumable';
+        const simpleMode = videoExportDialog.dataset.videoMode === 'simple';
+        for (const id of ['video-export-checkpoint', 'video-export-scratch']) {
+            const label = document.getElementById(id)?.closest?.('label');
+            if (label) {
+                label.hidden = simpleMode;
+                label.style.display = simpleMode ? 'none' : '';
+            }
+        }
+        document.getElementById('cancel-video-export').textContent = simpleMode ? 'Cancel export' : 'Pause export';
+        if (!value.available) {
+            status.textContent = `${value.reason || 'H.264 encoding is unavailable'}. Completed checkpoints can still be finalized or discarded.`;
+            status.classList.add('error');
+        }
         videoExportDialog.dataset.freeBytes = String(value.freeBytes);
         videoExportDialog.dataset.clips = JSON.stringify(value.clips || []);
         videoExportDialog.dataset.encoder = value.encoder;
@@ -1645,36 +1731,86 @@ async function openVideoExportDialog() {
     updateVideoExportSummary();
 }
 
+function refreshVideoEnvironmentState() {
+    if (!videoExportDialog) return;
+    updateVideoExportSummary();
+    if (videoExportDialog.open && !videoExportRunning) {
+        videoExportDialog.dataset.renderSignature = videoRenderSignature();
+        if (videoExportDialog.dataset.statusMode === 'ready') loadVideoResumeJobs();
+    }
+}
+
+function videoResumeCompatibility(job, currentSignature, currentSource, encodingAvailable = true) {
+    const request = job.request || {};
+    const sourceMatches = request.sourceUrl === currentSource;
+    const settingsMatch = request.renderSignature === currentSignature;
+    const fullyRendered = job.nextFrame === job.frames;
+    let saved = null, current = null;
+    try { saved = JSON.parse(request.renderSignature); } catch { /* Old/invalid signature. */ }
+    try { current = JSON.parse(currentSignature); } catch { /* Not yet ready. */ }
+    const verified = Boolean(saved?.environment);
+    const environmentMatches = verified && saved.environment === current?.environment;
+    let reason = '';
+    if (job.state === 'unavailable') reason = job.reason;
+    else if (job.state === 'active') reason = 'The server still marks this export active; discard it or retry after recovery.';
+    else if (job.state === 'finalizing') reason = 'This export is being finalized in another request. Wait for it to complete.';
+    else if (!fullyRendered && !encodingAvailable) reason = 'H.264 encoding is unavailable; discard this job or restore the encoder to render its remaining frames.';
+    else if (!fullyRendered && !verified) reason = 'This export predates verified skybox identity. Resume with the previous viewer runtime, or start a new export; settings restoration cannot verify its original environment.';
+    else if (!fullyRendered && !sourceMatches) reason = 'Open the original viewer URL and load its saved skybox before resuming.';
+    else if (!fullyRendered && !environmentMatches) reason = 'Load the original skybox and wait for content verification before restoring settings or resuming.';
+    else if (!fullyRendered && !settingsMatch) reason = 'Current render settings do not match.';
+    const usable = !['unavailable', 'active', 'finalizing'].includes(job.state);
+    return {
+        available: usable && (fullyRendered || (encodingAvailable && verified && sourceMatches && settingsMatch)),
+        restore: usable && encodingAvailable && !fullyRendered && sourceMatches && environmentMatches && !settingsMatch && Boolean(request.viewerState),
+        fullyRendered, reason
+    };
+}
+
+async function resolveVideoPauseError(job, error) {
+    if (error?.message !== 'Video export lease is no longer active') return error;
+    try {
+        const value = await videoControlApi('/api/video/jobs', { cache: 'no-store' });
+        const current = (value.jobs || []).find(candidate => candidate.id === job.id);
+        // Encoder failure cleanup may already have consumed the lease. Confirm
+        // durable idle state; do not hide a stale lease owned by another renderer.
+        if (current && ['paused', 'ready'].includes(current.state)) return null;
+    } catch { /* Keep the original failure if state cannot be verified. */ }
+    return error;
+}
+
 async function loadVideoResumeJobs() {
     const requestId = videoExportDialogRequest;
+    const jobsRequest = ++videoResumeJobsRequest;
     const section = document.getElementById('video-resume-jobs');
     const list = document.getElementById('video-resume-job-list');
     list.replaceChildren();
+    if (videoExportDialog.dataset.videoMode === 'simple') {
+        section.hidden = true;
+        return;
+    }
     try {
         const value = await videoControlApi('/api/video/jobs', { cache: 'no-store' });
-        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
+        if (requestId !== videoExportDialogRequest || jobsRequest !== videoResumeJobsRequest || !videoExportDialog.open) return;
         for (const job of value.jobs || []) {
             const card = document.createElement('div');
             card.className = 'video-resume-job';
             card.dataset.jobId = job.id;
             const request = job.request || {};
-            const sourceMatches = request.sourceUrl === location.pathname + location.search;
-            const settingsMatch = request.renderSignature === videoRenderSignature();
-            const fullyRendered = job.nextFrame === job.frames;
-            const available = !['unavailable', 'active'].includes(job.state)
-                && (fullyRendered || (sourceMatches && settingsMatch));
-            const reason = job.state === 'unavailable'
-                ? job.reason
-                : job.state === 'active' ? 'The server still marks this export active; discard it or retry after recovery.'
-                : !fullyRendered && (!sourceMatches || !settingsMatch) ? 'Current source or render settings do not match.' : '';
+            const {available, restore: canRestore, fullyRendered, reason} = videoResumeCompatibility(
+                job, videoRenderSignature(), location.pathname + location.search,
+                videoExportDialog.dataset.serverAvailable === 'yes'
+            );
             const description = document.createElement('span');
-            description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}`;
+            const diagnostic = job.reason && job.reason !== reason ? job.reason : '';
+            description.textContent = `${request.name || 'Video'} · ${job.nextFrame || 0} / ${job.frames || request.frames || 0} durable frames${reason ? ` · ${reason}` : ''}${diagnostic ? ` · ${diagnostic}` : ''}`;
             const resume = document.createElement('button');
             resume.type = 'button';
             resume.className = 'resume-video-export';
             resume.textContent = fullyRendered ? 'Finalize' : 'Resume';
             resume.disabled = !available;
             resume.addEventListener('click', () => {
+                if (videoExportRunning) return;
                 const plan = videoExportPlanFromRequest(request);
                 if (plan) runVideoExport(plan, job);
             });
@@ -1683,12 +1819,13 @@ async function loadVideoResumeJobs() {
             discard.className = 'discard-video-export';
             discard.textContent = 'Discard';
             discard.addEventListener('click', async () => {
+                if (videoExportRunning) return;
                 const confirmed = await confirmAction({
                     title: 'DISCARD VIDEO EXPORT',
                     message: 'Delete this interrupted export and all of its checkpoints?',
                     confirmLabel: 'Discard'
                 });
-                if (!confirmed) return;
+                if (!confirmed || videoExportRunning) return;
                 await videoControlApi('/api/video/cancel', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id: job.id })
@@ -1696,19 +1833,25 @@ async function loadVideoResumeJobs() {
                 await loadVideoResumeJobs();
             });
             card.append(description, resume);
-            if (job.state !== 'unavailable' && sourceMatches && !settingsMatch && !fullyRendered && request.viewerState) {
+            if (canRestore) {
                 const restore = document.createElement('button');
                 restore.type = 'button';
                 restore.className = 'restore-video-export';
                 restore.textContent = 'Restore export settings';
                 restore.addEventListener('click', async () => {
-                    applyViewerSettings(request.viewerState);
+                    if (videoExportRunning) return;
+                    restoreVideoRenderSettings(request.viewerState);
+                    const restoredFrame = timelineFrame;
                     camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
                     controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
                     controls.update();
                     vertices.forEach(vertex => { vertex.visible = showVertices; });
+                    syncViewerControlsFromState();
                     updateMaterials();
-                    refreshLoopTiming();
+                    skyboxLibrary?.refreshShaderHint();
+                    refreshLoopTiming({ preserveTime: false });
+                    setTimelineFrame(restoredFrame);
+                    updateCameraInfo();
                     persistViewerSettings();
                     videoExportDialog.dataset.renderSignature = videoRenderSignature();
                     await loadVideoResumeJobs();
@@ -1720,7 +1863,7 @@ async function loadVideoResumeJobs() {
         }
         section.hidden = !list.children.length;
     } catch (error) {
-        if (requestId !== videoExportDialogRequest || !videoExportDialog.open) return;
+        if (requestId !== videoExportDialogRequest || jobsRequest !== videoResumeJobsRequest || !videoExportDialog.open) return;
         section.hidden = false;
         list.textContent = `Could not inspect interrupted exports: ${error.message}`;
     }
@@ -1756,10 +1899,14 @@ function videoExportPlan() {
     let startFrame = 0;
     let frames = loopTiming.frameCount;
     let error = '';
-    const checkpointSeconds = Number(document.getElementById('video-export-checkpoint').value);
-    const scratchPath = document.getElementById('video-export-scratch').value.trim();
+    const simpleMode = videoExportDialog?.dataset?.videoMode === 'simple';
+    const checkpointSeconds = simpleMode ? 0 : Number(document.getElementById('video-export-checkpoint').value);
+    const scratchPath = simpleMode ? '' : document.getElementById('video-export-scratch').value.trim();
 
     if (!loopTiming.exact || loopTiming.frameCount < 1) error = 'The current motion does not have an exportable timeline.';
+    const renderState = skyboxLibrary?.getRenderState();
+    if (!renderState?.ready) error = 'Wait for the selected skybox to finish loading before exporting.';
+    else if (!renderState.identity) error = 'Skybox verification requires HTTPS or localhost before exporting video.';
     if (!Number.isInteger(checkpointSeconds) || checkpointSeconds < 0 || checkpointSeconds > 3600) error = 'Checkpoint duration must be between 0 and 3,600 seconds.';
     if (range === 'clip') {
         const startSeconds = parseTimeInput(document.getElementById('video-export-start').value);
@@ -1796,7 +1943,9 @@ function updateVideoExportSummary() {
         const rangeText = plan.range === 'full'
             ? `Whole loop · frames 0–${plan.frames - 1}`
             : `Clip · frames ${plan.startFrame}–${plan.startFrame + plan.frames - 1}`;
-        const checkpointText = plan.checkpointSeconds === 0
+        const checkpointText = videoExportDialog.dataset.videoMode === 'simple'
+            ? 'SIMPLE MODE: one-shot encoding, no checkpoints or resume. Cancellation/interruption discards partial output; restart from frame 0.'
+            : plan.checkpointSeconds === 0
             ? 'No checkpoints. Pausing or interruption restarts from frame 0.'
             : `Durable progress is saved every ${plan.checkpointSeconds} seconds.`;
         summary.innerHTML = `
@@ -1821,7 +1970,7 @@ function updateVideoExportSummary() {
                     ? `${recovery.failed} older video job${recovery.failed === 1 ? '' : 's'} could not be inspected; new exports remain available. `
                 : '';
         document.getElementById('video-export-status').textContent =
-            `${videoExportDialog.dataset.encoder} encoder ready. ${recoveryText}${selection}Leaving the page pauses the export at its latest checkpoint.`;
+            `${videoExportDialog.dataset.encoder} encoder ready. ${recoveryText}${selection}${videoExportDialog.dataset.videoMode === 'simple' ? 'Simple mode: leaving the page cancels the export; no partial progress is kept.' : 'Leaving the page pauses the export at its latest checkpoint.'}`;
     }
 }
 
@@ -1841,30 +1990,28 @@ function ensureVideoExportStopRequest() {
     videoExportStopPromise = videoControlApi(discard ? '/api/video/cancel' : '/api/video/pause', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(discard
-            ? { id: job.id }
-            : { id: job.id, lease: job.lease })
+        body: JSON.stringify({ id: job.id, lease: job.lease })
     }).then(() => null, error => error);
     return videoExportStopPromise;
 }
 
 function requestVideoExportCancellation() {
     if (!videoExportRunning || videoExportStopAction) return;
-    videoExportStopAction = 'pause';
+    videoExportStopAction = videoExportDialog.dataset.videoMode === 'simple' ? 'discard' : 'pause';
     cancelVideoExportRequested = true;
     videoExportAbort?.abort();
     ensureVideoExportStopRequest();
     const button = document.getElementById('cancel-video-export');
     button.disabled = true;
     document.getElementById('discard-active-video-export').disabled = true;
-    document.getElementById('video-export-status').textContent = 'Pausing…';
+    document.getElementById('video-export-status').textContent = videoExportStopAction === 'discard' ? 'Cancelling…' : 'Pausing…';
 }
 
 async function requestVideoExportDiscard() {
     if (!videoExportRunning || videoExportStopAction) return;
     const confirmed = await confirmAction({
         title: 'CANCEL VIDEO EXPORT',
-        message: 'Permanently delete this export, its poster, and every saved checkpoint?',
+        message: videoExportDialog.dataset.videoMode === 'simple' ? 'Cancel this one-shot export and discard its partial output?' : 'Permanently delete this export, its poster, and every saved checkpoint?',
         confirmLabel: 'Cancel export'
     });
     if (!confirmed || !videoExportRunning || videoExportStopAction) return;
@@ -1909,9 +2056,41 @@ function dataUrlToBlob(dataUrl) {
     return new Blob([bytes], { type: 'image/png' });
 }
 
-function canvasPNG(canvas) {
-    // Synchronous read. toBlob's callback is deferred, and dropped, while the
-    // document is hidden — that left the export and the encoder waiting on each other.
+async function canvasPNG(canvas) {
+    // Snapshot synchronously into a reusable offscreen surface, then let its
+    // promise-based encoder work without creating a large Base64 string. Unlike
+    // HTMLCanvasElement.toBlob(), OffscreenCanvas.convertToBlob() does not rely on
+    // a document callback that browsers may drop while the page is hidden.
+    if (!videoCaptureFallback && typeof OffscreenCanvas !== 'undefined') {
+        let timeout;
+        try {
+            if (!videoCaptureSurface || videoCaptureSurface.width !== canvas.width || videoCaptureSurface.height !== canvas.height) {
+                videoCaptureSurface = new OffscreenCanvas(canvas.width, canvas.height);
+                videoCaptureContext = videoCaptureSurface.getContext('2d', { alpha: false });
+            }
+            if (!videoCaptureContext || typeof videoCaptureSurface.convertToBlob !== 'function') {
+                throw new Error('Offscreen PNG capture is unavailable');
+            }
+            videoCaptureContext.drawImage(canvas, 0, 0);
+            const blob = await Promise.race([
+                videoCaptureSurface.convertToBlob({ type: 'image/png' }),
+                new Promise((_, reject) => {
+                    timeout = setTimeout(() => reject(new Error('Offscreen PNG capture timed out')), 30000);
+                })
+            ]);
+            if (blob?.size) return blob;
+            throw new Error('Offscreen PNG capture returned an empty frame');
+        } catch (error) {
+            // Never accumulate timed-out full-frame encodes or repeat the 30s
+            // wait on every frame. Retry offscreen capture only in the next job.
+            videoCaptureFallback = true;
+            videoCaptureSurface = videoCaptureContext = null;
+            console.warn('Offscreen video capture failed; using the compatibility path for this export', error);
+            renderer.render(scene, camera);
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
     return dataUrlToBlob(canvas.toDataURL('image/png'));
 }
 
@@ -1975,6 +2154,9 @@ function embedMetadataInPngDataUrl(imageData, metadata = {}) {
                     pixelData[pixelIndex + 2] = 0;
                     pixelData[pixelIndex + 3] = 255;
                 }
+                // Stop the reader before it reaches ordinary image pixels.
+                const terminator = (fullData.length + 1) * 4;
+                if (terminator < pixelData.length) pixelData[terminator] = 0;
                 ctx.putImageData(imgData, 0, 0);
                 resolve(canvas.toDataURL('image/png'));
             } catch (error) {
@@ -2019,9 +2201,20 @@ async function saveVideoExportPoster(plan, job) {
     });
 }
 
+function videoExportFailureMessage(error, stopError, stopAction, hadJob, finishAttempted = false) {
+    // Finish consumes its lease before concat. Its expected stale-lease response
+    // to our best-effort pause is not a second failure. Keep the pause attempt for
+    // network errors or early validation failures that still own a live lease.
+    if (finishAttempted && !stopAction && stopError?.message === 'Video export lease is no longer active') stopError = null;
+    if (stopError) return `${error.message} Could not ${stopAction === 'discard' ? 'cancel' : 'pause'} the export: ${stopError.message}. Check the interrupted export below.`;
+    if (finishAttempted && !stopAction && hadJob) return `${error.message} Finalization failed; checkpoints retained. Check the interrupted export below.`;
+    return hadJob ? `${error.message} Export paused and can be resumed.` : error.message;
+}
+
 async function runVideoExport(plan, resumableJob = null) {
     if (videoExportRunning) return;
     videoExportRunning = true;
+    document.getElementById('video-resume-jobs').inert = true;
     cancelVideoExportRequested = false;
     videoExportAbort = new AbortController();
     videoExportStopAction = null;
@@ -2039,9 +2232,10 @@ async function runVideoExport(plan, resumableJob = null) {
     const result = document.getElementById('video-export-result');
     const fields = videoExportDialog.querySelectorAll('input, select');
     fields.forEach(field => { field.disabled = true; });
+    const simpleMode = videoExportDialog.dataset.videoMode === 'simple';
     cancel.hidden = false;
     cancel.disabled = false;
-    discard.hidden = false;
+    discard.hidden = simpleMode;
     discard.disabled = false;
     progress.hidden = false;
     progress.max = plan.frames;
@@ -2056,10 +2250,18 @@ async function runVideoExport(plan, resumableJob = null) {
     const originalPixelRatio = renderer.getPixelRatio();
     let lastProgressUpdate = 0;
     let exportStartedAt = 0;
+    let releaseEnvironmentLock = null;
+    let finishAttempted = false;
 
     try {
-        const gpuLimit = renderer.getContext().getParameter(renderer.getContext().MAX_RENDERBUFFER_SIZE);
-        if (plan.width > gpuLimit || plan.height > gpuLimit) throw new Error(`This GPU can render video up to ${gpuLimit}px per side`);
+        const prepareCapture = () => {
+            releaseEnvironmentLock = skyboxLibrary.acquireRenderLock();
+            const gpuLimit = renderer.getContext().getParameter(renderer.getContext().MAX_RENDERBUFFER_SIZE);
+            if (plan.width > gpuLimit || plan.height > gpuLimit) throw new Error(`This GPU can render video up to ${gpuLimit}px per side`);
+        };
+        // A complete checkpoint job only needs server-side concatenation, not
+        // a verified current environment or the ability to render its resolution.
+        if (!resumableJob || resumableJob.nextFrame < plan.frames) prepareCapture();
         if (resumableJob) {
             activeVideoExportJob = await videoApi('/api/video/resume', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2082,16 +2284,25 @@ async function runVideoExport(plan, resumableJob = null) {
             });
         }
 
-        animationPaused = true;
-        exportStartedAt = performance.now();
-        renderer.setPixelRatio(1);
-        renderer.setSize(plan.width, plan.height, false);
-        camera.aspect = plan.width / plan.height;
-        camera.updateProjectionMatrix();
-
         const firstFrame = activeVideoExportJob.nextFrame || 0;
+        if (firstFrame < plan.frames) {
+            // Resume re-verifies checkpoint hashes and can roll back damaged
+            // segments. Never render replacements against a changed signature.
+            if (!releaseEnvironmentLock) {
+                prepareCapture();
+                if (resumableJob?.request.renderSignature !== videoRenderSignature()) {
+                    throw new Error('Current render settings do not match the repaired export');
+                }
+            }
+            animationPaused = true;
+            exportStartedAt = performance.now();
+            renderer.setPixelRatio(1);
+            renderer.setSize(plan.width, plan.height, false);
+            camera.aspect = plan.width / plan.height;
+            camera.updateProjectionMatrix();
+        }
         if (firstFrame === 0) {
-            status.textContent = 'Saving resume frame…';
+            status.textContent = 'Saving reproducibility frame…';
             await saveVideoExportPoster(plan, activeVideoExportJob);
         }
         for (let frame = firstFrame; frame < plan.frames; frame++) {
@@ -2101,7 +2312,7 @@ async function runVideoExport(plan, resumableJob = null) {
             setTimelineFrame(plan.startFrame + frame);
             updateTesseractProjection();
             renderer.render(scene, camera);
-            const png = canvasPNG(renderer.domElement);
+            const png = await canvasPNG(renderer.domElement);
             await new Promise(resolve => setTimeout(resolve, 0));
             if (cancelVideoExportRequested) throw new DOMException('Video export cancelled', 'AbortError');
             const frameResult = await videoApi(`/api/video/frame?id=${activeVideoExportJob.id}&frame=${frame}&lease=${activeVideoExportJob.lease}`, {
@@ -2113,12 +2324,13 @@ async function runVideoExport(plan, resumableJob = null) {
                 const elapsedSeconds = Math.max(0.001, (now - exportStartedAt) / 1000);
                 const renderRate = (frame - firstFrame + 1) / elapsedSeconds;
                 const remainingSeconds = (plan.frames - frame - 1) / renderRate;
-                status.textContent = `Rendering + encoding ${(frame + 1).toLocaleString()} / ${plan.frames.toLocaleString()} frames · ${Math.round((frame + 1) / plan.frames * 100)}% · checkpoint ${frameResult.durableFrame.toLocaleString()} · ${renderRate.toFixed(1)} fps · ETA ${formatDuration(remainingSeconds)}`;
+                status.textContent = `Rendering + encoding ${(frame + 1).toLocaleString()} / ${plan.frames.toLocaleString()} frames · ${Math.round((frame + 1) / plan.frames * 100)}%${simpleMode ? '' : ` · checkpoint ${frameResult.durableFrame.toLocaleString()}`} · ${renderRate.toFixed(1)} fps · ETA ${formatDuration(remainingSeconds)}`;
                 lastProgressUpdate = now;
             }
         }
 
         status.textContent = `Finalizing ${plan.format.toUpperCase()}…`;
+        finishAttempted = true;
         const completed = await videoApi('/api/video/finish', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: activeVideoExportJob.id })
@@ -2133,6 +2345,7 @@ async function runVideoExport(plan, resumableJob = null) {
         result.replaceChildren(link);
     } catch (error) {
         let stopError = null;
+        const hadJob = Boolean(activeVideoExportJob);
         if (activeVideoExportJob) {
             if (videoExportStopAction) {
                 ensureVideoExportStopRequest();
@@ -2147,7 +2360,7 @@ async function runVideoExport(plan, resumableJob = null) {
                             reason: String(error.message || error).slice(0, 500)
                         })
                     });
-                } catch { /* The original error is more useful. */ }
+                } catch (pauseError) { stopError = await resolveVideoPauseError(activeVideoExportJob, pauseError); }
             }
             activeVideoExportJob = null;
         }
@@ -2155,15 +2368,15 @@ async function runVideoExport(plan, resumableJob = null) {
             videoExportDialog.dataset.statusMode = 'cancelled';
             status.textContent = 'Export cancelled and discarded.';
             status.classList.remove('error');
-        } else if (videoExportStopAction === 'pause' && !stopError) {
+        } else if (videoExportStopAction === 'pause' && !stopError && hadJob) {
             videoExportDialog.dataset.statusMode = 'paused';
             status.textContent = 'Video export paused. You can resume it from its latest checkpoint.';
             status.classList.remove('error');
         } else {
             videoExportDialog.dataset.statusMode = 'error';
-            status.textContent = stopError
-                ? `Could not ${videoExportStopAction === 'discard' ? 'cancel' : 'pause'} the export: ${stopError.message}. Check the interrupted export below.`
-                : `${error.message} Export paused and can be resumed.`;
+            status.textContent = simpleMode
+                ? `${error.message} ${stopError ? `Could not stop the export: ${stopError.message}.` : 'Simple export stopped; restart from frame 0.'}`
+                : videoExportFailureMessage(error, stopError, videoExportStopAction, hadJob, finishAttempted);
             status.classList.add('error');
         }
     } finally {
@@ -2175,9 +2388,14 @@ async function runVideoExport(plan, resumableJob = null) {
         updateTesseractProjection();
         renderer.render(scene, camera);
         animationPaused = originalPaused;
+        releaseEnvironmentLock?.();
         videoExportRunning = false;
+        document.getElementById('video-resume-jobs').inert = false;
         cancelVideoExportRequested = false;
         videoExportAbort = null;
+        videoCaptureSurface = null;
+        videoCaptureContext = null;
+        videoCaptureFallback = false;
         videoExportStopPromise = null;
         videoExportStopJobId = null;
         fields.forEach(field => { field.disabled = false; });

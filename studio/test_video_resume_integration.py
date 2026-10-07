@@ -68,7 +68,7 @@ class VideoResumeIntegrationTest(unittest.TestCase):
         result = subprocess.run([
             self.ffprobe, '-v', 'error', '-count_frames',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=nb_read_frames:format=duration',
+            '-show_entries', 'stream=nb_read_frames,color_range,color_space,color_transfer,color_primaries:format=duration',
             '-of', 'json', str(path),
         ], check=True, capture_output=True, text=True)
         value = json.loads(result.stdout)
@@ -112,6 +112,10 @@ class VideoResumeIntegrationTest(unittest.TestCase):
                 output = self.root / 'videos' / completed['filename']
                 stream, media_format = self.probe(output)
                 self.assertEqual(int(stream['nb_read_frames']), 5)
+                self.assertEqual(stream['color_range'], 'tv')
+                self.assertEqual(stream['color_space'], 'bt709')
+                self.assertEqual(stream['color_transfer'], 'iec61966-2-1')
+                self.assertEqual(stream['color_primaries'], 'bt709')
                 self.assertAlmostEqual(float(media_format['duration']), 2.5, delta=0.15)
                 self.assertTrue(output.with_suffix('.json').is_file())
                 self.assertEqual(recreated.list_jobs(), [])
@@ -193,6 +197,10 @@ time.sleep(120)
             completed = recreated.finish(details['id'])
             stream, media_format = self.probe(self.root / 'videos' / completed['filename'])
             self.assertEqual(int(stream['nb_read_frames']), 5)
+            self.assertEqual(stream['color_range'], 'tv')
+            self.assertEqual(stream['color_space'], 'bt709')
+            self.assertEqual(stream['color_transfer'], 'iec61966-2-1')
+            self.assertEqual(stream['color_primaries'], 'bt709')
             self.assertAlmostEqual(float(media_format['duration']), 2.5, delta=0.15)
         finally:
             if child.poll() is None:
