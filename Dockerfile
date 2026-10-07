@@ -13,8 +13,9 @@ USER appuser
 COPY --chown=appuser:appuser vendor/ vendor
 COPY --chown=appuser:appuser index.html skybox-paths.js tesseract.js viewer-skyboxes.js .
 COPY --chown=appuser:appuser studio/ studio
+# fallback skybox faces; the raw/ bind mount in `make run` hides these
+COPY --chown=appuser:appuser raw/*.png raw/
 # standalone mode:
-# COPY --chown=appuser:appuser raw/*.png raw/
 # VOLUME ["/app/raw", "/app/exports", "/app/videos"]
 
 EXPOSE 8000

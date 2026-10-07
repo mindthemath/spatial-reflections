@@ -1,4 +1,4 @@
-.PHONY: serve static install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser _test-all _test-browser unstick
+.PHONY: serve static build run run-isolated install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser _test-all _test-browser unstick
 
 TEST_GUARD = python3 scripts/test_guard.py
 
@@ -17,11 +17,17 @@ build:
 	docker build -t spatial-reflections .
 
 run:
+	mkdir -p raw exports videos
 	docker run --rm -ti -p 8000:8000 \
+		--user $$(id -u):$$(id -g) \
 		-v $$(pwd)/raw:/app/raw:ro \
 		-v $$(pwd)/exports:/app/exports:rw \
 		-v $$(pwd)/videos:/app/videos:rw \
 		spatial-reflections
+
+# No bind mounts: only the baked-in fallback PNGs, and exports/videos vanish with the container.
+run-isolated:
+	docker run --rm -ti -p 8000:8000 spatial-reflections
 
 install:
 	bun install
