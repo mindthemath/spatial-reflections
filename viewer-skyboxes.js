@@ -180,6 +180,6 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
     onTexture(diagnosticTexture());setRenderState(false,null);refreshShaderHint();
     let desired=new URL(location.href).searchParams.get('skybox');
     if(!desired){try{desired=localStorage.getItem(STORAGE_KEY);}catch{/* Default if storage is unavailable. */}}
-    loadSelection(desired||'default',{rememberSelection:!!desired});
-    return {...renderApi,refreshShaderHint,loadSelection,refreshLibrary};
+    const initialLoad=loadSelection(desired||'default',{rememberSelection:!!desired});
+    return {...renderApi,refreshShaderHint,loadSelection,refreshLibrary,initialLoad,activeFolder:()=>active,statusMessage:()=>$('skybox-status').textContent};
 }

@@ -3322,4 +3322,155 @@ function updateMaterialsWithEnvMap() {
             }
         });
     }
-} 
+}
+
+// Scriptable API for automation and AI agents (window.viewer). Settings are applied through
+// the same controls a person uses, so the panel, scene and saved settings stay in sync.
+function installViewerAPI() {
+    const SETTINGS = {
+        shape: { control: 'viewer-shape', values: ['tesseract', 'rectified-5-cell'] },
+        shader: { control: 'viewer-shader', values: ['chrome', 'rough', 'iridescent'] },
+        lighting: { control: 'viewer-lighting', values: ['diagonal', 'topdown', 'quad'] },
+        lightDistance: { control: 'viewer-light-distance', min: 0.1, max: 20, step: 0.1 },
+        rotationSpeed: { min: 0, max: 0.01, step: 0.001 },
+        rotationCoefficients: { axes: ['xw', 'yw', 'zw'], min: -1, max: 1, step: 0.05 },
+        showVertices: { type: 'boolean' },
+        exportFps: { values: [24, 25, 30, 50, 60] },
+        animationPaused: { type: 'boolean' },
+        timelineFrame: { type: 'integer', note: 'wraps around the loop length' },
+        camera: { shape: '{position: {x, y, z}, target: {x, y, z}}', note: 'default position is (3, 3, 3), target (0, 0, 0)' }
+    };
+    const require = (condition, message) => {
+        if (!condition) throw new Error(message);
+    };
+    const unlocked = () => require(!videoExportRunning, 'The viewer is locked while a video export renders.');
+    const setControl = (element, value) => {
+        element.value = String(value);
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    const number = (key, value) => {
+        require(Number.isFinite(Number(value)), `${key} must be a number`);
+        return Number(value);
+    };
+    const vector = (key, value) => {
+        require(value && ['x', 'y', 'z'].every(axis => Number.isFinite(Number(value[axis]))), `${key} must be {x, y, z} numbers`);
+        return { x: Number(value.x), y: Number(value.y), z: Number(value.z) };
+    };
+
+    function setState(changes) {
+        unlocked();
+        require(changes && typeof changes === 'object', 'setState takes an object of settings; see describe()');
+        const unknown = Object.keys(changes).filter(key => !(key in SETTINGS));
+        require(!unknown.length, `Unknown setting ${unknown.join(', ')}. Valid: ${Object.keys(SETTINGS).join(', ')}`);
+        for (const key of ['shape', 'shader', 'lighting', 'exportFps']) {
+            if (key in changes) require(SETTINGS[key].values.includes(changes[key]), `${key} must be one of ${SETTINGS[key].values.join(', ')}`);
+        }
+        for (const [key, value] of Object.entries(changes)) {
+            switch (key) {
+                case 'shape': case 'shader': case 'lighting':
+                    setControl(document.getElementById(SETTINGS[key].control), value);
+                    break;
+                case 'lightDistance':
+                    setControl(document.getElementById('viewer-light-distance'), number(key, value));
+                    break;
+                case 'rotationSpeed':
+                    setControl(motionStepSlider, Math.round(number(key, value) * 1000));
+                    break;
+                case 'rotationCoefficients':
+                    require(value && typeof value === 'object', 'rotationCoefficients must be {xw, yw, zw}');
+                    for (const [axis, coefficient] of Object.entries(value)) {
+                        require(SETTINGS.rotationCoefficients.axes.includes(axis), `Unknown rotation axis ${axis}; use xw, yw or zw`);
+                        setControl(document.getElementById(`rotation-${axis}`), Math.round(number(axis, coefficient) * 20));
+                    }
+                    break;
+                case 'showVertices': {
+                    require(typeof value === 'boolean', 'showVertices must be true or false');
+                    const checkbox = document.getElementById('vertexToggle');
+                    checkbox.checked = value;
+                    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+                case 'exportFps':
+                    setControl(exportFpsSelect, value);
+                    break;
+                case 'animationPaused':
+                    require(typeof value === 'boolean', 'animationPaused must be true or false');
+                    animationPaused = value;
+                    lastAnimationTimestamp = null;
+                    frameAccumulator = 0;
+                    break;
+                case 'timelineFrame':
+                    require(Number.isInteger(value), 'timelineFrame must be a whole number');
+                    pauseAnimation();
+                    setTimelineFrame(value);
+                    break;
+                case 'camera':
+                    if (value?.position) camera.position.set(...Object.values(vector('camera.position', value.position)));
+                    if (value?.target) controls.target.set(...Object.values(vector('camera.target', value.target)));
+                    controls.update();
+                    updateCameraInfo();
+                    break;
+            }
+        }
+        persistViewerSettings();
+        return getState();
+    }
+
+    function getState() {
+        return {
+            ...viewerSettings(),
+            skybox: skyboxLibrary?.activeFolder?.() ?? null,
+            skyboxStatus: skyboxLibrary?.statusMessage?.() ?? '',
+            ready: !!skyboxLibrary?.getRenderState?.().ready,
+            loop: { frameCount: loopTiming.frameCount, exact: loopTiming.exact },
+            videoExportRunning,
+            published: publication?.schemaVersion === 1
+        };
+    }
+
+    window.viewer = Object.freeze({
+        ready: Promise.resolve(skyboxLibrary?.initialLoad).then(() => undefined),
+        describe: () => ({
+            about: 'Tesseract viewer: a 4D polytope rendered in three.js, reflecting a six-face skybox. Changes show live and are saved in this browser.',
+            settings: SETTINGS,
+            methods: {
+                'ready': 'promise: the first skybox load has finished',
+                'getState()': 'current settings, active skybox and loop length',
+                'setState(changes)': 'partial settings (see settings); sliders snap to their steps; returns getState()',
+                'play() / pause()': 'start or stop the animation',
+                'listExports()': 'completed Studio exports [{folder, name, createdAt, size, ...}]',
+                'loadSkybox(folder)': '"default" or "exports/<name>"; rejects with the reason if it cannot load',
+                'screenshot({maxSize})': 'PNG data URL of the 3D view (no control panel), longest side at most maxSize (default 1024)'
+            }
+        }),
+        getState,
+        setState,
+        play: () => setState({ animationPaused: false }),
+        pause: () => setState({ animationPaused: true }),
+        async listExports() {
+            const response = await fetch('/api/exports', { cache: 'no-store' });
+            require(response.ok, 'The export library needs studio/server.py');
+            return (await response.json()).exports;
+        },
+        async loadSkybox(folder) {
+            unlocked();
+            require(typeof folder === 'string', 'loadSkybox takes "default" or "exports/<name>"');
+            const loaded = await skyboxLibrary.loadSelection(folder);
+            require(loaded, skyboxLibrary.statusMessage?.() || 'The skybox could not be loaded');
+            return getState();
+        },
+        screenshot({ maxSize = 1024 } = {}) {
+            renderer.render(scene, camera);
+            const source = renderer.domElement;
+            const scale = Math.min(1, number('maxSize', maxSize) / Math.max(source.width, source.height));
+            const output = document.createElement('canvas');
+            output.width = Math.max(1, Math.round(source.width * scale));
+            output.height = Math.max(1, Math.round(source.height * scale));
+            output.getContext('2d').drawImage(source, 0, 0, output.width, output.height);
+            return output.toDataURL('image/png');
+        }
+    });
+}
+
+installViewerAPI();
