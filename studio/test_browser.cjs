@@ -101,7 +101,11 @@ finally:
   assert.equal(manifest.pipeline.schemaVersion,3);assert.equal(manifest.pipeline.resolutionReport.maxSide,1024);assert.equal(manifest.pipeline.nodes.filter(n=>n.type==='skybox').length,1);assert.equal(manifest.pipeline.nodes.find(n=>n.type==='light').settings.exposure,1.25);
   assert.equal(manifest.thumbnail,'preview.png');assert(await page.locator('#view-export').isVisible());
   // Studio -> viewer handoff, gallery loading, shader prompt, persistent selection and failure retention.
-  fs.mkdirSync(path.join(root,'skybox'));for(const face of ['px','nx','py','ny','pz','nz'])fs.copyFileSync(path.join(root,'exports',folder,`${face}.png`),path.join(root,'skybox',`${face}.png`));
+  fs.mkdirSync(path.join(root,'skybox'));for(const face of ['px','nx','py','ny','pz','nz']){
+   const image=path.join(root,'exports',folder,`${face}.png`);
+   fs.copyFileSync(image,path.join(root,'raw',`${face}.png`));
+   fs.copyFileSync(image,path.join(root,'skybox',`${face}.png`));
+  }
   const broken=path.join(root,'exports','broken-fixture');fs.cpSync(path.join(root,'exports',folder),broken,{recursive:true});
   const badManifest=JSON.parse(JSON.stringify(manifest));badManifest.pipeline.name='Broken fixture';fs.writeFileSync(path.join(broken,'manifest.json'),JSON.stringify(badManifest));fs.writeFileSync(path.join(broken,'px.png'),'not a PNG');
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
