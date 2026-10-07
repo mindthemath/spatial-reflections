@@ -16,7 +16,7 @@ static:
 build:
 	docker build -t spatial-reflections .
 
-run:
+run: build
 	mkdir -p raw exports videos
 	docker run --rm -ti -p 8000:8000 \
 		--user $$(id -u):$$(id -g) \
@@ -26,7 +26,7 @@ run:
 		spatial-reflections
 
 # No bind mounts: only the baked-in fallback PNGs, and exports/videos vanish with the container.
-run-isolated:
+run-isolated: build
 	docker run --rm -ti -p 8000:8000 spatial-reflections
 
 install:
