@@ -1,4 +1,4 @@
-.PHONY: serve static build run run-isolated install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser _test-all _test-browser unstick
+.PHONY: serve static build run run-isolated install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser test-agent-api _test-all _test-browser unstick
 
 TEST_GUARD = python3 scripts/test_guard.py
 
@@ -97,7 +97,11 @@ test-video-simple-browser:
 test-browser:
 	$(TEST_GUARD) --network --timeout 360 -- $(MAKE) _test-browser
 
+test-agent-api:
+	$(TEST_GUARD) --network --timeout 180 -- node studio/test_agent_api.cjs
+
 _test-browser:
 	$(MAKE) test-video-capture
 	node studio/test_browser.cjs
+	$(MAKE) test-agent-api
 	$(MAKE) test-video-simple-browser
