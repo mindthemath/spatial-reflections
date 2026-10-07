@@ -19,4 +19,4 @@ COPY --chown=appuser:appuser raw/*.png raw/
 # VOLUME ["/app/raw", "/app/exports", "/app/videos"]
 
 EXPOSE 8000
-CMD ["python3", "studio/server.py", "--port", "8000"]
+CMD ["python3", "studio/server.py", "--host", "0.0.0.0", "--port", "8000"]

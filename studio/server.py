@@ -721,12 +721,14 @@ class StudioHTTPServer(ThreadingHTTPServer):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('-p', '--port', type=int, default=8000)
+    parser.add_argument('--host', '--bind', dest='host', default='localhost',
+                        help='interface to listen on; use 0.0.0.0 to accept non-local connections')
     parser.add_argument('--video-mode', choices=('resumable', 'simple'), default='resumable',
                         help='simple: one-shot encoding; cancellation discards partial output')
     args = parser.parse_args()
     VIDEO_MODE = args.video_mode
-    http = StudioHTTPServer(('0.0.0.0', args.port), Handler)
+    http = StudioHTTPServer((args.host, args.port), Handler)
     ffmpeg = shutil.which('ffmpeg')
     VIDEO_FFMPEG_BOOTSTRAP = str(Path(ffmpeg).resolve()) if ffmpeg else ''
     if ffmpeg:
@@ -737,7 +739,9 @@ if __name__ == '__main__':
         except Exception:
             http.server_close()
             raise
-    print(f'Viewer: http://0.0.0.0:{args.port}/\nStudio: http://0.0.0.0:{args.port}/studio/')
+    # Browsers only grant Web Crypto (needed for export) to localhost or HTTPS, not 0.0.0.0.
+    host = 'localhost' if args.host in ('0.0.0.0', '::', '') else args.host
+    print(f'Viewer: http://{host}:{args.port}/\nStudio: http://{host}:{args.port}/studio/')
     try:
         http.serve_forever()
     finally:
