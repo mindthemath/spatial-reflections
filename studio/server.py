@@ -726,7 +726,7 @@ if __name__ == '__main__':
                         help='simple: one-shot encoding; cancellation discards partial output')
     args = parser.parse_args()
     VIDEO_MODE = args.video_mode
-    http = StudioHTTPServer(('localhost', args.port), Handler)
+    http = StudioHTTPServer(('0.0.0.0', args.port), Handler)
     ffmpeg = shutil.which('ffmpeg')
     VIDEO_FFMPEG_BOOTSTRAP = str(Path(ffmpeg).resolve()) if ffmpeg else ''
     if ffmpeg:
@@ -737,7 +737,7 @@ if __name__ == '__main__':
         except Exception:
             http.server_close()
             raise
-    print(f'Viewer: http://localhost:{args.port}/\nStudio: http://localhost:{args.port}/studio/')
+    print(f'Viewer: http://0.0.0.0:{args.port}/\nStudio: http://0.0.0.0:{args.port}/studio/')
     try:
         http.serve_forever()
     finally:
