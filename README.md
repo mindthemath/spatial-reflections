@@ -37,6 +37,8 @@ Put original photographs in `raw/`. The server has no Python dependencies. Both 
 
 ## Agent API
 
+Each page announces its API in a hidden one-line note, so telling an agent "use the page's agent API" is usually enough. `describe()` lists the methods, setting ranges and ground rules.
+
 Both pages expose a small JavaScript API for automation and AI agents that drive a browser, such as Claude in Chrome or Playwright. You can watch the agent work, or work alongside it, in the same window. Calls go through the same code paths as the UI, so edits appear live, are undoable in Studio, and persist like manual changes. Invalid input is rejected with an explanatory error instead of being silently ignored. Destructive calls require `{force: true}` instead of opening a confirmation dialog.
 
 ```js
