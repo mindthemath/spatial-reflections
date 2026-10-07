@@ -2,6 +2,7 @@
 
 TEST_GUARD = python3 scripts/test_guard.py
 
+# resumable or simple
 VIDEO_MODE ?= resumable
 serve:
 	python3 studio/server.py --port 1313 --video-mode "$(VIDEO_MODE)"
