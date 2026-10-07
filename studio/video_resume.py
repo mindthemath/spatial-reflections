@@ -17,8 +17,10 @@ from pathlib import Path
 
 
 if __package__:
+    from .video_audio import mux_audio_args
     from .video_color import COLOR_PROFILE, browser_video_color_args
 else:
+    from video_audio import mux_audio_args
     from video_color import COLOR_PROFILE, browser_video_color_args
 
 
@@ -501,7 +503,7 @@ class VideoJobStore:
         if not job_dir.exists():
             return job_dir
         removable = re.compile(
-            r'(?:job\.json|\.owner\.lock|\.concat\.txt|\.DS_Store|'
+            r'(?:job\.json|soundtrack\.wav|\.owner\.lock|\.concat\.txt|\.DS_Store|'
             r'segment-\d{6}\.mkv|\.segment-\d{6}\.pending\.mkv|'
             r'\.segment-\d{6}\.stderr\.log|'
             r'\.job\.json\.[a-f0-9]{32}\.tmp)'
@@ -1071,6 +1073,35 @@ class VideoJobStore:
                 **{key: value for key, value in poster.items() if key != 'file'},
             }
 
+    def write_audio(self, job_id, wave, lease, details):
+        with self._job_lock(job_id):
+            with self.lock:
+                lease_state = self.leases.get(job_id)
+                if not lease_state or lease_state['token'] != lease:
+                    raise ValueError('Video export lease is no longer active')
+                lease_state['lastActivity'] = self.clock()
+                runtime = self.active.get(job_id)
+            manifest, job = self._load(job_id)
+            if not job['request'].get('music', {}).get('enabled'):
+                raise ValueError('This video export does not include a soundtrack')
+            if job['nextFrame'] != 0 or job['segments'] or (runtime and int(runtime.get('written', 0)) > 0):
+                raise ValueError('Soundtrack can only be saved before rendering starts')
+            path = manifest.parent / 'soundtrack.wav'
+            if path.exists() or job.get('audio'):
+                raise ValueError('Soundtrack has already been uploaded')
+            try:
+                with path.open('xb') as stream:
+                    stream.write(wave)
+                    _durable_fsync(stream)
+                _fsync_directory(path.parent)
+            except OSError as error:
+                path.unlink(missing_ok=True)
+                raise ValueError(f'Could not save soundtrack: {error}') from error
+            job['audio'] = {**details, 'file': path.name,
+                            'sha256': sha256_file(path), 'codec': 'pcm_s16le'}
+            self._save(manifest, job)
+            return {key: value for key, value in job['audio'].items() if key != 'file'}
+
     def write_frame(self, job_id, frame_index, png, lease):
         with self._job_lock(job_id):
             with self.lock:
@@ -1081,6 +1112,8 @@ class VideoJobStore:
                 runtime = self.active.get(job_id)
             if runtime is None:
                 manifest, job = self._load(job_id)
+                if job['request'].get('music', {}).get('enabled') and not job.get('audio'):
+                    raise ValueError('Upload the soundtrack before video frames')
                 expected = job['nextFrame']
                 if int(frame_index) != expected:
                     raise ValueError(f'Expected frame {expected}, received {frame_index}')
@@ -1252,6 +1285,8 @@ class VideoJobStore:
                 if runtime:
                     raise ValueError('Video export still has an active checkpoint')
             manifest, job = self._load(job_id)
+            if job['request'].get('music', {}).get('enabled') and not job.get('audio'):
+                raise ValueError('Soundtrack was not uploaded')
             with self.lock:
                 owns_job = job_id in self.owners
             if not owns_job:
@@ -1285,10 +1320,13 @@ class VideoJobStore:
 
             output_args = (['-movflags', '+faststart'] if video_format == 'mp4'
                            else ['-f', 'matroska'])
+            audio = job.get('audio')
+            duration = request['frames'] / request['fps']
+            audio_args = mux_audio_args(manifest.parent / audio['file'], duration) if audio else ['-c', 'copy']
             command = [
                 self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
                 '-f', 'concat', '-safe', '0', '-i', str(concat_path),
-                '-c', 'copy', *output_args, str(pending_path),
+                *audio_args, *output_args, str(pending_path),
             ]
             job['state'] = 'finalizing'
             job['error'] = None
@@ -1327,6 +1365,8 @@ class VideoJobStore:
                     'resumeCount': job.get('resumeCount', 0),
                     'segments': job['segments'],
                     **({'poster': job['poster']} if job.get('poster') else {}),
+                    **({'audio': {key: value for key, value in job['audio'].items() if key != 'file'}}
+                       if job.get('audio') else {}),
                 }
                 atomic_write_json(metadata_path, metadata)
                 self._validate_job_directory(manifest, job_id)

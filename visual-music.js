@@ -9,12 +9,13 @@ const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, Number(va
 const lerp = (a, b, amount) => a + (b - a) * amount;
 const dbGain = db => Math.pow(10, db / 20);
 
-function loadSettings() {
+function loadSettings(initialSettings = null) {
     try {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-        return normalizeSettings({...DEFAULTS, ...saved, layers: {...DEFAULTS.layers, ...saved?.layers}, enabled: false});
+        const source = initialSettings && typeof initialSettings === 'object' ? initialSettings : saved;
+        return normalizeSettings({...DEFAULTS, ...source, layers: {...DEFAULTS.layers, ...source?.layers}});
     } catch {
-        return normalizeSettings(DEFAULTS);
+        return normalizeSettings({...DEFAULTS, ...initialSettings, layers: {...DEFAULTS.layers, ...initialSettings?.layers}});
     }
 }
 
@@ -66,10 +67,11 @@ function setParam(param, value, time, glide = 0.05) {
 }
 
 class SpatialMusicEngine {
-    constructor(canvas, onStatus) {
+    constructor(canvas, onStatus, initialSettings = null, onStateChange = null) {
         this.canvas = canvas;
         this.onStatus = onStatus;
-        this.settings = loadSettings();
+        this.onStateChange = onStateChange;
+        this.settings = loadSettings(initialSettings);
         this.context = null;
         this.nodes = null;
         this.previousLuma = null;
@@ -99,6 +101,7 @@ class SpatialMusicEngine {
         this.rebuildSustains();
         this.updateMix();
         this.onStatus('Listening to the framebuffer… play the geometry to drive events.', 'running');
+        this.onStateChange?.();
     }
 
     stop() {
@@ -106,12 +109,13 @@ class SpatialMusicEngine {
         this.releaseSustains(1.2);
         if (this.nodes && this.context) setParam(this.nodes.master.gain, 0.0001, this.context.currentTime, .18);
         this.onStatus('Soundtrack stopped.', 'idle');
+        this.onStateChange?.();
     }
 
-    buildAudioGraph() {
+    buildAudioGraph(suppliedContext = null) {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) throw new Error('This browser does not provide Web Audio');
-        const context = this.context = new AudioContextClass({latencyHint: 'interactive'});
+        if (!suppliedContext && !AudioContextClass) throw new Error('This browser does not provide Web Audio');
+        const context = this.context = suppliedContext || new AudioContextClass({latencyHint: 'interactive'});
         const master = context.createGain();
         const dry = context.createGain();
         const wet = context.createGain();
@@ -442,11 +446,70 @@ class SpatialMusicEngine {
         });
     }
 
+    async renderOffline({duration, startFrame, fps, featureFrames}) {
+        const sampleRate = 48000;
+        const sampleCount = Math.round(duration * sampleRate);
+        const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+        if (!OfflineContext) throw new Error('This browser cannot render an offline soundtrack');
+        const context = new OfflineContext(2, sampleCount, sampleRate);
+        const offline = new SpatialMusicEngine(null, () => {}, this.settings);
+        offline.settings = normalizeSettings({...this.settings, enabled: true});
+        offline.buildAudioGraph(context);
+        offline.features = featureFrames[0] || this.features;
+        const secondsPerStep = 60 / offline.settings.tempo / 4;
+        const absoluteStart = startFrame / fps;
+        const firstStep = Math.floor(absoluteStart / secondsPerStep);
+        const finalStep = Math.floor((absoluteStart + duration - 1 / sampleRate) / secondsPerStep);
+        offline.lastStep = firstStep;
+        offline.rebuildSustains();
+        featureFrames.forEach((features, featureIndex) => {
+            const at = Math.min(duration, featureIndex / 8);
+            const influence = offline.settings.influence;
+            const luminance = lerp(.24, features.luminance, influence);
+            const contrast = lerp(.18, features.contrast, influence);
+            const edge = lerp(.12, features.edge, influence);
+            const centroidX = lerp(.5, features.centroidX, influence);
+            for (const voice of offline.sustains) {
+                const cutoff = 160 + voice.index * 250 + luminance * 1800 + edge * 900;
+                const gain = (.025 + luminance * .018) * offline.settings.layers.drone / (1 + voice.index * .22);
+                const schedule = (parameter, value) => featureIndex
+                    ? parameter.linearRampToValueAtTime(value, at)
+                    : parameter.setValueAtTime(value, 0);
+                schedule(voice.filter.frequency, cutoff);
+                schedule(voice.filter.Q, .65 + contrast * (2 + voice.index));
+                schedule(voice.gain.gain, Math.max(.0001, gain));
+                voice.oscillators.forEach((oscillator, partial) => schedule(
+                    oscillator.detune, (centroidX - .5) * (partial - 1) * 13));
+            }
+        });
+        let previous = null;
+        for (let step = firstStep; step <= finalStep; step++) {
+            const eventTime = Math.max(0, step * secondsPerStep - absoluteStart);
+            const featureIndex = Math.min(featureFrames.length - 1, Math.max(0, Math.floor(eventTime * 8)));
+            offline.features = featureFrames[featureIndex] || offline.features;
+            const score = compositionAt({seed: offline.settings.seed, step, settings: offline.settings, features: offline.features});
+            if (!previous || previous.bar !== score.bar) offline.playHarmonicField(score, eventTime);
+            if (score.pulse) offline.playUndertow(score, eventTime);
+            if (score.bell) offline.playBell(score, eventTime);
+            if (score.metal) offline.playMetal(score, eventTime);
+            if (score.texture) offline.playTexture(score, eventTime);
+            if (score.upper) offline.playShimmer(score, eventTime);
+            previous = score;
+        }
+        // A very short deterministic edge fade prevents PCM clicks for clips.
+        const master = offline.nodes.master.gain;
+        const fadeStart = Math.max(0, duration - .025);
+        master.setValueAtTime(dbGain(-15 + offline.settings.level * 11), fadeStart);
+        master.linearRampToValueAtTime(0, duration);
+        return context.startRendering();
+    }
+
     applyPreset(name) {
         const preset = PRESETS[name];
         if (!preset) return;
         this.settings = normalizeSettings({...this.settings, ...preset, preset: name, layers: {...preset.layers}});
         this.save();
+        this.onStateChange?.();
         if (this.nodes) {
             this.nodes.convolver.buffer = this.createImpulse(5.8, this.settings.seed);
             this.updateMix();
@@ -457,6 +520,7 @@ class SpatialMusicEngine {
     vary() {
         this.settings.seed = this.settings.seed % 999999 + 1;
         this.save();
+        this.onStateChange?.();
         if (this.nodes) {
             this.nodes.convolver.buffer = this.createImpulse(5.8, this.settings.seed);
             this.lastStep = null;
@@ -465,7 +529,41 @@ class SpatialMusicEngine {
     }
 }
 
-export function installVisualMusic({mount, canvas}) {
+async function sha256(value) {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function audioBufferWav(buffer, onProgress = null) {
+    const samples = buffer.length;
+    const channels = 2;
+    const pcmBytes = samples * channels * 2;
+    const output = new ArrayBuffer(44 + pcmBytes);
+    const view = new DataView(output);
+    const text = (offset, value) => { for (let index = 0; index < value.length; index++) view.setUint8(offset + index, value.charCodeAt(index)); };
+    text(0, 'RIFF'); view.setUint32(4, 36 + pcmBytes, true); text(8, 'WAVE');
+    text(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, channels, true); view.setUint32(24, buffer.sampleRate, true);
+    view.setUint32(28, buffer.sampleRate * channels * 2, true); view.setUint16(32, channels * 2, true);
+    view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, pcmBytes, true);
+    const left = buffer.getChannelData(0), right = buffer.getChannelData(1);
+    let offset = 44;
+    for (let sample = 0; sample < samples; sample++) {
+        for (const value of [left[sample], right[sample]]) {
+            const limited = Math.max(-1, Math.min(1, value));
+            view.setInt16(offset, limited < 0 ? Math.round(limited * 32768) : Math.round(limited * 32767), true);
+            offset += 2;
+        }
+        if (sample && sample % 500000 === 0) {
+            onProgress?.(sample / samples);
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+    }
+    onProgress?.(1);
+    return new Blob([output], {type: 'audio/wav'});
+}
+
+export function installVisualMusic({mount, canvas, initialSettings = null, onStateChange = null}) {
     const section = document.createElement('section');
     section.className = 'visual-music';
     section.innerHTML = `
@@ -489,7 +587,7 @@ export function installVisualMusic({mount, canvas}) {
         status.textContent = message;
         status.classList.toggle('error', state === 'error');
         dot.classList.toggle('active', state === 'running');
-    });
+    }, initialSettings, onStateChange);
     const preset = section.querySelector('.music-preset');
     for (const [value, definition] of Object.entries(PRESETS)) {
         const option = document.createElement('option'); option.value = value; option.textContent = definition.label; preset.appendChild(option);
@@ -531,12 +629,12 @@ export function installVisualMusic({mount, canvas}) {
             else engine.settings[key] = value;
             control.output.value = control.format(value);
             engine.settings.preset = 'custom';
-            engine.updateMix(); engine.modulateSustains(); engine.save();
+            engine.updateMix(); engine.modulateSustains(); engine.save(); engine.onStateChange?.();
         });
     }
     seed.addEventListener('change', () => {
         engine.settings.seed = Math.max(1, Math.min(999999, Math.trunc(Number(seed.value) || 1)));
-        engine.save(); engine.rebuildSustains();
+        engine.save(); engine.rebuildSustains(); engine.onStateChange?.();
     });
     section.querySelector('.music-seed button').addEventListener('click', () => { engine.vary(); refreshControls(); });
     const start = section.querySelector('.music-start');
@@ -569,9 +667,55 @@ export function installVisualMusic({mount, canvas}) {
         meterContext.moveTo(cx, cy - 4); meterContext.lineTo(cx, cy + 4); meterContext.stroke();
     };
     drawMeter();
+    const applySettings = value => {
+        engine.settings = normalizeSettings({...engine.settings, ...value, layers: {...engine.settings.layers, ...value?.layers}});
+        engine.save();
+        refreshControls();
+        engine.updateMix();
+        if (engine.context && engine.settings.enabled) engine.rebuildSustains();
+        start.disabled = false;
+        stop.disabled = true;
+        status.textContent = engine.settings.enabled ? 'Soundtrack restored — click Start soundtrack to hear it.' : 'Sound is off.';
+        dot.classList.remove('active');
+    };
+    if (engine.settings.enabled) status.textContent = 'Soundtrack restored — click Start soundtrack to hear it.';
     return Object.freeze({
         tick: state => engine.tick(state),
         get settings() { return structuredClone(engine.settings); },
+        setSettings: applySettings,
+        async prepareExport({startFrame, frames, fps, samplePixels, onProgress = null}) {
+            if (!engine.settings.enabled) return null;
+            const duration = frames / fps;
+            if (duration > 300) throw new Error('Generative soundtrack exports are currently limited to 5 minutes');
+            const featureFrames = [];
+            let previousLuma = null;
+            const analysisFrames = Math.max(1, Math.ceil(duration * 8));
+            for (let index = 0; index < analysisFrames; index++) {
+                const frame = startFrame + Math.min(frames - 1, Math.round(index * fps / 8));
+                const pixels = await samplePixels(frame);
+                const analysis = analyzeRGBA(pixels.data, pixels.width, pixels.height, previousLuma);
+                previousLuma = analysis.luma;
+                featureFrames.push(analysis.features);
+                if (index % 16 === 0 || index + 1 === analysisFrames) {
+                    onProgress?.({phase: 'analyze', progress: (index + 1) / analysisFrames});
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
+            }
+            const settings = structuredClone(engine.settings);
+            const scoreDocument = JSON.stringify({schema: 'spatial-reflections-music-v1', settings, startFrame, frames, fps, featureFrames});
+            const scoreHash = await sha256(scoreDocument);
+            onProgress?.({phase: 'synthesize', progress: 0});
+            const rendered = await engine.renderOffline({duration, startFrame, fps, featureFrames});
+            const wav = await audioBufferWav(rendered, progress => onProgress?.({phase: 'encode', progress}));
+            return {
+                wav,
+                metadata: {
+                    schema: 'spatial-reflections-music-v1', enabled: true,
+                    sampleRate: 48000, channels: 2, samples: rendered.length,
+                    settings, scoreHash
+                }
+            };
+        },
         stop: () => engine.stop(),
         destroy() { cancelAnimationFrame(meterFrame); engine.stop(); engine.context?.close(); section.remove(); }
     });

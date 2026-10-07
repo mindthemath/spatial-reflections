@@ -1,5 +1,6 @@
 """One-shot video encoding. No checkpoint store, manifests, hashes or resume."""
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,8 +15,10 @@ from datetime import datetime, timezone
 
 
 if __package__:
+    from .video_audio import mux_audio_args
     from .video_color import COLOR_PROFILE, browser_video_color_args
 else:
+    from video_audio import mux_audio_args
     from video_color import COLOR_PROFILE, browser_video_color_args
 
 
@@ -32,6 +35,7 @@ class SimpleVideoBackend:
         self.jobs = {}
         self.server_owner = None
         self.popen = subprocess.Popen
+        self.run = subprocess.run
         self.clock = time.monotonic
         self.last_recovery = dict.fromkeys(
             ('recovered', 'alreadyExited', 'refused', 'skippedActive', 'failed'), 0)
@@ -148,11 +152,29 @@ class SimpleVideoBackend:
             return {'url': f'/videos/{filename}', 'filename': filename,
                     **{key: value for key, value in job['poster'].items() if key != 'file'}}
 
+    def write_audio(self, job_id, wave, lease, details):
+        job = self._job(job_id, lease)
+        with job['lock']:
+            if not job['request'].get('music', {}).get('enabled'):
+                raise ValueError('This video export does not include a soundtrack')
+            if job['state'] != 'active' or job['nextFrame'] != 0 or job['process'] is not None:
+                raise ValueError('Soundtrack can only be saved before rendering starts')
+            path = job['directory'] / 'soundtrack.wav'
+            if path.exists():
+                raise ValueError('Soundtrack has already been uploaded')
+            path.write_bytes(wave)
+            job['audio'] = {**details, 'file': path.name,
+                            'sha256': hashlib.sha256(wave).hexdigest(), 'codec': 'pcm_s16le'}
+            job['lastActivity'] = self.clock()
+            return {key: value for key, value in job['audio'].items() if key != 'file'}
+
     def write_frame(self, job_id, frame_index, data, lease=None):
         job = self._job(job_id, lease)
         with job['lock']:
             if job['state'] != 'active':
                 raise ValueError('Simple export is stopping or finalizing')
+            if job['request'].get('music', {}).get('enabled') and 'audio' not in job:
+                raise ValueError('Upload the soundtrack before video frames')
             if int(frame_index) != job['nextFrame'] or job['nextFrame'] >= job['request']['frames']:
                 raise ValueError(f"Expected frame {job['nextFrame']}, received {frame_index}")
             try:
@@ -196,6 +218,23 @@ class SimpleVideoBackend:
                     raise ValueError(self._diagnostic(job) or 'Encoder finalization failed')
                 if not job['pending'].is_file() or not job['pending'].stat().st_size:
                     raise ValueError('Encoder produced no output')
+                if job['request'].get('music', {}).get('enabled'):
+                    if 'audio' not in job:
+                        raise ValueError('Soundtrack was not uploaded')
+                    audio_path = job['directory'] / job['audio']['file']
+                    muxed = job['directory'] / f'.mux-{job["filename"]}'
+                    duration = job['request']['frames'] / job['request']['fps']
+                    container = (['-movflags', '+faststart'] if job['request']['format'] == 'mp4'
+                                 else ['-f', 'matroska'])
+                    command = [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+                               '-i', str(job['pending']),
+                               *mux_audio_args(audio_path, duration), *container, str(muxed)]
+                    completed = self.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                         timeout=max(600, round(duration * 2)))
+                    if completed.returncode != 0 or not muxed.is_file() or not muxed.stat().st_size:
+                        detail = (completed.stderr or b'').decode(errors='replace')[-4096:].strip()
+                        raise ValueError(f'Could not mux soundtrack{": " + detail if detail else ""}')
+                    muxed.replace(job['pending'])
                 size = job['pending'].stat().st_size
                 metadata_path = job['pending'].with_suffix('.json')
                 request_metadata = dict(job['request'])
@@ -204,7 +243,9 @@ class SimpleVideoBackend:
                             'createdAt': job['createdAt'],
                             'completedAt': datetime.now(timezone.utc).isoformat(),
                             'file': job['filename'], 'bytes': size, 'resumeCount': 0,
-                            **({'poster': job['poster']} if 'poster' in job else {})}
+                            **({'poster': job['poster']} if 'poster' in job else {}),
+                            **({'audio': {key: value for key, value in job['audio'].items() if key != 'file'}}
+                               if 'audio' in job else {})}
                 metadata_path.write_text(json.dumps(metadata, indent=2), encoding='utf-8')
                 artifacts = ([job['directory'] / job['poster']['file']] if 'poster' in job else [])
                 artifacts += [metadata_path, job['pending']]

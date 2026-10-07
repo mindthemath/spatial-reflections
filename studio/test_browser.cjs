@@ -2,11 +2,11 @@
 const {ensureGuard,bounded,stopServer,installCleanup}=require('./test_lifecycle.cjs');
 ensureGuard(__filename,{network:true,timeout:300});
 const {chromium}=require('playwright');
-const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict'),{spawn}=require('child_process');
+const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict'),{spawn,spawnSync}=require('child_process');
 (async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'studio-integration-'));
  fs.cpSync(__dirname,path.join(root,'studio'),{recursive:true});fs.mkdirSync(path.join(root,'raw'));
- for(const file of ['index.html','tesseract.js','viewer-skyboxes.js','skybox-paths.js'])fs.copyFileSync(path.join(__dirname,'..',file),path.join(root,file));
+ for(const file of ['index.html','tesseract.js','viewer-skyboxes.js','skybox-paths.js','visual-music.js','visual-music-core.js'])fs.copyFileSync(path.join(__dirname,'..',file),path.join(root,file));
  fs.cpSync(path.join(__dirname,'..','vendor'),path.join(root,'vendor'),{recursive:true});
  const fixture=`
 import signal,sys
@@ -126,11 +126,12 @@ finally:
   });
   assert.deepEqual(dragOverlay,{shown:'block',left:'none',cancelled:'none'});
   // Video export defaults to a 30s clip inside the loop, and still rejects an empty window before encoding.
+  const simpleVideo=process.env.TESSERACT_TEST_VIDEO_MODE==='simple';
+  if(simpleVideo){await viewer.locator('.music-preset').selectOption('abyssdrive');await viewer.locator('.music-start').click();}
   await viewer.locator('#rotation-xw').fill('10');await viewer.locator('details').filter({hasText:'Video timing'}).locator('summary').click();
   await viewer.locator('#open-video-export').click();await viewer.waitForSelector('#video-export-dialog[open]');await viewer.waitForFunction(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes'||document.querySelector('#video-export-status').classList.contains('error'));
   assert.deepEqual(await viewer.locator('#video-export-dialog').evaluate(dialog=>JSON.parse(dialog.dataset.encoderRecovery)),{recovered:0,alreadyExited:0,refused:0,skippedActive:0,failed:0,indexFailed:false});
   const renderEnvironment=await viewer.locator('#video-export-dialog').evaluate(dialog=>JSON.parse(JSON.parse(dialog.dataset.renderSignature).environment));assert.equal(renderEnvironment.kind,'export');assert.equal(Object.keys(renderEnvironment.faces).length,6);assert(Object.values(renderEnvironment.faces).every(hash=>/^[a-f0-9]{64}$/.test(hash)));
-  const simpleVideo=process.env.TESSERACT_TEST_VIDEO_MODE==='simple';
   if(!simpleVideo){assert.equal(await viewer.locator('#video-export-checkpoint').inputValue(),'60');assert(await viewer.locator('#video-export-scratch').isVisible());}
   assert.equal(await viewer.locator('#video-export-range').inputValue(),'clip');assert.match(await viewer.locator('#video-export-summary').innerText(),/Clip/);assert.match(await viewer.locator('#video-export-summary').innerText(),/30\.00 s/);assert.match(await viewer.locator('#video-export-summary').innerText(),/estimated MP4 size/);
   await viewer.locator('#video-export-range').selectOption('full');assert(!(await viewer.locator('#video-export-clip-fields').isVisible()));assert.equal(await viewer.locator('#video-export-range option[value="full"]').innerText(),'Whole loop');assert.doesNotMatch(await viewer.locator('#video-export-summary').innerText(),/[Pp]erfect/);
@@ -285,7 +286,7 @@ finally:
    assert(await viewer.locator('#video-export-checkpoint').isHidden());assert(await viewer.locator('#video-export-scratch').isHidden());
    await viewer.evaluate(()=>{const select=document.getElementById('viewer-shape');select.value='rectified-5-cell';select.dispatchEvent(new Event('change',{bubbles:true}));});
    await viewer.locator('#video-export-name').fill('simple-browser');await viewer.locator('#video-export-start').fill('0.5');await viewer.locator('#video-export-duration').fill('0.02');
-   assert.match(await viewer.locator('#video-export-summary').innerText(),/SIMPLE MODE/);
+   assert.match(await viewer.locator('#video-export-summary').innerText(),/SIMPLE MODE/);assert.match(await viewer.locator('#video-export-summary').innerText(),/generative AAC soundtrack/);
    await viewer.locator('#video-export-resolution').selectOption('1280x720');await viewer.locator('#video-export-format').selectOption('mp4');await viewer.locator('#video-export-quality').selectOption('draft');
    await viewer.locator('#confirm-video-export').click();
    await viewer.waitForFunction(()=>['complete','error'].includes(document.querySelector('#video-export-dialog').dataset.statusMode));
@@ -297,7 +298,13 @@ finally:
    assert.equal(metadata.videoMode,'simple');assert.equal(metadata.poster.file,path.basename(`${stem}.png`));
    assert.equal(metadata.frames,1);assert(metadata.startFrame>0);assert(metadata.renderSignature);assert(metadata.viewerState);
    assert.equal(metadata.viewerState.shader,'chrome');assert.equal(metadata.viewerState.shape,'rectified-5-cell');
-   assert.equal(JSON.parse(metadata.renderSignature).shape,'rectified-5-cell');
+   assert.equal(metadata.viewerState.music.preset,'abyssdrive');assert.equal(metadata.viewerState.music.tension,.88);assert.equal(metadata.viewerState.music.layers.field,0);
+   assert.equal(metadata.music.scoreHash.length,64);assert.equal(metadata.audio.codec,'pcm_s16le');assert(!('file' in metadata.audio));
+   assert.equal(JSON.parse(metadata.renderSignature).shape,'rectified-5-cell');assert.equal(JSON.parse(metadata.renderSignature).music.preset,'abyssdrive');
+   const probe=spawnSync('ffprobe',['-v','error','-show_entries','stream=codec_type,codec_name','-of','json',`${stem}.mp4`],{encoding:'utf8'});
+   assert.equal(probe.status,0,probe.stderr);assert.deepEqual(JSON.parse(probe.stdout).streams.map(stream=>[stream.codec_type,stream.codec_name]),[['video','h264'],['audio','aac']]);
+   const decodedAudio=spawnSync('ffmpeg',['-v','error','-i',`${stem}.mp4`,'-map','0:a:0','-f','s16le','-'],{maxBuffer:1024*1024});
+   assert.equal(decodedAudio.status,0,decodedAudio.stderr.toString());assert(decodedAudio.stdout.some(byte=>byte!==0),'Generated soundtrack is audible, not silent PCM');
    await viewer.locator('#close-video-export').click();
    await viewer.locator('#viewer-shader').selectOption('rough');await viewer.locator('#rotation-xw').fill('3');await viewer.locator('#viewer-shape').selectOption('tesseract');
    const pngBase64=fs.readFileSync(`${stem}.png`).toString('base64');
@@ -313,6 +320,7 @@ finally:
    assert.equal(restored.shape,'rectified-5-cell');assert.equal(await viewer.locator('#viewer-shape').inputValue(),'rectified-5-cell');
    assert.deepEqual(restored.rotationCoefficients,metadata.viewerState.rotationCoefficients);
    assert.deepEqual(restored.camera,metadata.viewerState.camera);assert.equal(restored.exportFps,metadata.fps);
+   assert.equal(restored.music.preset,'abyssdrive');assert.equal(await viewer.locator('.music-preset').inputValue(),'abyssdrive');
    await viewer.locator('#open-video-export').click();
    await viewer.locator('#video-export-name').fill('simple-browser-cancel');
    await viewer.locator('#video-export-duration').fill('2');await viewer.locator('#confirm-video-export').click();

@@ -6,7 +6,7 @@ const fs=require('fs'),os=require('os'),path=require('path'),assert=require('ass
 (async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'agent-api-'));
  fs.cpSync(__dirname,path.join(root,'studio'),{recursive:true});fs.mkdirSync(path.join(root,'raw'));
- for(const file of ['index.html','tesseract.js','viewer-skyboxes.js','skybox-paths.js'])fs.copyFileSync(path.join(__dirname,'..',file),path.join(root,file));
+ for(const file of ['index.html','tesseract.js','viewer-skyboxes.js','skybox-paths.js','visual-music.js','visual-music-core.js'])fs.copyFileSync(path.join(__dirname,'..',file),path.join(root,file));
  fs.cpSync(path.join(__dirname,'..','vendor'),path.join(root,'vendor'),{recursive:true});
  const fixture=`
 import signal,sys

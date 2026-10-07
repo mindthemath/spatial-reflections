@@ -72,6 +72,7 @@ test-fast:
 	node studio/test_visual_music.mjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
 	python3 -m unittest discover -s studio -p 'test_video_simple.py'
+	python3 -m unittest studio.test_video_audio
 	cd studio && python3 -m unittest test_server.ServerStartupTest
 	$(MAKE) test-guard
 
@@ -87,7 +88,7 @@ test-video-soak:
 	$(TEST_GUARD) --timeout 7200 -- python3 studio/video_soak.py --source "$(VIDEO_SOAK_SOURCE)" --seconds "$(VIDEO_SOAK_SECONDS)"
 
 test-video-encoder:
-	$(TEST_GUARD) --timeout 90 -- python3 -m unittest studio.test_video_resume studio.test_video_resume_integration studio.test_video_simple studio.test_video_simple_integration
+	$(TEST_GUARD) --timeout 120 -- python3 -m unittest studio.test_video_resume studio.test_video_resume_integration studio.test_video_simple studio.test_video_simple_integration studio.test_video_audio studio.test_video_audio_integration
 
 test-video-capture:
 	$(TEST_GUARD) --timeout 60 -- node studio/test_video_capture.cjs

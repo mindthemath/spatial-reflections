@@ -15,6 +15,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+try:
+    from .video_audio import MAX_AUDIO_BYTES, validate_music_request, validate_wave
+except ImportError:
+    from video_audio import MAX_AUDIO_BYTES, validate_music_request, validate_wave
+
 # Lazy selection keeps the simple fallback independent of the resume module.
 VideoJobStore = None
 VIDEO_MODE = 'resumable'
@@ -33,6 +38,7 @@ VIDEO_FRAME_READ_TIMEOUT = 30
 VIDEO_STORE = None
 VIDEO_STORE_LOCK = threading.Lock()
 FFMPEG_ENCODER_ERROR = None
+FFMPEG_AUDIO_ENCODER_ERROR = None
 # None means an embedded/test server has not run CLI startup. CLI startup pins
 # its binary (or its absence); changing it requires ownership/recovery preflight.
 VIDEO_FFMPEG_BOOTSTRAP = None
@@ -150,7 +156,8 @@ def publish_work(request):
     if not isinstance(state, dict):
         raise ValueError('Viewer state is required')
     folder, manifest = completed_export(request.get('exportFolder'))
-    required = [ROOT / name for name in ('index.html', 'tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js')]
+    required = [ROOT / name for name in ('index.html', 'tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js',
+                                          'visual-music.js', 'visual-music-core.js')]
     vendor = ROOT / 'vendor'
     vendor_files = (vendor / 'three.module.js', vendor / 'controls' / 'OrbitControls.js', vendor / 'THREE-LICENSE.txt')
     if any(not path.is_file() for path in (*required, *vendor_files)):
@@ -223,6 +230,21 @@ def ffmpeg_encoder_error(ffmpeg):
     return None
 
 
+def ffmpeg_audio_encoder_error(ffmpeg):
+    try:
+        completed = subprocess.run(
+            [str(ffmpeg), '-hide_banner', '-encoders'],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f'Could not inspect ffmpeg audio encoders: {error}'
+    if completed.returncode != 0:
+        return 'ffmpeg could not list its audio encoders'
+    if not re.search(r'^\s*A\S*\s+aac\s', completed.stdout, re.MULTILINE):
+        return 'ffmpeg does not provide the required AAC audio encoder'
+    return None
+
+
 def video_capabilities():
     ffmpeg = shutil.which('ffmpeg')
     recovery = {
@@ -254,6 +276,8 @@ def video_capabilities():
     can_manage = store is not None and not (store.recovery_running or recovery['indexFailed'])
     return {'available': available, 'canManage': can_manage, 'videoMode': VIDEO_MODE,
             'resumable': VIDEO_MODE == 'resumable', 'encoder': 'H.264 / MP4 or MKV' if ffmpeg else None,
+            'musicAvailable': available and not FFMPEG_AUDIO_ENCODER_ERROR,
+            'musicReason': FFMPEG_AUDIO_ENCODER_ERROR,
             'qualities': list(VIDEO_QUALITIES), 'formats': list(VIDEO_FORMATS),
             'freeBytes': shutil.disk_usage(ROOT).free,
             'clips': video_clip_labels(),
@@ -355,13 +379,21 @@ def start_video(request):
     if store.last_recovery['indexFailed']:
         raise ValueError('Encoder startup recovery failed; inspect the video job index')
     width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
+    request = {**request, 'width': width, 'height': height, 'fps': fps, 'frames': frames}
+    music = validate_music_request(request)
+    if music:
+        if FFMPEG_AUDIO_ENCODER_ERROR:
+            raise ValueError(FFMPEG_AUDIO_ENCODER_ERROR)
+        request['music'] = music
+    else:
+        request.pop('music', None)
+    audio_bytes = (music['samples'] * music['channels'] * 2 + 44) if music else 0
     if VIDEO_MODE == 'simple':
         parent = ROOT / 'videos'
         parent.mkdir(exist_ok=True)
-        if estimate > shutil.disk_usage(parent).free * 0.9:
-            raise ValueError('Estimated video exceeds output disk space')
-        active = store.start({**request, 'width': width, 'height': height, 'fps': fps,
-                              'frames': frames, 'quality': quality, 'format': video_format,
+        if estimate * (2 if music else 1) + audio_bytes > shutil.disk_usage(parent).free * 0.9:
+            raise ValueError('Estimated video and soundtrack exceed output disk space')
+        active = store.start({**request, 'quality': quality, 'format': video_format,
                               'bitRate': bit_rate, 'estimatedBytes': estimate,
                               'checkpointSeconds': 0, 'scratchPath': '',
                               'colorProfile': 'srgb-limited-v1'})
@@ -387,11 +419,11 @@ def start_video(request):
     output_free = shutil.disk_usage(parent).free
     scratch_free = shutil.disk_usage(scratch).free
     same_storage = parent.stat().st_dev == scratch.stat().st_dev
-    output_required = estimate * (2 if same_storage else 1)
+    output_required = estimate * (2 if same_storage else 1) + (audio_bytes if same_storage else 0)
     if output_required > output_free * 0.9:
         raise ValueError(f'Estimated video and checkpoints exceed output disk space ({output_free:,} bytes free)')
-    if not same_storage and estimate > scratch_free * 0.9:
-        raise ValueError(f'Estimated checkpoints exceed scratch disk space ({scratch_free:,} bytes free)')
+    if not same_storage and estimate + audio_bytes > scratch_free * 0.9:
+        raise ValueError(f'Estimated checkpoints and soundtrack exceed scratch disk space ({scratch_free:,} bytes free)')
     created = store.create(request)
     try:
         active = store.resume(created['id'])
@@ -452,7 +484,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def end_headers(self):
-        if urlparse(self.path).path.startswith(('/studio/', '/api/')) or urlparse(self.path).path in ('/', '/index.html', '/tesseract.js', '/viewer-skyboxes.js', '/skybox-paths.js'):
+        if urlparse(self.path).path.startswith(('/studio/', '/api/')) or urlparse(self.path).path in ('/', '/index.html', '/tesseract.js', '/viewer-skyboxes.js', '/skybox-paths.js', '/visual-music.js', '/visual-music-core.js'):
             self.send_header('Cache-Control', 'no-store')
         super().end_headers()
 
@@ -474,7 +506,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path.startswith('/studio/') or path in ('/', '/index.html', '/tesseract.js', '/viewer-skyboxes.js', '/skybox-paths.js'):
+        if path.startswith('/studio/') or path in ('/', '/index.html', '/tesseract.js', '/viewer-skyboxes.js', '/skybox-paths.js', '/visual-music.js', '/visual-music-core.js'):
             for header in ('If-Modified-Since', 'If-None-Match'):
                 if header in self.headers:
                     del self.headers[header]
@@ -523,7 +555,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         route = urlparse(self.path)
         if route.path not in ('/api/export', '/api/export/start', '/api/export/face', '/api/export/finish', '/api/publish',
-                              '/api/video/start', '/api/video/poster', '/api/video/frame', '/api/video/finish', '/api/video/cancel',
+                              '/api/video/start', '/api/video/poster', '/api/video/audio', '/api/video/frame', '/api/video/finish', '/api/video/cancel',
                               '/api/video/pause', '/api/video/resume'):
             self.close_connection = True
             return self.send_json(404, {'error': 'Unknown endpoint'})
@@ -534,7 +566,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if route.path.startswith('/api/video/') and route.path not in ('/api/video/pause', '/api/video/cancel'):
                 store = video_store()
-                query = parse_qs(route.query) if route.path in ('/api/video/frame', '/api/video/poster') else {}
+                query = parse_qs(route.query) if route.path in ('/api/video/frame', '/api/video/poster', '/api/video/audio') else {}
                 check_video_recovery(store, query.get('id', [None])[0], query.get('lease', [None])[0])
             if route.path == '/api/video/poster':
                 query = parse_qs(route.query)
@@ -575,6 +607,22 @@ class Handler(SimpleHTTPRequestHandler):
                 if (width, height) != (request['width'], request['height']):
                     raise ValueError(f"Resume frame must be {request['width']}×{request['height']} pixels")
                 return self.send_json(201, store.write_poster(job_id, data, lease))
+            if route.path == '/api/video/audio':
+                query = parse_qs(route.query)
+                job_id = query.get('id', [''])[0]
+                lease = query.get('lease', [''])[0]
+                store = video_store()
+                job = store.get(job_id)
+                if not job['request'].get('music', {}).get('enabled'):
+                    raise ValueError('This video export does not include a soundtrack')
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 44 <= length <= MAX_AUDIO_BYTES:
+                    raise ValueError('Soundtrack WAV has an invalid size')
+                data = self.rfile.read(length)
+                if len(data) != length:
+                    raise ValueError('Incomplete soundtrack WAV upload')
+                details = validate_wave(data, job['request'])
+                return self.send_json(201, store.write_audio(job_id, data, lease, details))
             if route.path == '/api/video/frame':
                 if FFMPEG_ENCODER_ERROR:
                     raise ValueError(FFMPEG_ENCODER_ERROR)
@@ -733,6 +781,7 @@ if __name__ == '__main__':
     VIDEO_FFMPEG_BOOTSTRAP = str(Path(ffmpeg).resolve()) if ffmpeg else ''
     if ffmpeg:
         FFMPEG_ENCODER_ERROR = ffmpeg_encoder_error(ffmpeg)
+        FFMPEG_AUDIO_ENCODER_ERROR = ffmpeg_audio_encoder_error(ffmpeg)
     if ffmpeg:
         try:
             start_video_recovery()

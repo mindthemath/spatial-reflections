@@ -28,7 +28,7 @@ class StudioAPITest(unittest.TestCase):
         (server.ROOT / 'raw').mkdir()
         (server.ROOT / 'raw' / 'photo.png').write_bytes(PNG)
         (server.ROOT / 'index.html').write_text('<script id="piece-config" type="application/json"></script>')
-        for filename in ('tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js'):
+        for filename in ('tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js', 'visual-music.js', 'visual-music-core.js'):
             (server.ROOT / filename).write_text(f'// {filename}\n')
         (server.ROOT / 'vendor' / 'controls').mkdir(parents=True)
         (server.ROOT / 'vendor' / 'three.module.js').write_text("import './three.core.js';\n")

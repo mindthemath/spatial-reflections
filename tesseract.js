@@ -7,6 +7,7 @@ import { installVisualMusic } from './visual-music.js';
 let scene, camera, renderer, controls;
 let tesseract;
 let visualMusic;
+let restoredMusicSettings = null;
 let currentShape = 'tesseract';
 let rotationSpeed = 0.005;
 let time = 0;
@@ -99,6 +100,7 @@ function viewerSettings() {
         timelineFrame,
         panelExpanded,
         videoTimingExpanded,
+        music: visualMusic?.settings ?? restoredMusicSettings,
         camera: {
             position: camera ? { x: camera.position.x, y: camera.position.y, z: camera.position.z } : { ...savedCameraPosition },
             target: controls ? { x: controls.target.x, y: controls.target.y, z: controls.target.z } : { ...savedCameraTarget }
@@ -132,6 +134,10 @@ function applyViewerSettings(saved) {
     if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
     if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
     if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
+    if (saved.music && typeof saved.music === 'object') {
+        restoredMusicSettings = saved.music;
+        visualMusic?.setSettings(saved.music);
+    }
     const vector = (value, fallback) => {
         if (!value || !['x', 'y', 'z'].every(axis => Number.isFinite(Number(value[axis])))) return fallback;
         return { x: Number(value.x), y: Number(value.y), z: Number(value.z) };
@@ -230,7 +236,9 @@ function init() {
     createControls();
     visualMusic = installVisualMusic({
         mount: document.getElementById('controlPanelContent'),
-        canvas: renderer.domElement
+        canvas: renderer.domElement,
+        initialSettings: restoredMusicSettings,
+        onStateChange: persistViewerSettings
     });
     createEnvironmentMap();
     
@@ -548,6 +556,10 @@ function applyViewSettings(metadata) {
     
     try {
         setViewerShape(metadata.shape || metadata.render?.shape || 'tesseract');
+        if (metadata.music) {
+            restoredMusicSettings = metadata.music;
+            visualMusic?.setSettings(metadata.music);
+        }
         if (metadata.render) {
             const { camera: renderCamera, ...renderSettings } = metadata.render;
             restoreVideoRenderSettings({
@@ -1623,6 +1635,7 @@ function videoRenderSignature() {
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
         },
         fps: exportFps,
+        music: visualMusic?.settings ?? restoredMusicSettings,
         environment: skyboxLibrary?.getRenderState().identity || null
     });
 }
@@ -1636,7 +1649,7 @@ function createVideoExportDialog() {
                 <strong>EXPORT VIDEO</strong>
                 <button id="close-video-export" type="button">Close</button>
             </div>
-            <p>Render deterministic frames from the current camera, geometry, shader and skybox, then stream them to the local server for H.264 encoding. Video has no audio.</p>
+            <p>Render deterministic frames from the current camera, geometry, shader and skybox, then stream them to the local server for H.264 encoding. An enabled generative soundtrack is rendered from the same visual timeline.</p>
             <div class="video-export-grid">
                 <label>File name<input id="video-export-name" maxlength="60" value="tesseract"></label>
                 <label>Resolution<select id="video-export-resolution">
@@ -1737,6 +1750,8 @@ async function openVideoExportDialog() {
     videoExportDialog.dataset.statusMode = 'checking';
     videoExportDialog.dataset.serverAvailable = '';
     videoExportDialog.dataset.freeBytes = '';
+    videoExportDialog.dataset.musicAvailable = '';
+    videoExportDialog.dataset.musicReason = '';
     videoExportDialog.dataset.encoderRecovery = JSON.stringify({
         recovered: 0, alreadyExited: 0, refused: 0, skippedActive: 0, failed: 0, indexFailed: false
     });
@@ -1749,6 +1764,8 @@ async function openVideoExportDialog() {
         if (!value.available && !value.canManage) throw new Error(value.reason || 'Video service is unavailable');
         videoExportDialog.dataset.serverAvailable = value.available ? 'yes' : 'no';
         videoExportDialog.dataset.videoMode = value.videoMode || 'resumable';
+        videoExportDialog.dataset.musicAvailable = value.musicAvailable === false ? 'no' : 'yes';
+        videoExportDialog.dataset.musicReason = value.musicReason || '';
         const simpleMode = videoExportDialog.dataset.videoMode === 'simple';
         for (const id of ['video-export-checkpoint', 'video-export-scratch']) {
             const label = document.getElementById(id)?.closest?.('label');
@@ -1945,6 +1962,7 @@ function videoExportPlanFromRequest(request) {
         checkpointSeconds: Number.isFinite(Number(request.checkpointSeconds))
             ? Number(request.checkpointSeconds) : 60,
         scratchPath: request.scratchPath || '',
+        music: request.music || null,
         error: ''
     };
 }
@@ -2006,9 +2024,14 @@ function videoExportPlan() {
     }
 
     const duration = frames / exportFps;
+    if (typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled && duration > 300) error = 'Generative soundtrack exports are currently limited to 5 minutes.';
+    if (typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled && videoExportDialog.dataset.musicAvailable === 'no') {
+        error = videoExportDialog.dataset.musicReason || 'The local ffmpeg does not provide AAC soundtrack encoding.';
+    }
     const bitRate = width * height * exportFps * VIDEO_QUALITY_BITS_PER_PIXEL[quality];
     const estimatedBytes = bitRate * duration / 8 * 1.03;
-    return { width, height, format, quality, range, startFrame, frames, duration, bitRate, estimatedBytes, checkpointSeconds, scratchPath, error };
+    return { width, height, format, quality, range, startFrame, frames, duration, bitRate, estimatedBytes, checkpointSeconds, scratchPath,
+        music: typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled ? {enabled: true} : null, error };
 }
 
 function updateVideoExportSummary() {
@@ -2037,9 +2060,9 @@ function updateVideoExportSummary() {
         summary.innerHTML = `
             <strong>${plan.resumed ? 'Resuming saved export · ' : ''}${rangeText}</strong><br>
             ${plan.width} × ${plan.height} · ${plan.fps || exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
-            H.264 ${plan.format.toUpperCase()} · ${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target · no audio · current ${currentShader} shader<br>
+            H.264 ${plan.format.toUpperCase()} · ${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target · ${plan.music?.enabled ? 'generative AAC soundtrack' : 'no audio'} · current ${currentShader} shader<br>
             Duration ${formatDuration(plan.duration)} · estimated ${plan.format.toUpperCase()} size <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
-            <small>Saved under <code>videos/</code>. ${checkpointText} Size is a bitrate-based estimate; visual complexity can change the final file size.${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
+            <small>Saved under <code>videos/</code>. ${checkpointText} Size is a bitrate-based estimate; visual complexity can change the final file size.${plan.music?.enabled ? ` Soundtrack preparation temporarily uses about ${formatBytes(plan.duration * 48000 * 4 + 44)}.` : ''}${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
         summary.classList.remove('error');
     }
     confirm.disabled = videoExportRunning || videoExportDialog.dataset.serverAvailable !== 'yes' || !plan || Boolean(plan.error) || spaceError;
@@ -2180,6 +2203,48 @@ async function canvasPNG(canvas) {
     return dataUrlToBlob(canvas.toDataURL('image/png'));
 }
 
+async function prepareMusicExport(plan, status) {
+    if (!visualMusic?.settings.enabled) return null;
+    const originalFrame = timelineFrame;
+    const originalAspect = camera.aspect;
+    const previousTarget = renderer.getRenderTarget();
+    const analysisWidth = 64;
+    const analysisHeight = Math.max(24, Math.min(64, Math.round(analysisWidth * plan.height / plan.width)));
+    const target = new THREE.WebGLRenderTarget(analysisWidth, analysisHeight, {
+        depthBuffer: true,
+        stencilBuffer: false
+    });
+    try {
+        camera.aspect = plan.width / plan.height;
+        camera.updateProjectionMatrix();
+        renderer.setRenderTarget(target);
+        return await visualMusic.prepareExport({
+            startFrame: plan.startFrame,
+            frames: plan.frames,
+            fps: exportFps,
+            samplePixels: async frame => {
+                setTimelineFrame(frame);
+                updateTesseractProjection();
+                renderer.render(scene, camera);
+                const data = new Uint8Array(analysisWidth * analysisHeight * 4);
+                renderer.readRenderTargetPixels(target, 0, 0, analysisWidth, analysisHeight, data);
+                return {data, width: analysisWidth, height: analysisHeight};
+            },
+            onProgress: ({phase, progress: amount}) => {
+                const labels = {analyze: 'Reading visual score', synthesize: 'Synthesizing soundtrack', encode: 'Preparing soundtrack'};
+                status.textContent = `${labels[phase]}… ${Math.round(amount * 100)}%`;
+            }
+        });
+    } finally {
+        renderer.setRenderTarget(previousTarget);
+        target.dispose();
+        camera.aspect = originalAspect;
+        camera.updateProjectionMatrix();
+        setTimelineFrame(originalFrame);
+        updateTesseractProjection();
+    }
+}
+
 function screenshotMetadata(extra = {}) {
     return {
         shape: currentShape,
@@ -2207,6 +2272,7 @@ function screenshotMetadata(extra = {}) {
             y: controls.target.y,
             z: controls.target.z
         },
+        music: visualMusic?.settings ?? restoredMusicSettings,
         ...extra
     };
 }
@@ -2354,6 +2420,7 @@ async function runVideoExport(plan, resumableJob = null) {
         // A complete checkpoint job only needs server-side concatenation, not
         // a verified current environment or the ability to render its resolution.
         if (!resumableJob || resumableJob.nextFrame < plan.frames) prepareCapture();
+        const soundtrack = resumableJob ? null : await prepareMusicExport(plan, status);
         if (resumableJob) {
             activeVideoExportJob = await videoApi('/api/video/resume', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2372,7 +2439,15 @@ async function runVideoExport(plan, resumableJob = null) {
                     checkpointSeconds: plan.checkpointSeconds, scratchPath: plan.scratchPath,
                     sourceUrl: location.pathname + location.search, renderSignature: videoRenderSignature(),
                     loopFrameCount: loopTiming.frameCount, loopPeriod: loopTiming.period,
-                    timeStep: loopTiming.timeStep, viewerState: viewerSettings() })
+                    timeStep: loopTiming.timeStep, viewerState: viewerSettings(),
+                    ...(soundtrack ? {music: soundtrack.metadata} : {}) })
+            });
+        }
+
+        if (soundtrack) {
+            status.textContent = 'Uploading soundtrack…';
+            await videoApi(`/api/video/audio?id=${activeVideoExportJob.id}&lease=${activeVideoExportJob.lease}`, {
+                method: 'POST', headers: {'Content-Type': 'audio/wav'}, body: soundtrack.wav, signal: videoExportAbort.signal
             });
         }
 

@@ -118,7 +118,9 @@ export const PRESETS = Object.freeze({
     ruins: Object.freeze({label: 'Signal ruins', density: 0.68, tension: 0.68, influence: 0.86, space: 0.65, tempo: 61,
         layers: {drone: 0.70, field: 0.62, bells: 0.42, pulse: 0.58, metal: 0.62, texture: 0.48}}),
     blackice: Object.freeze({label: 'Black ice', density: 0.38, tension: 0.56, influence: 0.92, space: 0.90, tempo: 44,
-        layers: {drone: 0.64, field: 0.52, bells: 0.82, pulse: 0.18, metal: 0.48, texture: 0.20}})
+        layers: {drone: 0.64, field: 0.52, bells: 0.82, pulse: 0.18, metal: 0.48, texture: 0.20}}),
+    abyssdrive: Object.freeze({label: 'Abyss drive', level: 1.00, density: 1.00, tension: 0.88, influence: 0.87, space: 0.30, tempo: 88, seed: 1701,
+        layers: {drone: 1.00, field: 0.00, bells: 0.99, pulse: 0.96, metal: 0.11, texture: 0.07}})
 });
 
 export function compositionAt({seed, step, settings, features}) {
