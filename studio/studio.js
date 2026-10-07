@@ -551,6 +551,13 @@ function installStudioAPI(){
         idle,
         describe:()=>({
             about:'Skybox Studio: build Photo → Frame → Light → Skybox graphs, then export six cube faces. All edits appear live and are undoable.',
+            guidance:[
+                'Each call is one undo step, shared with the user (⌘Z undoes yours too).',
+                'await studio.idle() before judging the preview or resolution.',
+                'To see a result, export and open it in the viewer (/), then use viewer.screenshot().',
+                'Ask the user before export(), reset() or loadPipeline().',
+                'Photos come from raw/ on disk; a browser-only agent cannot add new ones.'
+            ],
             nodeTypes:{source:'photo from library(); needs {source:path}',frame:'geometry: zoom/pan/rotate/flip (stored as type "crop")',light:'exposure and color grade',info:'pass-through image statistics',skybox:'the single output node, id "skybox-output"; inputs are the faces'},
             faces:FACES.map(face=>({face,label:LABELS[face]})),
             frameSettings:[...CROP_FIELDS.map(range),{key:'flipX',type:'boolean'},{key:'flipY',type:'boolean'}],
@@ -631,4 +638,9 @@ function installStudioAPI(){
         reset({force=false}={}){editable();require(force,'reset() clears the draft and undo history. Pass {force: true}.');resetWorkspace({force:true});},
         export:runExport
     });
+    const note=document.createElement('p');note.id='agent-note';
+    note.textContent='For AI agents: this page has a JavaScript API. Run await studio.ready; studio.describe() instead of clicking.';
+    // Visually hidden, but present in the DOM and accessibility tree where browser agents look.
+    Object.assign(note.style,{position:'absolute',width:'1px',height:'1px',overflow:'hidden',clipPath:'inset(50%)',whiteSpace:'nowrap',margin:'-1px'});
+    document.body.prepend(note);console.info(note.textContent);
 }

@@ -3445,6 +3445,11 @@ function installViewerAPI() {
         ready: Promise.resolve(skyboxLibrary?.initialLoad).then(() => undefined),
         describe: () => ({
             about: 'Tesseract viewer: a 4D polytope rendered in three.js, reflecting a six-face skybox. Changes show live and are saved in this browser.',
+            guidance: [
+                'Settings persist in this browser, exactly like changes made in the panel.',
+                'Use screenshot() to see the scene; the canvas is not readable as text.',
+                'Ask the user before loadSkybox() replaces their current environment.'
+            ],
             settings: SETTINGS,
             methods: {
                 'ready': 'promise: the first skybox load has finished',
@@ -3483,6 +3488,17 @@ function installViewerAPI() {
             return output.toDataURL('image/png');
         }
     });
+    if (publication?.schemaVersion !== 1) announceAgentAPI('viewer');
+}
+
+// One visually hidden sentence so browser agents discover the API from the DOM or accessibility tree.
+function announceAgentAPI(name) {
+    const note = document.createElement('p');
+    note.id = 'agent-note';
+    note.textContent = `For AI agents: this page has a JavaScript API. Run await ${name}.ready; ${name}.describe() instead of clicking.`;
+    Object.assign(note.style, { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', margin: '-1px' });
+    document.body.prepend(note);
+    console.info(note.textContent);
 }
 
 installViewerAPI();

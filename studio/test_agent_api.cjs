@@ -48,7 +48,8 @@ finally:
 
   // Studio: build, edit, validate, undo and export through window.studio only.
   await page.goto(`http://localhost:${port}/studio/`);await call(()=>studio.ready);
-  assert(await call(()=>studio.describe().methods['export()']));
+  assert(await call(()=>studio.describe().methods['export()']));assert(await call(()=>studio.describe().guidance.length));
+  assert.match(await page.locator('#agent-note').textContent(),/studio\.describe\(\)/);
   assert((await call(()=>studio.library())).some(item=>item.path==='raw/photo.png'));
   const ids=await call(()=>{
    const source=studio.addNode('source',{source:'photo.png'}),frame=studio.addNode('frame',{settings:{zoom:2}}),light=studio.addNode('light',{settings:{exposure:99}});
@@ -76,7 +77,8 @@ finally:
 
   // Viewer: settings drive the visible controls, persist, and load the Studio export.
   await page.goto(`http://localhost:${port}/`);await call(()=>viewer.ready);
-  assert.equal((await call(()=>viewer.getState())).ready,true);
+  assert.equal((await call(()=>viewer.getState())).ready,true);assert(await call(()=>viewer.describe().guidance.length));
+  assert.match(await page.locator('#agent-note').textContent(),/viewer\.describe\(\)/);
   await call(()=>viewer.setState({shader:'rough',lighting:'quad',rotationCoefficients:{xw:0.5},shape:'rectified-5-cell'}));
   assert.equal(await page.locator('#viewer-shader').inputValue(),'rough');assert.equal(await page.locator('#viewer-lighting').inputValue(),'quad');
   assert.equal(await page.locator('#rotation-xw').inputValue(),'10');assert.equal(await page.locator('#viewer-shape').inputValue(),'rectified-5-cell');
