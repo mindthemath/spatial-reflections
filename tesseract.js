@@ -5,6 +5,7 @@ import { installSkyboxLibrary } from './viewer-skyboxes.js';
 // Main Three.js scene setup
 let scene, camera, renderer, controls;
 let tesseract;
+let currentShape = 'tesseract';
 let rotationSpeed = 0.005;
 let time = 0;
 let animationPaused = true;
@@ -81,6 +82,7 @@ if (publication?.schemaVersion === 1 && publication.title) document.title = publ
 
 function viewerSettings() {
     return {
+        shape: currentShape,
         rotationSpeed,
         rotationCoefficients: { ...rotationCoefficients },
         shader: currentShader,
@@ -108,6 +110,7 @@ function applyViewerSettings(saved) {
         const number = Number(value);
         return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
     };
+    setViewerShape(saved.shape || 'tesseract');
     rotationSpeed = clamp(saved.rotationSpeed, 0, 0.01, rotationSpeed);
     lightDistance = clamp(saved.lightDistance, 0.1, 20, lightDistance);
     for (const axis of ['xw', 'yw', 'zw']) {
@@ -375,7 +378,8 @@ function readMetadataFromPNG(file) {
                 
                 try {
                     // Method 1: Try to read from pixel data
-                    const imgData = ctx.getImageData(0, 0, canvas.width, 1);
+                    const metadataRows = Math.min(canvas.height, 16);
+                    const imgData = ctx.getImageData(0, 0, canvas.width, metadataRows);
                     const pixelData = imgData.data;
                     
                     // Check for our marker pixel
@@ -384,7 +388,7 @@ function readMetadataFromPNG(file) {
                         
                         // Reconstruct string from pixel data
                         let dataString = "";
-                        for (let i = 1; i < canvas.width; i++) { // Read the complete metadata row
+                        for (let i = 1; i < pixelData.length / 4; i++) { // Read the bounded metadata area
                             const pixelIndex = i * 4;
                             if (pixelIndex >= pixelData.length) break;
                             
@@ -537,10 +541,12 @@ function applyViewSettings(metadata) {
     console.log("Applying view settings from metadata:", metadata);
     
     try {
+        setViewerShape(metadata.shape || metadata.render?.shape || 'tesseract');
         if (metadata.render) {
             const { camera: renderCamera, ...renderSettings } = metadata.render;
             restoreVideoRenderSettings({
                 ...renderSettings,
+                shape: metadata.shape || metadata.render.shape || 'tesseract',
                 exportFps: metadata.render.fps,
                 videoExportWidth: metadata.video?.width,
                 videoExportHeight: metadata.video?.height,
@@ -825,6 +831,27 @@ function createControls() {
     vertexToggle.appendChild(vertexLabel);
     controlPanel.appendChild(vertexToggle);
     
+    const shapeLabel = document.createElement('label');
+    shapeLabel.textContent = '4D shape: ';
+    const shapeSelect = document.createElement('select');
+    shapeSelect.id = 'viewer-shape';
+    for (const [value, label] of [['tesseract', 'Tesseract'], ['rectified-5-cell', 'Rectified 5-cell · all triangles']]) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        shapeSelect.appendChild(option);
+    }
+    shapeSelect.value = currentShape;
+    shapeSelect.addEventListener('change', () => {
+        setViewerShape(shapeSelect.value);
+        shapeSelect.value = currentShape;
+        persistViewerSettings();
+    });
+    shapeLabel.appendChild(shapeSelect);
+    shapeLabel.style.display = 'block';
+    shapeLabel.style.marginBottom = '10px';
+    controlPanel.appendChild(shapeLabel);
+
     // Create shader selection
     const shaderContainer = document.createElement('div');
     shaderContainer.style.marginBottom = '10px';
@@ -1355,6 +1382,8 @@ function restoreVideoRenderSettings(saved) {
 }
 
 function syncViewerControlsFromState() {
+    const shape = document.getElementById('viewer-shape');
+    if (shape) shape.value = currentShape;
     if (motionStepSlider) motionStepSlider.value = String(rotationSpeed * 1000);
     if (motionStepLabel) motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
     const rotationControls = document.getElementById('rotationControls');
@@ -1563,6 +1592,9 @@ function parseTimeInput(value) {
 function videoRenderSignature() {
     return JSON.stringify({
         sourceUrl: location.pathname + location.search,
+        // Keep existing tesseract signatures compatible; non-default shapes
+        // must be distinguished so resumed frames cannot mix geometries.
+        ...(currentShape === 'tesseract' ? {} : {shape: currentShape}),
         rotationSpeed,
         rotationCoefficients,
         shader: currentShader,
@@ -2133,6 +2165,7 @@ async function canvasPNG(canvas) {
 
 function screenshotMetadata(extra = {}) {
     return {
+        shape: currentShape,
         camera: {
             position: {
                 x: camera.position.x,
@@ -2172,17 +2205,18 @@ function embedMetadataInPngDataUrl(imageData, metadata = {}) {
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0);
             try {
-                const imgData = ctx.getImageData(0, 0, canvas.width, 1);
+                const marker = 'tESSdata=';
+                const fullData = marker + metadataStr;
+                const metadataRows = Math.ceil((fullData.length + 2) / canvas.width);
+                if (metadataRows > Math.min(canvas.height, 16)) {
+                    throw new Error('Screenshot metadata is too large for the image');
+                }
+                const imgData = ctx.getImageData(0, 0, canvas.width, metadataRows);
                 const pixelData = imgData.data;
                 pixelData[0] = 254;
                 pixelData[1] = 0;
                 pixelData[2] = 254;
                 pixelData[3] = 255;
-                const marker = 'tESSdata=';
-                const fullData = marker + metadataStr;
-                if (fullData.length + 1 > canvas.width) {
-                    throw new Error('Screenshot metadata is too large for the image');
-                }
                 for (let i = 0; i < fullData.length; i++) {
                     const charCode = fullData.charCodeAt(i);
                     const pixelIndex = (i + 1) * 4;
@@ -2272,6 +2306,7 @@ async function runVideoExport(plan, resumableJob = null) {
     const result = document.getElementById('video-export-result');
     const fields = videoExportDialog.querySelectorAll('input, select');
     fields.forEach(field => { field.disabled = true; });
+    document.getElementById('viewer-shape').disabled = true;
     const simpleMode = videoExportDialog.dataset.videoMode === 'simple';
     cancel.hidden = false;
     cancel.disabled = false;
@@ -2440,6 +2475,7 @@ async function runVideoExport(plan, resumableJob = null) {
         videoExportStopPromise = null;
         videoExportStopJobId = null;
         fields.forEach(field => { field.disabled = false; });
+        document.getElementById('viewer-shape').disabled = false;
         cancel.hidden = true;
         discard.hidden = true;
         persistViewerSettings();
@@ -2935,49 +2971,102 @@ function project4Dto3D(vertex4D, w_factor = 0.5) {
     };
 }
 
-// Create the tesseract
+// Regular tesseract and rectified regular 4-simplex.
+function polytopeTopology(shape = 'tesseract') {
+    if (shape === 'rectified-5-cell') {
+        // Rectify a regular 4-simplex: its ten edge midpoints become vertices.
+        // Scale so every resulting edge has length 2, matching the tesseract.
+        const h = 1 / Math.sqrt(5);
+        const simplex = [[1,1,1,-h],[1,-1,-1,-h],[-1,1,-1,-h],[-1,-1,1,-h],[0,0,0,4*h]];
+        const pairs = [], vertices = [], edges = [], faces = [];
+        for (let a = 0; a < 5; a++) for (let b = a + 1; b < 5; b++) {
+            pairs.push([a,b]);
+            const coordinates = simplex[a].map((value, axis) => (value + simplex[b][axis]) / Math.sqrt(2));
+            vertices.push(Object.fromEntries(['x','y','z','w'].map((axis, index) => [axis, coordinates[index]])));
+        }
+        const adjacent = (a,b) => pairs[a].some(index => pairs[b].includes(index));
+        for (let a = 0; a < 10; a++) for (let b = a + 1; b < 10; b++) {
+            if (!adjacent(a,b)) continue;
+            edges.push([a,b]);
+            for (let c = b + 1; c < 10; c++) {
+                if (adjacent(a,c) && adjacent(b,c)) faces.push([a,b,c]);
+            }
+        }
+        return {vertices, edges, faces};
+    }
+    const points = [];
+    const factors = [];
+    for (const x of [-1, 1]) for (const y of [-1, 1])
+        for (const z of [-1, 1]) for (const w of [-1, 1]) {
+            points.push({x, y, z, w});
+            factors.push([x, y, z, w]);
+        }
+    const edgeList = [], neighbors = points.map(() => []);
+    for (let a = 0; a < points.length; a++) for (let b = a + 1; b < points.length; b++) {
+        if (factors[a].filter((value, axis) => value !== factors[b][axis]).length === 1) {
+            edgeList.push([a, b]);neighbors[a].push(b);neighbors[b].push(a);
+        }
+    }
+    // The cube's 4-cycles are precisely its square 2-faces.
+    // Preserve the original cube ordering.
+    const faceList = [], seen = new Set();
+    const addFace = indices => {
+        const key = [...indices].sort((a,b) => a-b).join('-');
+        if (!seen.has(key)) {seen.add(key);faceList.push(indices);}
+    };
+    for (let a = 0; a < points.length; a++) for (const b of neighbors[a])
+        for (const c of neighbors[b]) {
+            if (c === a) continue;
+            for (const d of neighbors[c]) {
+                if (d !== a && d !== b && neighbors[d].includes(a)) addFace([a,b,c,d]);
+            }
+        }
+    return {vertices: points, edges: edgeList, faces: faceList};
+}
+
+function setViewerShape(shape) {
+    if (!['tesseract', 'rectified-5-cell'].includes(shape) || videoExportRunning) return;
+    if (shape === currentShape) return;
+    currentShape = shape;
+    if (scene && tesseract) {
+        const geometries = new Set(), materials = new Set();
+        tesseract.traverse(object => {
+            if (object.geometry) geometries.add(object.geometry);
+            if (object.material) materials.add(object.material);
+        });
+        scene.remove(tesseract);
+        geometries.forEach(geometry => geometry.dispose());
+        materials.forEach(material => material.dispose());
+        createTesseract();
+        updateTesseractProjection();
+    }
+    const select = document.getElementById('viewer-shape');
+    if (select) select.value = currentShape;
+}
+
+function facePositionArray(indices) {
+    const positions = [];
+    for (let i = 1; i + 1 < indices.length; i++) {
+        for (const index of [indices[0], indices[i], indices[i + 1]]) {
+            const point = vertices[index].position;
+            positions.push(point.x, point.y, point.z);
+        }
+    }
+    return new Float32Array(positions);
+}
+
+// Build the currently selected 4D polytope using the existing renderer/shaders.
 function createTesseract() {
     // A tesseract is the 4D analog of a cube - we'll visualize it as a projection to 3D
     tesseract = new THREE.Group();
+    tesseract.name = currentShape;
     scene.add(tesseract);
     
     const material = createShaderMaterial();
     
-    // Generate the vertices for the tesseract
-    // In 4D, tesseract has 16 vertices, 32 edges, 24 faces, and 8 cells
-    const vertices4D = [];
-    
-    // Generate 16 vertices of a 4D hypercube (all combinations of ±1 in 4D)
-    for (let x = -1; x <= 1; x += 2) {
-        for (let y = -1; y <= 1; y += 2) {
-            for (let z = -1; z <= 1; z += 2) {
-                for (let w = -1; w <= 1; w += 2) {
-                    vertices4D.push({ x, y, z, w });
-                }
-            }
-        }
-    }
-    
-    // Create edges between vertices that differ by exactly one coordinate
-    const edgeList = [];
-    for (let i = 0; i < vertices4D.length; i++) {
-        for (let j = i + 1; j < vertices4D.length; j++) {
-            const v1 = vertices4D[i];
-            const v2 = vertices4D[j];
-            
-            // Count how many coordinates differ
-            let diffCount = 0;
-            if (v1.x !== v2.x) diffCount++;
-            if (v1.y !== v2.y) diffCount++;
-            if (v1.z !== v2.z) diffCount++;
-            if (v1.w !== v2.w) diffCount++;
-            
-            // If exactly one coordinate differs, add an edge
-            if (diffCount === 1) {
-                edgeList.push([i, j]);
-            }
-        }
-    }
+    const topology = polytopeTopology(currentShape);
+    const vertices4D = topology.vertices;
+    const edgeList = topology.edges;
     
     // First create vertex objects
     vertices = [];
@@ -3027,78 +3116,15 @@ function createTesseract() {
     }
     
     // Create faces for the tesseract
-    createFaces(vertices4D, edgeList, material);
-}
-
-// Create faces for the tesseract
-function createFaces(vertices4D, edgeList, material) {
-    // Identify faces (square faces in the tesseract)
-    const facesList = [];
-    const edgePairs = {};
-    
-    // Map edges to vertices for faster lookup
-    edgeList.forEach(([a, b]) => {
-        if (!edgePairs[a]) edgePairs[a] = [];
-        if (!edgePairs[b]) edgePairs[b] = [];
-        
-        edgePairs[a].push(b);
-        edgePairs[b].push(a);
-    });
-    
-    // Find all 4-cycles (squares) in the edge graph
-    for (let a = 0; a < vertices4D.length; a++) {
-        if (!edgePairs[a]) continue;
-        
-        for (let bIdx = 0; bIdx < edgePairs[a].length; bIdx++) {
-            const b = edgePairs[a][bIdx];
-            
-            for (let cIdx = 0; cIdx < edgePairs[b].length; cIdx++) {
-                const c = edgePairs[b][cIdx];
-                if (c === a) continue; // Skip if we're going back to a
-                
-                for (let dIdx = 0; dIdx < edgePairs[c].length; dIdx++) {
-                    const d = edgePairs[c][dIdx];
-                    if (d === b) continue; // Skip if we're going back to b
-                    
-                    // Check if d connects back to a, forming a 4-cycle
-                    if (edgePairs[d] && edgePairs[d].includes(a)) {
-                        // Found a face: a-b-c-d
-                        const faceKey = [a, b, c, d].sort().join('-');
-                        if (!facesList.includes(faceKey)) {
-                            facesList.push(faceKey);
-                            
-                            // Create the face geometry
-                            const aPos = project4Dto3D(vertices4D[a]);
-                            const bPos = project4Dto3D(vertices4D[b]);
-                            const cPos = project4Dto3D(vertices4D[c]);
-                            const dPos = project4Dto3D(vertices4D[d]);
-                            
-                            const geometry = new THREE.BufferGeometry();
-                            
-                            // Create face with two triangles (a-b-c and a-c-d)
-                            const vertices = new Float32Array([
-                                aPos.x, aPos.y, aPos.z,
-                                bPos.x, bPos.y, bPos.z,
-                                cPos.x, cPos.y, cPos.z,
-                                
-                                aPos.x, aPos.y, aPos.z,
-                                cPos.x, cPos.y, cPos.z,
-                                dPos.x, dPos.y, dPos.z
-                            ]);
-                            
-                            geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-                            geometry.computeVertexNormals();
-                            
-                            const face = new THREE.Mesh(geometry, material);
-                            face.userData = { vertices: [a, b, c, d] };
-                            
-                            tesseract.add(face);
-                            faces.push(face);
-                        }
-                    }
-                }
-            }
-        }
+    faces = [];
+    for (const indices of topology.faces) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(facePositionArray(indices), 3));
+        geometry.computeVertexNormals();
+        const face = new THREE.Mesh(geometry, material);
+        face.userData = {vertices: indices};
+        tesseract.add(face);
+        faces.push(face);
     }
 }
 
@@ -3146,24 +3172,9 @@ function updateTesseractProjection() {
         const face = faces[i];
         const faceVertices = face.userData.vertices;
         
-        const positions = [];
-        for (let j = 0; j < faceVertices.length; j++) {
-            const vertexIdx = faceVertices[j];
-            const pos = vertices[vertexIdx].position;
-            positions.push(new THREE.Vector3(pos.x, pos.y, pos.z));
-        }
-        
         // Update the face geometry
         const geometry = new THREE.BufferGeometry();
-        const vertexArray = new Float32Array([
-            positions[0].x, positions[0].y, positions[0].z,
-            positions[1].x, positions[1].y, positions[1].z,
-            positions[2].x, positions[2].y, positions[2].z,
-            
-            positions[0].x, positions[0].y, positions[0].z,
-            positions[2].x, positions[2].y, positions[2].z,
-            positions[3].x, positions[3].y, positions[3].z
-        ]);
+        const vertexArray = facePositionArray(faceVertices);
         
         geometry.setAttribute('position', new THREE.BufferAttribute(vertexArray, 3));
         geometry.computeVertexNormals();

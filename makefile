@@ -63,6 +63,7 @@ test-fast:
 	bun run test:vendor
 	bun run test:syntax
 	node studio/test_resolution.cjs
+	node studio/test_polytope.cjs
 	node studio/test_lifecycle_test.cjs
 	node studio/test_skybox_hashing.cjs
 	node studio/test_video_resume_ui.cjs

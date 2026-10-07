@@ -111,6 +111,11 @@ finally:
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+  await viewer.locator('#viewer-shape').selectOption('rectified-5-cell');
+  assert.equal(await viewer.evaluate(()=>JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1')).shape),'rectified-5-cell');
+  await viewer.reload();await viewer.waitForSelector('#viewer-shape');assert.equal(await viewer.locator('#viewer-shape').inputValue(),'rectified-5-cell');
+  await viewer.screenshot({path:path.join(os.tmpdir(),'rectified-5-cell.png')});
+  await viewer.locator('#viewer-shape').selectOption('tesseract');
   const dragOverlay=await viewer.evaluate(()=>{
    const zone=document.getElementById('drop-zone');
    const emit=type=>window.dispatchEvent(new DragEvent(type,{bubbles:true,cancelable:true,clientX:200,clientY:200}));
@@ -278,18 +283,23 @@ finally:
   }
   if(await viewer.evaluate(()=>document.querySelector('#video-export-dialog').dataset.videoMode==='simple')){
    assert(await viewer.locator('#video-export-checkpoint').isHidden());assert(await viewer.locator('#video-export-scratch').isHidden());
+   await viewer.evaluate(()=>{const select=document.getElementById('viewer-shape');select.value='rectified-5-cell';select.dispatchEvent(new Event('change',{bubbles:true}));});
    await viewer.locator('#video-export-name').fill('simple-browser');await viewer.locator('#video-export-start').fill('0.5');await viewer.locator('#video-export-duration').fill('0.02');
    assert.match(await viewer.locator('#video-export-summary').innerText(),/SIMPLE MODE/);
    await viewer.locator('#video-export-resolution').selectOption('1280x720');await viewer.locator('#video-export-format').selectOption('mp4');await viewer.locator('#video-export-quality').selectOption('draft');
-   await viewer.locator('#confirm-video-export').click();await viewer.waitForSelector('#video-export-result a',{timeout:30000});
+   await viewer.locator('#confirm-video-export').click();
+   await viewer.waitForFunction(()=>['complete','error'].includes(document.querySelector('#video-export-dialog').dataset.statusMode));
+   assert.equal(await viewer.locator('#video-export-dialog').getAttribute('data-status-mode'),'complete',await viewer.locator('#video-export-status').innerText());
+   await viewer.waitForSelector('#video-export-result a',{timeout:30000});
    const movie=fs.readdirSync(path.join(root,'videos')).find(file=>file.startsWith('simple-browser-')&&file.endsWith('.mp4'));assert(movie);
    const stem=path.join(root,'videos',movie.slice(0,-4));
    const metadata=JSON.parse(fs.readFileSync(`${stem}.json`,'utf8'));
    assert.equal(metadata.videoMode,'simple');assert.equal(metadata.poster.file,path.basename(`${stem}.png`));
    assert.equal(metadata.frames,1);assert(metadata.startFrame>0);assert(metadata.renderSignature);assert(metadata.viewerState);
-   assert.equal(metadata.viewerState.shader,'chrome');
+   assert.equal(metadata.viewerState.shader,'chrome');assert.equal(metadata.viewerState.shape,'rectified-5-cell');
+   assert.equal(JSON.parse(metadata.renderSignature).shape,'rectified-5-cell');
    await viewer.locator('#close-video-export').click();
-   await viewer.locator('#viewer-shader').selectOption('rough');await viewer.locator('#rotation-xw').fill('3');
+   await viewer.locator('#viewer-shader').selectOption('rough');await viewer.locator('#rotation-xw').fill('3');await viewer.locator('#viewer-shape').selectOption('tesseract');
    const pngBase64=fs.readFileSync(`${stem}.png`).toString('base64');
    const restoreMessages=[];viewer.on('console',message=>{restoreMessages.push(message.text());if(restoreMessages.length>20)restoreMessages.shift();});
    await viewer.evaluate(({pngBase64,name})=>{
@@ -300,6 +310,7 @@ finally:
    try{await viewer.waitForFunction(frame=>{const state=JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1'));return state.shader==='chrome'&&state.animationPaused&&state.timelineFrame===frame;},metadata.startFrame,{timeout:5000});}
    catch(error){throw new Error(`PNG restore failed: ${restoreMessages.join('\n')}\nSaved: ${await viewer.evaluate(()=>localStorage.getItem('tesseract.viewer-settings.v1'))}`,{cause:error});}
    const restored=await viewer.evaluate(()=>JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1')));
+   assert.equal(restored.shape,'rectified-5-cell');assert.equal(await viewer.locator('#viewer-shape').inputValue(),'rectified-5-cell');
    assert.deepEqual(restored.rotationCoefficients,metadata.viewerState.rotationCoefficients);
    assert.deepEqual(restored.camera,metadata.viewerState.camera);assert.equal(restored.exportFps,metadata.fps);
    await viewer.locator('#open-video-export').click();
