@@ -35,6 +35,29 @@ Both serve at **http://localhost:8000/**. The image includes ffmpeg with `libx26
 
 Put original photographs in `raw/`. The server has no Python dependencies. Both the viewer and Studio use the pinned Three.js runtime under `vendor/`, so the complete local design, image export and viewer workflow requires no internet connection. This is a trusted local workstation app, not a public production service.
 
+## Agent API
+
+Both pages expose a small JavaScript API for automation and AI agents that drive a browser, such as Claude in Chrome or Playwright. You can watch the agent work, or work alongside it, in the same window. Calls go through the same code paths as the UI, so edits appear live, are undoable in Studio, and persist like manual changes. Invalid input is rejected with an explanatory error instead of being silently ignored. Destructive calls require `{force: true}` instead of opening a confirmation dialog.
+
+```js
+await studio.ready;
+studio.describe();                              // methods, node types, setting ranges
+const photo = studio.addNode('source', {source: 'raw/photo.jpg'});
+const frame = studio.addNode('frame', {settings: {zoom: 1.5}});
+studio.connect(photo, frame);
+studio.connect(frame, 'skybox-output', 'px');
+studio.setParams(frame, {rotation: 90});
+await studio.idle();                            // live preview finished
+const folder = await studio.export();           // "exports/<name>-<stamp>"
+
+await viewer.ready;
+viewer.setState({shader: 'chrome', rotationCoefficients: {xw: 0.5}});
+await viewer.loadSkybox(folder);
+viewer.screenshot({maxSize: 512});              // PNG data URL of the 3D view
+```
+
+Publishing and video export are not in the API yet. Like the rest of the server, the API is intended for a trusted local machine.
+
 ## Studio → viewer workflow
 
 1. Build a Photo → Frame → Light → Skybox graph in Studio.
