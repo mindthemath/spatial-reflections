@@ -34,9 +34,24 @@ class SimpleVideoIntegrationTest(unittest.TestCase):
                         '-of','json',str(path)],capture_output=True,text=True,check=True,timeout=10)
                     info=json.loads(probe.stdout);stream=info['streams'][0]
                     self.assertEqual(int(stream['nb_read_frames']),3)
+                    # Decode all frames back to full-range RGB: gamma tags must
+                    # not hide an unintended change to source sample values.
+                    decoded=subprocess.run([shutil.which('ffmpeg'),'-v','error','-threads','1',
+                        '-filter_threads','1','-i',str(path),'-frames:v','3',
+                        '-vf','scale=in_range=tv:out_range=pc:in_color_matrix=bt709',
+                        '-pix_fmt','rgb24','-f','rawvideo','pipe:1'],
+                        capture_output=True,check=True,timeout=10).stdout
+                    self.assertEqual(len(decoded),3*64*64*3)
+                    for frame in range(3):
+                        pixels=decoded[frame*64*64*3:(frame+1)*64*64*3]
+                        expected=(frame*60,64,255-frame*60)
+                        for channel,value in enumerate(expected):
+                            average=sum(pixels[channel::3])/(64*64)
+                            self.assertLess(abs(average-value),3, (container,frame,channel,average,value))
                     self.assertAlmostEqual(float(info['format']['duration']),3/24,delta=.05)
                     self.assertEqual(stream['color_range'],'tv')
-                    for key in ('color_space','color_transfer','color_primaries'):self.assertEqual(stream[key],'bt709')
+                    for key in ('color_space','color_primaries'):self.assertEqual(stream[key],'bt709')
+                    self.assertEqual(stream['color_transfer'],'iec61966-2-1')
                     self.assertFalse((root/'videos'/'.checkpoints').exists())
                     self.assertFalse(list((root/'videos').glob('.simple-*')))
                 finally:backend.pause_all();backend.release_server()

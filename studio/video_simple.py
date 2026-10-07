@@ -13,6 +13,12 @@ import uuid
 from datetime import datetime, timezone
 
 
+if __package__:
+    from .video_color import COLOR_PROFILE, browser_video_color_args
+else:
+    from video_color import COLOR_PROFILE, browser_video_color_args
+
+
 class SimpleVideoBackend:
     mode = 'simple'
     recovery_running = False
@@ -61,7 +67,8 @@ class SimpleVideoBackend:
             stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             filename = f"{label}-{stamp}-{job_id[:8]}.{request['format']}"
             directory = Path(tempfile.mkdtemp(prefix=f'.simple-{job_id}-', dir=self.videos))
-            job = {'id': job_id, 'lease': uuid.uuid4().hex, 'request': dict(request),
+            job = {'id': job_id, 'lease': uuid.uuid4().hex,
+                   'request': {**request, 'colorProfile': COLOR_PROFILE},
                    'filename': filename, 'nextFrame': 0, 'state': 'active',
                    'createdAt': datetime.now(timezone.utc).isoformat(),
                    'process': None, 'directory': directory, 'lock': threading.RLock(),
@@ -109,8 +116,7 @@ class SimpleVideoBackend:
                 *(['-filter_threads', '1'] if thread_args else []), *thread_args,
                 '-f', 'image2pipe', '-framerate', str(request['fps']), '-vcodec', 'png',
                 '-i', 'pipe:0', '-an',
-                '-vf', 'scale=in_range=full:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709,format=yuv420p,setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709',
-                '-color_range', 'tv', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709',
+                *browser_video_color_args(),
                 '-c:v', 'libx264', '-preset', 'medium', *thread_args,
                 '-b:v', str(bit_rate), '-maxrate', str(round(bit_rate * 1.5)),
                 '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',

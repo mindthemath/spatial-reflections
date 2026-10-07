@@ -16,6 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+if __package__:
+    from .video_color import COLOR_PROFILE, browser_video_color_args
+else:
+    from video_color import COLOR_PROFILE, browser_video_color_args
+
+
 SCHEMA_VERSION = 1
 SEGMENT_NAME = re.compile(r'segment-(\d{6})\.mkv')
 _SYSTEM_RUN = subprocess.run
@@ -412,7 +418,7 @@ class VideoJobStore:
             'frames': frames,
             'checkpointSeconds': checkpoint_seconds,
             'scratchPath': str(scratch_base),
-            'colorProfile': 'bt709-limited-v1',
+            'colorProfile': COLOR_PROFILE,
         }
         job = {
             'schemaVersion': SCHEMA_VERSION,
@@ -830,11 +836,13 @@ class VideoJobStore:
             raise ValueError(
                 f'Not enough scratch space for the next checkpoint ({free_bytes:,} bytes free)'
             )
-        # Existing jobs without a profile keep their original conversion. Mixing
-        # old untagged checkpoints with new BT.709 checkpoints would change color
-        # mid-video and concat would advertise only the first segment's metadata.
+        # Preserve each job's pinned transfer/range policy, including older
+        # BT.709 and untagged profiles. Concat advertises the first segment's
+        # metadata, so changing policy during resume would mislabel later frames.
         color_args = []
-        if request.get('colorProfile') == 'bt709-limited-v1':
+        if request.get('colorProfile') == COLOR_PROFILE:
+            color_args = browser_video_color_args()
+        elif request.get('colorProfile') == 'bt709-limited-v1':
             color_args = [
                 '-vf', ('scale=in_range=pc:out_range=tv:out_color_matrix=bt709,'
                         'setparams=range=limited:color_primaries=bt709:'

@@ -364,7 +364,7 @@ def start_video(request):
                               'frames': frames, 'quality': quality, 'format': video_format,
                               'bitRate': bit_rate, 'estimatedBytes': estimate,
                               'checkpointSeconds': 0, 'scratchPath': '',
-                              'colorProfile': 'bt709-limited-v1'})
+                              'colorProfile': 'srgb-limited-v1'})
         active.update({'estimatedBytes': estimate, 'bitRate': bit_rate})
         return active
     checkpoint_seconds = int(request.get('checkpointSeconds', 60))

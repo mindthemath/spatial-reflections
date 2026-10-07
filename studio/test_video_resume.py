@@ -833,15 +833,47 @@ class VideoJobStoreTest(unittest.TestCase):
         self.assertEqual(command[command.index('-filter_threads') + 1], '1')
         color_filter = command[command.index('-vf') + 1]
         self.assertIn('scale=in_range=pc:out_range=tv:out_color_matrix=bt709', color_filter)
-        self.assertIn('setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709', color_filter)
+        self.assertIn('setparams=range=limited:color_primaries=bt709:color_trc=iec61966-2-1:colorspace=bt709', color_filter)
         for flag in ('-color_range', '-colorspace', '-color_primaries', '-color_trc'):
-            self.assertEqual(command[command.index(flag) + 1], 'tv' if flag == '-color_range' else 'bt709')
+            self.assertEqual(command[command.index(flag) + 1],
+                             'tv' if flag == '-color_range' else 'iec61966-2-1' if flag == '-color_trc' else 'bt709')
         persisted = json.loads(self.manifest(job).read_text())
         self.assertEqual(persisted['nextFrame'], 4)
         self.assertEqual(persisted['segments'][0]['frames'], 4)
         self.assertEqual(persisted['segments'][0]['firstFrame'], 0)
         self.store.write_frame(job['id'], 4, b'png', lease)
         self.assertEqual(len(processes), 2)
+
+    def test_existing_bt709_and_untagged_jobs_keep_their_color_policy(self):
+        commands = []
+        class Encoder:
+            def __init__(self, command, **kwargs):
+                commands.append(command)
+                self.stdin = io.BytesIO()
+                self.returncode = None
+            def poll(self): return self.returncode
+            def kill(self): self.returncode = -9
+            def wait(self, timeout=None): return self.returncode
+        self.store.popen = Encoder
+        for profile in ('bt709-limited-v1', None):
+            job = self.store.create(request(fps=2, frames=4, checkpointSeconds=2))
+            manifest = json.loads(self.manifest(job).read_text())
+            if profile:
+                manifest['request']['colorProfile'] = profile
+            else:
+                manifest['request'].pop('colorProfile')
+            self.write_manifest(job, manifest)
+            lease = self.store.resume(job['id'])['lease']
+            self.store.write_frame(job['id'], 0, b'png', lease)
+            command = commands[-1]
+            if profile:
+                self.assertEqual(command[command.index('-color_trc') + 1], 'bt709')
+                self.assertIn('color_trc=bt709', command[command.index('-vf') + 1])
+            else:
+                self.assertNotIn('-color_trc', command)
+                self.assertNotIn('-vf', command)
+            self.store.pause(job['id'], lease=lease)
+            self.store.discard(job['id'])
 
     def test_zero_checkpoint_seconds_only_durably_saves_completed_export(self):
         processes = []

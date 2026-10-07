@@ -108,7 +108,7 @@ The collapsed **Video timing** section provides export FPS, loop frame count, du
 
 Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Capture uses a reusable OffscreenCanvas with promise-based PNG encoding where supported, falling back to synchronous capture for compatibility. A failed or timed-out offscreen encoder is bypassed for the rest of that export, rather than repeatedly waiting or accumulating pending frame copies. The selected skybox must finish loading before export; its actual face hashes are part of the resume signature, and environment changes are locked during rendering. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
 
-New exports explicitly convert full-range RGB to limited-range BT.709 YUV and tag BT.709 matrix, transfer and primaries in H.264 and the container. Checkpoint concatenation preserves these tags, verified with real `ffprobe` tests for MP4 and MKV. Existing checkpoint jobs without a color profile retain their original conversion rather than mixing old and new colors within one movie. Checkpoint encoder failures preserve the last 4 KB of diagnostics in the interrupted job's reason.
+New exports preserve the browser's sRGB transfer curve, convert full-range RGB to limited-range BT.709 YUV, and explicitly tag the sRGB transfer (`iec61966-2-1`), BT.709 matrix and BT.709/sRGB primaries in H.264 and the container. This labels the source curve accurately; it does not bake in a gamma/brightness adjustment. MP4/MKV tests verify the tags and decoded RGB sample fidelity. Existing jobs pinned to the previous BT.709 transfer profile, and untagged legacy jobs, retain their original conversion so resuming never mixes color policies. Color-managed playback (including Finder Quick Look) still needs visual comparison; players that ignore transfer tags can differ. Checkpoint encoder failures preserve the last 4 KB of diagnostics in the interrupted job's reason.
 
 ### One-shot fallback
 
@@ -122,7 +122,7 @@ python3 studio/server.py --port 1313 --video-mode simple
 ```
 
 The dialog identifies **Simple mode**: deterministic PNG capture, one H.264
-encoder, BT.709 color, and publication only after successful encoding. The movie
+encoder, explicit sRGB/BT.709 color, and publication only after successful encoding. The movie
 is saved with a same-named JSON settings sidecar and a metadata-bearing PNG of
 the clip's starting frame. Drag that PNG onto the viewer to restore its view,
 timing, and render settings (use the original skybox/environment). Cancel,
@@ -161,7 +161,7 @@ Resource-heavy targets share a per-user nonblocking lock across checkout directo
 
 Browser cleanup is awaited on success, failure and SIGINT/SIGTERM. The temporary server pauses its jobs before exit, stderr is continuously drained with an 8 KB diagnostic tail, and temporary files are removed only after server exit. The API test helpers reuse an HTTP connection per test and close it during teardown. The export API already supports HTTP/1.1 keep-alive for sequential browser uploads.
 
-The soak uses three samples from an existing artwork video at 1080p/30 FPS, two mid-checkpoint store-restart/resume cycles (asserting actual rollback and rerender), exact frame count and duration checks, BT.709 verification and encoder-leak checks. It uses temporary storage and does not alter the source. The default six-second run is deliberately bounded; it is not a claim of multi-hour browser endurance. Long hidden-tab/4K exports still need workload-specific endurance validation.
+The soak uses three samples from an existing artwork video at 1080p/30 FPS, two mid-checkpoint store-restart/resume cycles (asserting actual rollback and rerender), exact frame count and duration checks, sRGB-transfer/BT.709 verification and encoder-leak checks. It uses temporary storage and does not alter the source. The default six-second run is deliberately bounded; it is not a claim of multi-hour browser endurance. Long hidden-tab/4K exports still need workload-specific endurance validation.
 
 ### Long-running video recovery
 
