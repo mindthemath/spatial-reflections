@@ -156,6 +156,19 @@ finally:
    const pausedCard=viewer.locator('.video-resume-job').filter({hasText:'browser-pause'});
    await pausedCard.waitFor();assert(!(await pausedCard.locator('.resume-video-export').isDisabled()));
    assert.equal(await viewer.locator('#video-resume-jobs').evaluate(section=>section.inert),false);
+   const savedPause=await viewer.evaluate(()=>fetch('/api/video/jobs').then(response=>response.json()).then(value=>value.jobs.find(job=>job.request.name==='browser-pause').request));
+   await viewer.locator('#video-export-name').fill('wrong-new-export');await viewer.locator('#video-export-resolution').selectOption('1920x1080');
+   await viewer.locator('#video-export-format').selectOption('mp4');await viewer.locator('#video-export-quality').selectOption('high');
+   await viewer.locator('#video-export-checkpoint').fill('120');await viewer.locator('#video-export-duration').fill('0.5');
+   await pausedCard.locator('.resume-video-export').click();
+   await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('Rendering + encoding'));
+   assert.equal(await viewer.locator('#video-export-name').inputValue(),'browser-pause');
+   assert.equal(await viewer.locator('#video-export-resolution').inputValue(),'1280x720');
+   assert.equal(await viewer.locator('#video-export-format').inputValue(),'mkv');assert.equal(await viewer.locator('#video-export-quality').inputValue(),'draft');
+   assert.equal(await viewer.locator('#video-export-checkpoint').inputValue(),'60');assert.equal(await viewer.locator('#video-export-duration').inputValue(),'0:02.000');
+   assert.match(await viewer.locator('#video-export-summary').innerText(),/Resuming saved export/);
+   assert((await viewer.locator('#video-export-summary').innerText()).includes(`${savedPause.frames.toLocaleString()} frames`));
+   await viewer.locator('#cancel-video-export').click();await viewer.waitForFunction(()=>document.querySelector('#video-export-status').textContent.includes('paused'));
    await pausedCard.locator('.discard-video-export').click();await viewer.locator('#confirm-action-accept').click();await pausedCard.waitFor({state:'detached'});
 
    await viewer.locator('#video-export-name').fill('browser-cancel');
@@ -246,7 +259,7 @@ finally:
    const restorableId=await viewer.evaluate(async()=>{
     const dialog=document.querySelector('#video-export-dialog'),signature=dialog.dataset.renderSignature,viewerState=JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1'));
     viewerState.panelExpanded=false;viewerState.videoTimingExpanded=false;viewerState.animationPaused=true;
-    const request={name:'restore-settings',width:1280,height:720,fps:viewerState.exportFps,frames:1,quality:'draft',format:'mp4',checkpointSeconds:60,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:1,loopPeriod:0,timeStep:0,viewerState};
+    const request={name:'restore-settings',width:1280,height:720,fps:viewerState.exportFps,frames:1,quality:'high',format:'mkv',checkpointSeconds:120,sourceUrl:location.pathname+location.search,renderSignature:signature,startFrame:0,loopFrameCount:600,loopPeriod:0,timeStep:0,viewerState};
     const started=await fetch('/api/video/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)}).then(r=>r.json());
     await fetch('/api/video/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:started.id,lease:started.lease})});return started.id;
    });
@@ -254,7 +267,10 @@ finally:
    const restorable=viewer.locator(`.video-resume-job[data-job-id="${restorableId}"]`);await restorable.waitFor();assert(await restorable.locator('.resume-video-export').isDisabled());
    await viewer.locator('#video-export-resolution').selectOption('1920x1080');await viewer.locator('#video-export-quality').selectOption('high');
    await restorable.locator('.restore-video-export').click();await viewer.waitForFunction(id=>{const button=document.querySelector(`.video-resume-job[data-job-id="${id}"] .resume-video-export`);return button&&!button.disabled;},restorableId);assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
-   assert.equal(await viewer.locator('#video-export-resolution').inputValue(),'1280x720');assert.equal(await viewer.locator('#video-export-quality').inputValue(),'draft');
+   assert.equal(await viewer.locator('#video-export-resolution').inputValue(),'1280x720');assert.equal(await viewer.locator('#video-export-quality').inputValue(),'high');
+   assert.equal(await viewer.locator('#video-export-name').inputValue(),'restore-settings');assert.equal(await viewer.locator('#video-export-format').inputValue(),'mkv');
+   assert.equal(await viewer.locator('#video-export-checkpoint').inputValue(),'120');assert.equal(await viewer.locator('#video-export-range').inputValue(),'clip');
+   assert.equal(await viewer.locator('#video-export-start').inputValue(),'0:00.000');
    assert.equal(await viewer.locator('#controlPanelContent').evaluate(element=>element.hidden),false);
    const restoredPreferences=await viewer.evaluate(()=>JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1')));
    assert.equal(restoredPreferences.panelExpanded,true);assert.equal(restoredPreferences.videoTimingExpanded,true);
@@ -299,7 +315,9 @@ finally:
   if(await viewer.locator('#video-export-dialog').isVisible())await viewer.locator('#close-video-export').click();
   const cameraBefore=await viewer.locator('#viewer-camera-info').innerText();
   await viewer.locator('#viewer-shader').selectOption('rough');assert(await viewer.locator('#switch-to-chrome').isVisible());
-  await viewer.locator('#default-skybox').click();await viewer.locator('#confirm-action-accept').click();await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='Default skybox');
+  await viewer.locator('#default-skybox').click();await viewer.locator('#confirm-action-accept').click();
+  try{await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='Default skybox');}
+  catch(error){throw new Error(`Default skybox failed: ${await viewer.locator('#skybox-status').textContent()}; page errors: ${errors.join('; ')}`,{cause:error});}
   assert.equal(await viewer.locator('#viewer-camera-info').innerText(),cameraBefore);assert.equal(await viewer.locator('#viewer-shader').inputValue(),'rough');
   await viewer.locator('#browse-skyboxes').click();await viewer.waitForSelector('.skybox-card');
   await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'untitled'})}).getByRole('button',{name:'Load skybox'}).click();

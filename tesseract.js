@@ -15,6 +15,7 @@ let videoExportHeight = 1080;
 let videoExportQuality = 'standard';
 let videoExportRunning = false;
 let activeVideoExportJob = null;
+let activeVideoExportPlan = null;
 let cancelVideoExportRequested = false;
 let videoExportAbort = null;
 let videoExportStopAction = null;
@@ -1840,7 +1841,13 @@ async function loadVideoResumeJobs() {
                 restore.textContent = 'Restore export settings';
                 restore.addEventListener('click', async () => {
                     if (videoExportRunning) return;
-                    restoreVideoRenderSettings(request.viewerState);
+                    restoreVideoRenderSettings({
+                        ...request.viewerState,
+                        exportFps: Number(request.fps),
+                        videoExportWidth: Number(request.width),
+                        videoExportHeight: Number(request.height),
+                        videoExportQuality: request.quality
+                    });
                     const restoredFrame = timelineFrame;
                     camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
                     controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
@@ -1851,6 +1858,8 @@ async function loadVideoResumeJobs() {
                     skyboxLibrary?.refreshShaderHint();
                     refreshLoopTiming({ preserveTime: false });
                     setTimelineFrame(restoredFrame);
+                    restoreVideoExportForm(request);
+                    updateVideoExportSummary();
                     updateCameraInfo();
                     persistViewerSettings();
                     videoExportDialog.dataset.renderSignature = videoRenderSignature();
@@ -1876,10 +1885,11 @@ function videoExportPlanFromRequest(request) {
     const duration = frames / Number(request.fps);
     if (![width, height, frames, duration].every(Number.isFinite)) return null;
     return {
-        width, height, frames, duration,
+        width, height, frames, duration, fps: Number(request.fps),
         format: request.format,
         quality: request.quality,
-        range: request.startFrame ? 'clip' : 'full',
+        range: !Number(request.startFrame) && frames === Number(request.loopFrameCount || loopTiming.frameCount)
+            ? 'full' : 'clip',
         startFrame: Number(request.startFrame) || 0,
         bitRate: Number(request.bitRate) || 0,
         estimatedBytes: Number(request.estimatedBytes) || 0,
@@ -1888,6 +1898,33 @@ function videoExportPlanFromRequest(request) {
         scratchPath: request.scratchPath || '',
         error: ''
     };
+}
+
+// Export controls describe the saved request, not whichever new-export defaults
+// happened to be visible when Restore or Resume was clicked.
+function restoreVideoExportForm(request) {
+    const plan = videoExportPlanFromRequest(request);
+    if (!plan) return;
+    const resolution = document.getElementById('video-export-resolution');
+    const size = `${plan.width}x${plan.height}`;
+    if (!Array.from(resolution.options).some(option => option.value === size)) {
+        const option = document.createElement('option');
+        option.value = size;
+        option.textContent = `${plan.width} × ${plan.height} · saved export`;
+        resolution.appendChild(option);
+    }
+    const values = {
+        'video-export-name': request.name || 'tesseract',
+        'video-export-resolution': size,
+        'video-export-format': plan.format,
+        'video-export-quality': plan.quality,
+        'video-export-range': plan.range,
+        'video-export-checkpoint': String(plan.checkpointSeconds),
+        'video-export-scratch': plan.scratchPath,
+        'video-export-start': formatTimeInput(plan.startFrame / plan.fps),
+        'video-export-duration': formatTimeInput(plan.duration)
+    };
+    for (const [id, value] of Object.entries(values)) document.getElementById(id).value = value;
 }
 
 function videoExportPlan() {
@@ -1927,13 +1964,13 @@ function videoExportPlan() {
 
 function updateVideoExportSummary() {
     if (!videoExportDialog) return;
-    const plan = videoExportPlan();
-    const isClip = document.getElementById('video-export-range').value === 'clip';
+    const plan = activeVideoExportPlan || videoExportPlan();
+    const isClip = plan?.range === 'clip';
     document.getElementById('video-export-clip-fields').hidden = !isClip;
     const summary = document.getElementById('video-export-summary');
     const confirm = document.getElementById('confirm-video-export');
     const freeBytes = Number(videoExportDialog.dataset.freeBytes);
-    const spaceError = plan && Number.isFinite(freeBytes) && freeBytes > 0 && plan.estimatedBytes > freeBytes * 0.9;
+    const spaceError = !videoExportRunning && plan && Number.isFinite(freeBytes) && freeBytes > 0 && plan.estimatedBytes > freeBytes * 0.9;
     if (!plan || plan.error || spaceError) {
         summary.textContent = spaceError
             ? `Estimated output ${formatBytes(plan.estimatedBytes)} exceeds available server disk space (${formatBytes(freeBytes)} free).`
@@ -1949,8 +1986,8 @@ function updateVideoExportSummary() {
             ? 'No checkpoints. Pausing or interruption restarts from frame 0.'
             : `Durable progress is saved every ${plan.checkpointSeconds} seconds.`;
         summary.innerHTML = `
-            <strong>${rangeText}</strong><br>
-            ${plan.width} × ${plan.height} · ${exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
+            <strong>${plan.resumed ? 'Resuming saved export · ' : ''}${rangeText}</strong><br>
+            ${plan.width} × ${plan.height} · ${plan.fps || exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
             H.264 ${plan.format.toUpperCase()} · ${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target · no audio · current ${currentShader} shader<br>
             Duration ${formatDuration(plan.duration)} · estimated ${plan.format.toUpperCase()} size <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
             <small>Saved under <code>videos/</code>. ${checkpointText} Size is a bitrate-based estimate; visual complexity can change the final file size.${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
@@ -2213,6 +2250,9 @@ function videoExportFailureMessage(error, stopError, stopAction, hadJob, finishA
 
 async function runVideoExport(plan, resumableJob = null) {
     if (videoExportRunning) return;
+    if (resumableJob) restoreVideoExportForm(resumableJob.request);
+    activeVideoExportPlan = {...plan, fps: resumableJob ? Number(resumableJob.request.fps) : exportFps,
+                             resumed: Boolean(resumableJob)};
     videoExportRunning = true;
     document.getElementById('video-resume-jobs').inert = true;
     cancelVideoExportRequested = false;
@@ -2390,6 +2430,7 @@ async function runVideoExport(plan, resumableJob = null) {
         animationPaused = originalPaused;
         releaseEnvironmentLock?.();
         videoExportRunning = false;
+        activeVideoExportPlan = null;
         document.getElementById('video-resume-jobs').inert = false;
         cancelVideoExportRequested = false;
         videoExportAbort = null;
