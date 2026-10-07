@@ -121,14 +121,14 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
                 name=manifest.pipeline?.name||folder;size=manifest.pipeline?.size;
                 expectedHashes=Object.fromEntries(FACES.map(face=>[face,manifest.outputs[face].sha256||null]));
             }
-            const urls=FACES.map(face=>folder==='default'?`/skybox/${face}.png`:exportFileURL(folder,`${face}.png`));
+            const urls=FACES.map(face=>folder==='default'?`/raw/${face}.png`:exportFileURL(folder,`${face}.png`));
             const assets=await Promise.all(urls.map(url=>loadImageAsset(url)));
             if(expectedHashes&&FACES.some((face,index)=>expectedHashes[face]&&expectedHashes[face]!==assets[index].sha256))throw new Error('Skybox image content does not match the export manifest');
             const identity=JSON.stringify({kind:folder==='default'?'default':'export',folder,faces:Object.fromEntries(FACES.map((face,index)=>[face,assets[index].sha256]))});
             const {texture,side,displaySide}=textureFromImages(assets.map(asset=>asset.image),renderer,size);
             if(version!==requestId){texture.dispose();return false;}
             onTexture(texture);active=folder;activeName=name;setRenderState(true,identity);
-            $('active-skybox').textContent=name;$('active-skybox').title=folder==='default'?'skybox/':folder;
+            $('active-skybox').textContent=name;$('active-skybox').title=folder==='default'?'raw/':folder;
             message(`${side} × ${side}px${displaySide<side?` · display reduced to ${displaySide}px for this GPU; originals unchanged`:''}`);
             if(rememberSelection)remember(folder);
             updateLinks();renderLibrary();dialog.close();return true;

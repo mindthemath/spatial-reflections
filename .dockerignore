@@ -1,0 +1,9 @@
+node_modules/
+exports/
+raw/*.jpg
+raw/*.JPG
+.git
+**/*.sw[opq]
+videos/
+site/
+docs/

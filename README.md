@@ -22,6 +22,17 @@ make serve
 - Viewer: **http://localhost:1313/**
 - Studio: **http://localhost:1313/studio/**
 
+`make serve` uses port 1313; run directly, `studio/server.py` defaults to port 8000. It listens on `localhost` only unless you pass `--host 0.0.0.0` (alias `--bind`; `-p` for `--port`).
+
+### Docker
+
+```sh
+make run           # builds the image; mounts raw/ (read-only), exports/ and videos/ from this checkout
+make run-isolated  # no mounts: only the bundled fallback faces, and exports/videos are lost on exit
+```
+
+Both serve at **http://localhost:8000/**. The image includes ffmpeg with `libx264`, so video export works out of the box.
+
 Put original photographs in `raw/`. The server has no Python dependencies. Both the viewer and Studio use the pinned Three.js runtime under `vendor/`, so the complete local design, image export and viewer workflow requires no internet connection. This is a trusted local workstation app, not a public production service.
 
 ## Studio → viewer workflow
@@ -35,7 +46,7 @@ Put original photographs in `raw/`. The server has no Python dependencies. Both 
    ```
 
 4. In the viewer's collapsible menu, **Skybox → Browse exports…** opens a gallery of completed exports with name, timestamp, resolution and a representative face thumbnail.
-5. Load different skyboxes without resetting the camera, animation, geometry or shader. **Default** loads the six images under `skybox/`.
+5. Load different skyboxes without resetting the camera, animation, geometry or shader. **Default** loads the six PNG faces in `raw/` (`px.png`, `nx.png`, …).
 6. **Open in Studio ↗** reopens the selected export's `pipeline.json` for further editing. If another browser draft exists, Studio asks before replacing it. The URL import is consumed once so subsequent refreshes preserve new draft edits, rather than reloading the old export.
 
 The viewer remembers the last successful skybox in this browser. An explicit `skybox` URL overrides the remembered selection. **Lineage JSON ↗** opens the active export's manifest.
@@ -189,7 +200,7 @@ The viewer page and machine must remain active while new frames are being render
 
 ## Data and state
 
-Exports are immutable, uniquely named folders under `exports/`, containing six PNGs, `pipeline.json`, `manifest.json`, optional Info statistics and a small `preview.png` gallery thumbnail. The viewer never overwrites `skybox/` when selecting an export.
+Exports are immutable, uniquely named folders under `exports/`, containing six PNGs, `pipeline.json`, `manifest.json`, optional Info statistics and a small `preview.png` gallery thumbnail. The viewer never overwrites the default faces in `raw/` when selecting an export.
 
 Studio autosaves its workspace and supports JSON snapshots, undo/redo, refresh recovery and a confirmed **Reset workspace**. The **View in Tesseract** link always refers to the last completed export, not unexported draft changes. Browser-local drafts are convenience recovery, not archival backups. Use **Save JSON** and preserve the source photographs.
 
