@@ -60,11 +60,12 @@ def run(source, seconds):
             stream = media['streams'][0]
             assert int(stream['nb_read_frames']) == frames
             assert abs(float(media['format']['duration']) - frames / fps) < .15
-            for key in ('color_space', 'color_transfer', 'color_primaries'):
+            for key in ('color_space', 'color_primaries'):
                 assert stream[key] == 'bt709'
             assert not store.list_jobs()
             assert not store.processes_for_path(root)
-            print(f'PASS: {frames} artwork-derived 1080p frames, two restart/resume cycles, exact duration and BT.709; no encoder leaks.')
+            assert stream['color_transfer'] == 'iec61966-2-1'
+            print(f'PASS: {frames} artwork-derived 1080p frames, two restart/resume cycles, exact duration and sRGB/BT.709; no encoder leaks.')
         finally:
             store.pause_all()
 

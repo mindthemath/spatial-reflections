@@ -91,8 +91,12 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  requests[1].resolve({jobs:[job(signature(),{id:'newer'})]});await newer;
  requests[0].reject(new Error('stale failure'));await oldError;
  assert.deepEqual(list.children.map(card=>card.dataset.jobId),['newer']);
+ context.videoExportDialog.dataset.videoMode='simple';requests=[];
+ await vm.runInContext('loadVideoResumeJobs()',context);
+ assert.equal(requests.length,0);assert.equal(section.hidden,true);
+ context.videoExportDialog.dataset.videoMode='resumable';
  // A server lacking libx264 must still expose existing jobs for management.
- for(const id of ['video-export-range','video-export-start','video-export-duration','video-export-result','video-export-status'])elements.set(id,element());
+ for(const id of ['video-export-range','video-export-start','video-export-duration','video-export-result','video-export-status','cancel-video-export'])elements.set(id,element());
  Object.assign(context,{loopTiming:{frameCount:30},exportFps:30,timelineFrame:0,formatTimeInput:String});
  context.videoExportDialog.showModal=function(){this.open=true;};
  vm.runInContext(source.slice(source.indexOf('async function openVideoExportDialog()'),source.indexOf('function refreshVideoEnvironmentState()')),context);

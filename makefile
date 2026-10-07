@@ -1,9 +1,10 @@
-.PHONY: serve static install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak _test-all _test-browser unstick
+.PHONY: serve static install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser _test-all _test-browser unstick
 
 TEST_GUARD = python3 scripts/test_guard.py
 
+VIDEO_MODE ?= resumable
 serve:
-	python3 studio/server.py --port 1313
+	python3 studio/server.py --port 1313 --video-mode "$(VIDEO_MODE)"
 
 # When localhost:1313 spins and the server logs nothing, stop the wedged process.
 unstick:
@@ -48,7 +49,9 @@ test-fast:
 	node studio/test_lifecycle_test.cjs
 	node studio/test_skybox_hashing.cjs
 	node studio/test_video_resume_ui.cjs
+	node studio/test_drag_drop.cjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
+	python3 -m unittest discover -s studio -p 'test_video_simple.py'
 	cd studio && python3 -m unittest test_server.ServerStartupTest
 	$(MAKE) test-guard
 
@@ -64,10 +67,13 @@ test-video-soak:
 	$(TEST_GUARD) --timeout 7200 -- python3 studio/video_soak.py --source "$(VIDEO_SOAK_SOURCE)" --seconds "$(VIDEO_SOAK_SECONDS)"
 
 test-video-encoder:
-	$(TEST_GUARD) --timeout 90 -- python3 -m unittest studio.test_video_resume studio.test_video_resume_integration
+	$(TEST_GUARD) --timeout 90 -- python3 -m unittest studio.test_video_resume studio.test_video_resume_integration studio.test_video_simple studio.test_video_simple_integration
 
 test-video-capture:
 	$(TEST_GUARD) --timeout 60 -- node studio/test_video_capture.cjs
+
+test-video-simple-browser:
+	$(TEST_GUARD) --network --timeout 180 -- env TESSERACT_TEST_VIDEO_MODE=simple node studio/test_browser.cjs
 
 test-browser:
 	$(TEST_GUARD) --network --timeout 360 -- $(MAKE) _test-browser
@@ -75,3 +81,4 @@ test-browser:
 _test-browser:
 	$(MAKE) test-video-capture
 	node studio/test_browser.cjs
+	$(MAKE) test-video-simple-browser

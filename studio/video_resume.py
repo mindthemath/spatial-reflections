@@ -16,6 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+if __package__:
+    from .video_color import COLOR_PROFILE, browser_video_color_args
+else:
+    from video_color import COLOR_PROFILE, browser_video_color_args
+
+
 SCHEMA_VERSION = 1
 SEGMENT_NAME = re.compile(r'segment-(\d{6})\.mkv')
 _SYSTEM_RUN = subprocess.run
@@ -412,7 +418,7 @@ class VideoJobStore:
             'frames': frames,
             'checkpointSeconds': checkpoint_seconds,
             'scratchPath': str(scratch_base),
-            'colorProfile': 'bt709-limited-v1',
+            'colorProfile': COLOR_PROFILE,
         }
         job = {
             'schemaVersion': SCHEMA_VERSION,
@@ -694,6 +700,8 @@ class VideoJobStore:
                 self._save(manifest, job)
                 result = self._public(manifest, job)
                 result['lease'] = lease
+                with self.lock:
+                    self.leases[job_id]['lastActivity'] = self.clock()
                 return result
             except Exception:
                 with self.lock:
@@ -769,12 +777,22 @@ class VideoJobStore:
                     if failed:
                         self._request_idle_recovery(job_id)
 
-    def pause(self, job_id, reason=None, lease=None):
+    def pause(self, job_id, reason=None, lease=None, *, _idle_before=None):
         with self.lock:
             active_lease = self.leases.get(job_id)
             if lease is not None and (not active_lease or active_lease['token'] != lease):
                 raise ValueError('Video export lease is no longer active')
         with self.stop_lock:
+            if _idle_before is not None:
+                # Recheck and reserve atomically: finish/resume may have started
+                # after the timer collected candidates. Explicit pause still
+                # deliberately cancels a finalizer.
+                if job_id in self.finishing or job_id in self.stopping:
+                    return None
+                with self.lock:
+                    current = self.leases.get(job_id)
+                    if not current or current['lastActivity'] > _idle_before:
+                        return None
             if job_id in self.stopping:
                 raise ValueError('Video export is already stopping')
             self.stopping.add(job_id)
@@ -818,11 +836,13 @@ class VideoJobStore:
             raise ValueError(
                 f'Not enough scratch space for the next checkpoint ({free_bytes:,} bytes free)'
             )
-        # Existing jobs without a profile keep their original conversion. Mixing
-        # old untagged checkpoints with new BT.709 checkpoints would change color
-        # mid-video and concat would advertise only the first segment's metadata.
+        # Preserve each job's pinned transfer/range policy, including older
+        # BT.709 and untagged profiles. Concat advertises the first segment's
+        # metadata, so changing policy during resume would mislabel later frames.
         color_args = []
-        if request.get('colorProfile') == 'bt709-limited-v1':
+        if request.get('colorProfile') == COLOR_PROFILE:
+            color_args = browser_video_color_args()
+        elif request.get('colorProfile') == 'bt709-limited-v1':
             color_args = [
                 '-vf', ('scale=in_range=pc:out_range=tv:out_color_matrix=bt709,'
                         'setparams=range=limited:color_primaries=bt709:'
@@ -1107,17 +1127,21 @@ class VideoJobStore:
 
     def pause_stale_jobs(self, now=None):
         current = self.clock() if now is None else float(now)
-        with self.lock:
+        with self.stop_lock, self.lock:
             stale = [
                 job_id for job_id, lease in self.leases.items()
                 if current - lease['lastActivity'] >= self.idle_timeout
+                and job_id not in self.finishing and job_id not in self.stopping
             ]
+        paused = []
         for job_id in stale:
             try:
-                self.pause(job_id, 'Export paused after five minutes without a frame')
+                if self.pause(job_id, 'Export paused after five minutes without a frame',
+                              _idle_before=current - self.idle_timeout) is not None:
+                    paused.append(job_id)
             except Exception:
                 pass
-        return stale
+        return paused
 
     def pause_all(self):
         with self.lock:
