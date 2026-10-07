@@ -46,7 +46,7 @@ Put original photographs in `raw/`. The server has no Python dependencies. Both 
    ```
 
 4. In the viewer's collapsible menu, **Skybox → Browse exports…** opens a gallery of completed exports with name, timestamp, resolution and a representative face thumbnail.
-5. Load different skyboxes without resetting the camera, animation, geometry or shader. **Default** loads the six images under `skybox/`.
+5. Load different skyboxes without resetting the camera, animation, geometry or shader. **Default** loads the six PNG faces in `raw/` (`px.png`, `nx.png`, …).
 6. **Open in Studio ↗** reopens the selected export's `pipeline.json` for further editing. If another browser draft exists, Studio asks before replacing it. The URL import is consumed once so subsequent refreshes preserve new draft edits, rather than reloading the old export.
 
 The viewer remembers the last successful skybox in this browser. An explicit `skybox` URL overrides the remembered selection. **Lineage JSON ↗** opens the active export's manifest.
@@ -200,7 +200,7 @@ The viewer page and machine must remain active while new frames are being render
 
 ## Data and state
 
-Exports are immutable, uniquely named folders under `exports/`, containing six PNGs, `pipeline.json`, `manifest.json`, optional Info statistics and a small `preview.png` gallery thumbnail. The viewer never overwrites `skybox/` when selecting an export.
+Exports are immutable, uniquely named folders under `exports/`, containing six PNGs, `pipeline.json`, `manifest.json`, optional Info statistics and a small `preview.png` gallery thumbnail. The viewer never overwrites the default faces in `raw/` when selecting an export.
 
 Studio autosaves its workspace and supports JSON snapshots, undo/redo, refresh recovery and a confirmed **Reset workspace**. The **View in Tesseract** link always refers to the last completed export, not unexported draft changes. Browser-local drafts are convenience recovery, not archival backups. Use **Save JSON** and preserve the source photographs.
 
