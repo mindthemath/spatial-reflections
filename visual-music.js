@@ -446,11 +446,12 @@ class SpatialMusicEngine {
         });
     }
 
-    async renderOffline({duration, startFrame, fps, featureFrames}) {
+    async renderOffline({duration, startFrame, fps, featureFrames, onProgress = null, signal = null}) {
         const sampleRate = 48000;
         const sampleCount = Math.round(duration * sampleRate);
         const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
         if (!OfflineContext) throw new Error('This browser cannot render an offline soundtrack');
+        signal?.throwIfAborted();
         const context = new OfflineContext(2, sampleCount, sampleRate);
         const offline = new SpatialMusicEngine(null, () => {}, this.settings);
         offline.settings = normalizeSettings({...this.settings, enabled: true});
@@ -462,46 +463,84 @@ class SpatialMusicEngine {
         const finalStep = Math.floor((absoluteStart + duration - 1 / sampleRate) / secondsPerStep);
         offline.lastStep = firstStep;
         offline.rebuildSustains();
-        featureFrames.forEach((features, featureIndex) => {
-            const at = Math.min(duration, featureIndex / 8);
-            const influence = offline.settings.influence;
-            const luminance = lerp(.24, features.luminance, influence);
-            const contrast = lerp(.18, features.contrast, influence);
-            const edge = lerp(.12, features.edge, influence);
-            const centroidX = lerp(.5, features.centroidX, influence);
-            for (const voice of offline.sustains) {
-                const cutoff = 160 + voice.index * 250 + luminance * 1800 + edge * 900;
-                const gain = (.025 + luminance * .018) * offline.settings.layers.drone / (1 + voice.index * .22);
-                const schedule = (parameter, value) => featureIndex
-                    ? parameter.linearRampToValueAtTime(value, at)
-                    : parameter.setValueAtTime(value, 0);
-                schedule(voice.filter.frequency, cutoff);
-                schedule(voice.filter.Q, .65 + contrast * (2 + voice.index));
-                schedule(voice.gain.gain, Math.max(.0001, gain));
-                voice.oscillators.forEach((oscillator, partial) => schedule(
-                    oscillator.detune, (centroidX - .5) * (partial - 1) * 13));
-            }
-        });
+
+        // Scheduling the whole score up front stalls long exports: every note
+        // node and automation event exists before rendering starts, with no
+        // progress or cancellation until startRendering() resolves. Instead,
+        // schedule a window ahead of the render and suspend between windows.
+        const windowSeconds = 10;
+        const lookahead = 2;
+        let nextFeature = 0;
+        let nextStep = firstStep;
         let previous = null;
-        for (let step = firstStep; step <= finalStep; step++) {
-            const eventTime = Math.max(0, step * secondsPerStep - absoluteStart);
-            const featureIndex = Math.min(featureFrames.length - 1, Math.max(0, Math.floor(eventTime * 8)));
-            offline.features = featureFrames[featureIndex] || offline.features;
-            const score = compositionAt({seed: offline.settings.seed, step, settings: offline.settings, features: offline.features});
-            if (!previous || previous.bar !== score.bar) offline.playHarmonicField(score, eventTime);
-            if (score.pulse) offline.playUndertow(score, eventTime);
-            if (score.bell) offline.playBell(score, eventTime);
-            if (score.metal) offline.playMetal(score, eventTime);
-            if (score.texture) offline.playTexture(score, eventTime);
-            if (score.upper) offline.playShimmer(score, eventTime);
-            previous = score;
-        }
+        const scheduleUntil = horizon => {
+            for (; nextFeature < featureFrames.length && nextFeature / 8 < horizon; nextFeature++) {
+                const features = featureFrames[nextFeature];
+                const at = Math.min(duration, nextFeature / 8);
+                const influence = offline.settings.influence;
+                const luminance = lerp(.24, features.luminance, influence);
+                const contrast = lerp(.18, features.contrast, influence);
+                const edge = lerp(.12, features.edge, influence);
+                const centroidX = lerp(.5, features.centroidX, influence);
+                for (const voice of offline.sustains) {
+                    const cutoff = 160 + voice.index * 250 + luminance * 1800 + edge * 900;
+                    const gain = (.025 + luminance * .018) * offline.settings.layers.drone / (1 + voice.index * .22);
+                    const schedule = (parameter, value) => nextFeature
+                        ? parameter.linearRampToValueAtTime(value, at)
+                        : parameter.setValueAtTime(value, 0);
+                    schedule(voice.filter.frequency, cutoff);
+                    schedule(voice.filter.Q, .65 + contrast * (2 + voice.index));
+                    schedule(voice.gain.gain, Math.max(.0001, gain));
+                    voice.oscillators.forEach((oscillator, partial) => schedule(
+                        oscillator.detune, (centroidX - .5) * (partial - 1) * 13));
+                }
+            }
+            for (; nextStep <= finalStep; nextStep++) {
+                const eventTime = Math.max(0, nextStep * secondsPerStep - absoluteStart);
+                if (eventTime >= horizon) break;
+                const featureIndex = Math.min(featureFrames.length - 1, Math.max(0, Math.floor(eventTime * 8)));
+                offline.features = featureFrames[featureIndex] || offline.features;
+                const score = compositionAt({seed: offline.settings.seed, step: nextStep, settings: offline.settings, features: offline.features});
+                if (!previous || previous.bar !== score.bar) offline.playHarmonicField(score, eventTime);
+                if (score.pulse) offline.playUndertow(score, eventTime);
+                if (score.bell) offline.playBell(score, eventTime);
+                if (score.metal) offline.playMetal(score, eventTime);
+                if (score.texture) offline.playTexture(score, eventTime);
+                if (score.upper) offline.playShimmer(score, eventTime);
+                previous = score;
+            }
+        };
+        scheduleUntil(windowSeconds + lookahead);
         // A very short deterministic edge fade prevents PCM clicks for clips.
         const master = offline.nodes.master.gain;
         const fadeStart = Math.max(0, duration - .025);
         master.setValueAtTime(dbGain(-15 + offline.settings.level * 11), fadeStart);
         master.linearRampToValueAtTime(0, duration);
-        return context.startRendering();
+
+        let aborted = null;
+        for (let at = windowSeconds; at < duration; at += windowSeconds) {
+            context.suspend(at).then(async () => {
+                onProgress?.(at / duration);
+                // Let the page paint progress and handle a cancel click.
+                await new Promise(resolve => setTimeout(resolve, 0));
+                if (signal?.aborted) {
+                    // Never resumed, so the render promise stays pending; the
+                    // abort listener below rejects for it and the context is
+                    // dropped for garbage collection.
+                    aborted?.(signal.reason);
+                    return;
+                }
+                scheduleUntil(at + windowSeconds + lookahead);
+                context.resume();
+            });
+        }
+        const rendered = await new Promise((resolve, reject) => {
+            aborted = reject;
+            signal?.addEventListener('abort', () => reject(signal.reason), {once: true});
+            context.startRendering().then(resolve, reject);
+        });
+        onProgress?.(1);
+        return rendered;
     }
 
     applyPreset(name) {
@@ -683,7 +722,7 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
         tick: state => engine.tick(state),
         get settings() { return structuredClone(engine.settings); },
         setSettings: applySettings,
-        async prepareExport({startFrame, frames, fps, samplePixels, onProgress = null}) {
+        async prepareExport({startFrame, frames, fps, samplePixels, onProgress = null, signal = null}) {
             if (!engine.settings.enabled) return null;
             const duration = frames / fps;
             if (duration > 900) throw new Error('Generative soundtrack exports are currently limited to 15 minutes');
@@ -691,6 +730,7 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
             let previousLuma = null;
             const analysisFrames = Math.max(1, Math.ceil(duration * 8));
             for (let index = 0; index < analysisFrames; index++) {
+                signal?.throwIfAborted();
                 const frame = startFrame + Math.min(frames - 1, Math.round(index * fps / 8));
                 const pixels = await samplePixels(frame);
                 const analysis = analyzeRGBA(pixels.data, pixels.width, pixels.height, previousLuma);
@@ -705,8 +745,11 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
             const scoreDocument = JSON.stringify({schema: 'spatial-reflections-music-v1', settings, startFrame, frames, fps, featureFrames});
             const scoreHash = await sha256(scoreDocument);
             onProgress?.({phase: 'synthesize', progress: 0});
-            const rendered = await engine.renderOffline({duration, startFrame, fps, featureFrames});
+            const rendered = await engine.renderOffline({duration, startFrame, fps, featureFrames, signal,
+                onProgress: progress => onProgress?.({phase: 'synthesize', progress})});
+            signal?.throwIfAborted();
             const wav = await audioBufferWav(rendered, progress => onProgress?.({phase: 'encode', progress}));
+            signal?.throwIfAborted();
             return {
                 wav,
                 metadata: {

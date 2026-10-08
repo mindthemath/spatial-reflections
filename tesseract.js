@@ -2231,6 +2231,7 @@ async function prepareMusicExport(plan, status) {
             startFrame: plan.startFrame,
             frames: plan.frames,
             fps: exportFps,
+            signal: videoExportAbort.signal,
             samplePixels: async frame => {
                 setTimelineFrame(frame);
                 updateTesseractProjection();
@@ -2543,6 +2544,11 @@ async function runVideoExport(plan, resumableJob = null) {
         if (videoExportStopAction === 'discard' && !stopError) {
             videoExportDialog.dataset.statusMode = 'cancelled';
             status.textContent = 'Export cancelled and discarded.';
+            status.classList.remove('error');
+        } else if (videoExportStopAction && !stopError && !hadJob) {
+            // Stopped while preparing the soundtrack, before the server job existed.
+            videoExportDialog.dataset.statusMode = 'cancelled';
+            status.textContent = 'Export cancelled.';
             status.classList.remove('error');
         } else if (videoExportStopAction === 'pause' && !stopError && hadJob) {
             videoExportDialog.dataset.statusMode = 'paused';
