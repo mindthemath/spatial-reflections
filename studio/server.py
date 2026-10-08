@@ -160,6 +160,17 @@ def publish_work(request):
     if not isinstance(state, dict):
         raise ValueError('Viewer state is required')
     folder, manifest = completed_export(request.get('exportFolder'))
+    asset_size = request.get('assetSize', 'original')
+    asset_format = request.get('assetFormat', 'png')
+    asset_quality = float(request.get('assetQuality', 0.88))
+    if asset_size != 'original':
+        try: asset_size = int(asset_size)
+        except (TypeError, ValueError): raise ValueError('Invalid published image size')
+        if asset_size not in (2048, 4096): raise ValueError('Invalid published image size')
+    if asset_format not in ('png', 'jpg'): raise ValueError('Invalid published image format')
+    if not 0.5 <= asset_quality <= 1: raise ValueError('JPEG quality must be between 0.50 and 1.00')
+    source_size = manifest.get('pipeline', {}).get('size')
+    published_size = source_size if asset_size == 'original' else min(source_size or asset_size, asset_size)
     required = [ROOT / name for name in ('index.html', 'tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js',
                                           'visual-music.js', 'visual-music-core.js')]
     vendor = ROOT / 'vendor'
@@ -176,8 +187,22 @@ def publish_work(request):
     temporary.mkdir()
     try:
         (temporary / 'skybox').mkdir()
+        skybox_files = {}
         for face in FACES:
-            shutil.copy2(folder / f'{face}.png', temporary / 'skybox' / f'{face}.png')
+            source = folder / manifest['outputs'][face]['file']
+            extension = 'png' if asset_format == 'png' else 'jpg'
+            target = temporary / 'skybox' / f'{face}.{extension}'
+            if asset_size == 'original' and asset_format == 'png':
+                shutil.copy2(source, target)
+            else:
+                scale = 'iw' if asset_size == 'original' else str(asset_size)
+                quality = max(2, min(31, round(31 - 29 * asset_quality)))
+                command = ['ffmpeg', '-y', '-loglevel', 'error', '-i', str(source), '-vf', f'scale={scale}:{scale}:force_original_aspect_ratio=decrease']
+                if extension == 'jpg': command += ['-q:v', str(quality)]
+                command += [str(target)]
+                try: subprocess.run(command, check=True, capture_output=True, text=True)
+                except (OSError, subprocess.CalledProcessError) as error: raise ValueError(f'Could not encode published face: {face}') from error
+            skybox_files[face] = f'skybox/{target.name}'
         preview = folder / 'preview.png'
         shutil.copy2(preview if preview.is_file() else folder / 'px.png', temporary / 'preview.png')
         for source in required[1:]:
@@ -185,8 +210,8 @@ def publish_work(request):
         shutil.copytree(vendor, temporary / 'vendor')
         published_at = datetime.now(timezone.utc).isoformat()
         piece = {'schemaVersion': 1, 'slug': slug, 'title': title, 'description': description,
-                 'publishedAt': published_at, 'size': manifest.get('pipeline', {}).get('size'),
-                 'skybox': {face: f'skybox/{face}.png' for face in FACES}, 'viewer': state,
+                 'publishedAt': published_at, 'size': published_size,
+                 'skybox': skybox_files, 'viewer': state,
                  'source': {'export': folder.relative_to(ROOT.resolve()).as_posix(),
                             'manifestSha256': hash_file(folder / 'manifest.json')}}
         html = required[0].read_text()

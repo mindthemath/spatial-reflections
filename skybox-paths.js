@@ -6,7 +6,7 @@ export function normalizeExportFolder(value) {
     return `exports/${match[1]}`;
 }
 export function exportFileURL(folder,file) {
-    if(!/^(?:px|nx|py|ny|pz|nz|preview)\.png$|^(?:manifest|pipeline)\.json$/.test(file))throw new Error('Invalid export file');
+    if(!/^(?:px|nx|py|ny|pz|nz)\.(?:png|jpe?g)$|^preview\.png$|^(?:manifest|pipeline)\.json$/.test(file))throw new Error('Invalid export file');
     return `/${normalizeExportFolder(folder)}/${file}`;
 }
 export function viewerURL(folder) {

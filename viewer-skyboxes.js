@@ -69,7 +69,7 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
         const status=section.querySelector('#skybox-status');onTexture(diagnosticTexture());setRenderState(false,null);
         (async()=>{
             try{
-                if(!publication.skybox||!FACES.every(face=>publication.skybox[face]===`skybox/${face}.png`))throw new Error('Published skybox configuration is invalid');
+                if(!publication.skybox||!FACES.every(face=>typeof publication.skybox[face]==='string'&&new RegExp(`^skybox/${face}\\.(?:png|jpe?g)$`).test(publication.skybox[face])))throw new Error('Published skybox configuration is invalid');
                 const assets=await Promise.all(FACES.map(face=>loadImageAsset(publication.skybox[face],{requireHash:false})));
                 const {texture,side,displaySide}=textureFromImages(assets.map(asset=>asset.image),renderer,publication.size??null);onTexture(texture);
                 setRenderState(true,assets.every(asset=>asset.sha256)?JSON.stringify({kind:'published',slug:publication.slug||'',manifestSha256:publication.source?.manifestSha256||null,faces:Object.fromEntries(FACES.map((face,index)=>[face,assets[index].sha256]))}):null);
@@ -86,7 +86,7 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
     dialog.innerHTML=`<div class="library-heading"><strong>SKYBOX / EXPORT LIBRARY</strong><button id="refresh-skyboxes" type="button">Refresh</button><button id="close-skyboxes" type="button">Close</button></div><p>Completed Studio exports. Loading changes only the environment—not your camera, animation or shader.</p><p id="skybox-library-status" role="status"></p><div id="skybox-export-list"></div>`;
     document.body.append(dialog);
     const publishDialog=document.createElement('dialog');publishDialog.id='publish-skybox-dialog';
-    publishDialog.innerHTML=`<form id="publish-skybox-form"><div class="library-heading"><strong>PUBLISH STATIC WORK</strong><button id="close-publish" type="button">Close</button></div><p>Snapshot this export, the current viewer settings, and this version of the runtime into <code>site/work/&lt;slug&gt;/</code>.</p><label>Title<input id="publish-title" required maxlength="100"></label><label>URL slug<input id="publish-slug" required maxlength="60" pattern="[a-z0-9]+(?:-[a-z0-9]+)*"></label><label>Description<textarea id="publish-description" maxlength="1000"></textarea></label><div class="skybox-actions"><button id="confirm-publish" type="submit">Publish snapshot</button></div><p id="publish-result" role="status"></p></form>`;
+    publishDialog.innerHTML=`<form id="publish-skybox-form"><div class="library-heading"><strong>PUBLISH STATIC WORK</strong><button id="close-publish" type="button">Close</button></div><p>Snapshot this export, the current viewer settings, and this version of the runtime into <code>site/work/&lt;slug&gt;/</code>.</p><label>Title<input id="publish-title" required maxlength="100"></label><label>URL slug<input id="publish-slug" required maxlength="60" pattern="[a-z0-9]+(?:-[a-z0-9]+)*"></label><label>Description<textarea id="publish-description" maxlength="1000"></textarea></label><label>Maximum image size<select id="publish-size"><option value="4096" selected>4096 px</option><option value="2048">2048 px</option><option value="original">Original resolution</option></select></label><label>Format<select id="publish-format"><option value="jpg" selected>JPEG</option><option value="png">PNG</option></select></label><label>JPEG quality <output id="publish-quality-value">0.88</output><input id="publish-quality" type="range" min="0.50" max="1" step="0.01" value="0.88"></label><div class="skybox-actions"><button id="confirm-publish" type="submit">Publish snapshot</button></div><p id="publish-result" role="status"></p></form>`;
     document.body.append(publishDialog);
     const $=id=>document.getElementById(id);
     let active=null,activeName='',entries=[],requestId=0;
@@ -169,10 +169,12 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
     $('close-publish').onclick=()=>publishDialog.close();
     $('publish-title').oninput=()=>{if(!$('publish-slug').dataset.edited)$('publish-slug').value=slugify($('publish-title').value);};
     $('publish-slug').oninput=()=>{$('publish-slug').dataset.edited='yes';};
+    $('publish-quality').oninput=()=>{$('publish-quality-value').value=Number($('publish-quality').value).toFixed(2);};
+    $('publish-format').onchange=()=>{$('publish-quality').disabled=$('publish-format').value!=='jpg';};
     $('publish-skybox-form').onsubmit=async event=>{
         event.preventDefault();const button=$('confirm-publish'),result=$('publish-result');button.disabled=true;result.textContent='Publishing snapshot…';result.classList.remove('error');
         try{
-            const response=await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('publish-title').value,slug:$('publish-slug').value,description:$('publish-description').value,exportFolder:active,viewerState:getViewerState()})});
+            const response=await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('publish-title').value,slug:$('publish-slug').value,description:$('publish-description').value,exportFolder:active,viewerState:getViewerState(),assetSize:$('publish-size').value,assetFormat:$('publish-format').value,assetQuality:Number($('publish-quality').value)})});
             const value=await response.json();if(!response.ok)throw new Error(value.error||'Publish failed');
             result.replaceChildren(document.createTextNode('Published: '));const link=document.createElement('a');link.href=value.url;link.textContent=value.url;link.target='_blank';link.rel='noopener';result.append(link);
         }catch(error){result.textContent=error.message;result.classList.add('error');}finally{button.disabled=false;}
