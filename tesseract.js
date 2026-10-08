@@ -182,6 +182,9 @@ function applyViewerSettings(saved) {
 function loadViewerSettings() {
     if (publication?.schemaVersion === 1) {
         applyViewerSettings(publication.viewer);
+        // Published work opens as artwork first; controls remain available
+        // behind the small corner button.
+        panelExpanded = false;
         return;
     }
     try {
@@ -1455,29 +1458,54 @@ function createControls() {
 
     const panelToggle = document.createElement('button');
     panelToggle.type = 'button';
-    panelToggle.textContent = '▾ Controls';
-    panelContent.hidden = !panelExpanded;
-    panelToggle.setAttribute('aria-expanded', String(panelExpanded));
     panelToggle.setAttribute('aria-controls', panelContent.id);
-    Object.assign(panelToggle.style, {
-        width: '100%',
-        background: 'transparent',
-        color: 'inherit',
-        border: 'none',
-        padding: '0',
-        textAlign: 'left',
-        font: 'inherit',
-        fontWeight: 'bold',
-        cursor: 'pointer',
-        marginBottom: panelExpanded ? '10px' : '0'
-    });
-    panelToggle.textContent = panelExpanded ? '▾ Controls' : '▸ Controls';
-    panelToggle.addEventListener('click', () => {
-        panelContent.hidden = !panelContent.hidden;
-        panelExpanded = !panelContent.hidden;
+    const updatePanelAppearance = () => {
+        panelContent.hidden = !panelExpanded;
         panelToggle.setAttribute('aria-expanded', String(panelExpanded));
-        panelToggle.textContent = panelExpanded ? '▾ Controls' : '▸ Controls';
-        panelToggle.style.marginBottom = panelExpanded ? '10px' : '0';
+        panelToggle.setAttribute('aria-label', panelExpanded ? 'Collapse controls' : 'Open controls');
+        panelToggle.title = panelExpanded ? 'Collapse controls' : 'Open controls';
+        panelToggle.textContent = panelExpanded ? '▾ Controls' : '⚙︎';
+        Object.assign(controlPanel.style, panelExpanded ? {
+            width: 'min(290px, calc(100vw - 20px))',
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            padding: '10px',
+            overflowY: 'auto'
+        } : {
+            width: '30px',
+            backgroundColor: 'transparent',
+            padding: '0',
+            overflowY: 'hidden'
+        });
+        Object.assign(panelToggle.style, panelExpanded ? {
+            width: '100%',
+            height: 'auto',
+            background: 'transparent',
+            color: 'inherit',
+            border: 'none',
+            padding: '0',
+            textAlign: 'left',
+            font: 'inherit',
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            marginBottom: '10px'
+        } : {
+            width: '30px',
+            height: '30px',
+            background: 'rgba(0, 0, 0, 0.18)',
+            color: 'rgba(255, 255, 255, 0.68)',
+            border: '1px solid rgba(255, 255, 255, 0.16)',
+            padding: '0',
+            textAlign: 'center',
+            font: '16px/28px Arial, sans-serif',
+            fontWeight: 'normal',
+            cursor: 'pointer',
+            marginBottom: '0'
+        });
+    };
+    updatePanelAppearance();
+    panelToggle.addEventListener('click', () => {
+        panelExpanded = !panelExpanded;
+        updatePanelAppearance();
         persistViewerSettings();
     });
     controlPanel.append(panelToggle, panelContent);

@@ -108,6 +108,12 @@ finally:
   }
   const broken=path.join(root,'exports','broken-fixture');fs.cpSync(path.join(root,'exports',folder),broken,{recursive:true});
   const badManifest=JSON.parse(JSON.stringify(manifest));badManifest.pipeline.name='Broken fixture';fs.writeFileSync(path.join(broken,'manifest.json'),JSON.stringify(badManifest));fs.writeFileSync(path.join(broken,'px.png'),'not a PNG');
+  const publishedPiece={schemaVersion:1,slug:'published-test',title:'Published test',size:512,skybox:Object.fromEntries(['px','nx','py','ny','pz','nz'].map(face=>[face,`skybox/${face}.png`])),viewer:{panelExpanded:true,animationPaused:true}};
+  const publishedHTML=fs.readFileSync(path.join(root,'index.html'),'utf8').replace('<script id="piece-config" type="application/json"></script>',`<script id="piece-config" type="application/json">${JSON.stringify(publishedPiece)}</script>`);
+  fs.writeFileSync(path.join(root,'published.html'),publishedHTML);
+  const published=await page.context().newPage();published.on('pageerror',e=>errors.push(e.message));await published.goto(`http://localhost:${port}/published.html`);await published.waitForSelector('#controlPanel');
+  assert(await published.locator('#controlPanelContent').isHidden());assert.equal(await published.locator('#controlPanel > button').getAttribute('aria-label'),'Open controls');
+  assert((await published.locator('#controlPanel').boundingBox()).width<=31);await published.locator('#controlPanel > button').click();assert(await published.locator('#controlPanelContent').isVisible());await published.close();
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
