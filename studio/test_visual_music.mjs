@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {MUSIC_SCHEMA, PRESETS, analyzeRGBA, compositionAt, random01} from '../visual-music-core.js';
 
 assert.deepEqual(PRESETS.abyssdrive, {
-    label: 'Abyss drive', level: 1, density: 1, tension: .88, influence: .87,
+    label: 'Abyss drive', level: 1, density: .33, tension: .88, influence: .87,
     space: .30, tempo: 88, seed: 1701,
     layers: {drone: 1, field: 0, bells: .99, pulse: .96, metal: .11, texture: .07}
 });
