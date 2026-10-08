@@ -24,6 +24,7 @@ run: build
 		-v $$(pwd)/raw:/app/raw:ro \
 		-v $$(pwd)/exports:/app/exports:rw \
 		-v $$(pwd)/videos:/app/videos:rw \
+		-v $$(pwd)/site:/app/site:rw \
 		spatial-reflections
 
 # No bind mounts: only the baked-in fallback PNGs, and exports/videos vanish with the container.
