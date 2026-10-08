@@ -49,6 +49,9 @@ let lightDistance = 0.1;
 // UI elements
 let controlPanel;
 let showVertices = false;
+// Chrome's per-pixel grain re-randomizes as the projection moves, so every
+// frame carries fresh noise that dominates video bitrate.
+let surfaceGrain = true;
 let showOverlay = true;
 let cameraInfoDisplay;
 let motionStepSlider;
@@ -92,6 +95,7 @@ function viewerSettings() {
         lighting: currentLighting,
         lightDistance,
         showVertices,
+        surfaceGrain,
         animationPaused,
         exportFps,
         videoExportWidth,
@@ -131,6 +135,7 @@ function applyViewerSettings(saved) {
     }
     if (['draft', 'standard', 'high', 'master'].includes(saved.videoExportQuality)) videoExportQuality = saved.videoExportQuality;
     if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
+    if (typeof saved.surfaceGrain === 'boolean') surfaceGrain = saved.surfaceGrain;
     if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
     if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
     if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
@@ -851,6 +856,27 @@ function createControls() {
     vertexToggle.appendChild(vertexCheckbox);
     vertexToggle.appendChild(vertexLabel);
     controlPanel.appendChild(vertexToggle);
+
+    const grainToggle = document.createElement('div');
+    grainToggle.style.marginBottom = '10px';
+    const grainCheckbox = document.createElement('input');
+    grainCheckbox.type = 'checkbox';
+    grainCheckbox.id = 'grainToggle';
+    grainCheckbox.checked = surfaceGrain;
+    grainCheckbox.addEventListener('change', function() {
+        surfaceGrain = this.checked;
+        faces.forEach(face => {
+            if (face.material?.uniforms?.surfaceGrain) face.material.uniforms.surfaceGrain.value = surfaceGrain ? 1 : 0;
+        });
+    });
+    const grainLabel = document.createElement('label');
+    grainLabel.htmlFor = 'grainToggle';
+    grainLabel.textContent = 'Chrome surface grain';
+    grainLabel.title = 'Shimmering per-frame grain; turning it off makes video exports far smaller';
+    grainLabel.style.marginLeft = '5px';
+    grainToggle.appendChild(grainCheckbox);
+    grainToggle.appendChild(grainLabel);
+    controlPanel.appendChild(grainToggle);
     
     const shapeLabel = document.createElement('label');
     shapeLabel.textContent = '4D shape: ';
@@ -1434,6 +1460,8 @@ function syncViewerControlsFromState() {
     if (distanceLabel) distanceLabel.textContent = `Light Distance: ${lightDistance.toFixed(1)}`;
     const vertexToggle = document.getElementById('vertexToggle');
     if (vertexToggle) vertexToggle.checked = showVertices;
+    const grainToggle = document.getElementById('grainToggle');
+    if (grainToggle) grainToggle.checked = surfaceGrain;
     if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
     const resolution = document.getElementById('video-export-resolution');
     if (resolution) resolution.value = `${videoExportWidth}x${videoExportHeight}`;
@@ -1632,6 +1660,8 @@ function videoRenderSignature() {
         lighting: currentLighting,
         lightDistance,
         showVertices,
+        // Omitted when on so signatures from before the toggle stay valid.
+        ...(surfaceGrain ? {} : {surfaceGrain}),
         camera: {
             position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
@@ -2846,7 +2876,8 @@ function createShaderMaterial() {
     
     const uniforms = {
         lightingType: { value: lightingTypeInt },
-        lightDistance: { value: lightDistance }
+        lightDistance: { value: lightDistance },
+        surfaceGrain: { value: surfaceGrain ? 1 : 0 }
     };
     
     // Add environment map for chrome shader
@@ -3014,6 +3045,7 @@ function createChromeShader() {
     return `
         uniform int lightingType;
         uniform float lightDistance;
+        uniform float surfaceGrain;
         uniform samplerCube envMap;
         varying vec3 vNormal;
         varying vec3 vPosition;
@@ -3042,7 +3074,7 @@ function createChromeShader() {
             float fresnelFactor = fresnel(viewDir, normal, 5.0);
             
             // Add subtle noise for surface imperfection
-            float noisePattern = random(vPosition.xy * 20.0) * 0.05;
+            float noisePattern = random(vPosition.xy * 20.0) * 0.05 * surfaceGrain;
             
             // Chrome color - mix environment map with base chrome color
             vec3 chromeColor = mix(
@@ -3444,6 +3476,7 @@ function installViewerAPI() {
         rotationSpeed: { min: 0, max: 0.01, step: 0.001 },
         rotationCoefficients: { axes: ['xw', 'yw', 'zw'], min: -1, max: 1, step: 0.05 },
         showVertices: { type: 'boolean' },
+        surfaceGrain: { type: 'boolean', note: 'chrome shader only' },
         exportFps: { values: [24, 25, 30, 50, 60] },
         animationPaused: { type: 'boolean' },
         timelineFrame: { type: 'integer', note: 'wraps around the loop length' },
@@ -3496,6 +3529,13 @@ function installViewerAPI() {
                 case 'showVertices': {
                     require(typeof value === 'boolean', 'showVertices must be true or false');
                     const checkbox = document.getElementById('vertexToggle');
+                    checkbox.checked = value;
+                    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+                case 'surfaceGrain': {
+                    require(typeof value === 'boolean', 'surfaceGrain must be true or false');
+                    const checkbox = document.getElementById('grainToggle');
                     checkbox.checked = value;
                     checkbox.dispatchEvent(new Event('change', { bubbles: true }));
                     break;
