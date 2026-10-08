@@ -16,7 +16,7 @@ let state=createWorkspace();
 const STORAGE_KEY='skybox-studio.workspace.v2';
 let recovered=null,recoveryError=null,draftTimer;
 try{const text=localStorage.getItem(STORAGE_KEY);if(text){recovered=JSON.parse(text);state=validate(migrate(recovered.pipeline));}}catch(error){recoveryError=error.message;recovered=null;}
-let library=[],selected=null,selectedEdge=null,pending=null,wireDrag=null,generation=0,analysis=new Map(),timer,exporting=false,resolutionProfile=null;
+let renderedGeneration=0,library=[],selected=null,selectedEdge=null,pending=null,wireDrag=null,generation=0,analysis=new Map(),timer,exporting=false,resolutionProfile=null;
 let latestExport=recovered?.latestExport||null;
 let selectedNodes=new Set((Array.isArray(recovered?.selection)?recovered.selection:[]).filter(id=>state.nodes.some(n=>n.id===id))),history=[clone(state)],historyIndex=0;
 selected=selectedNodes.has(recovered?.selectedId)?recovered.selectedId:[...selectedNodes].at(-1)||null;
@@ -66,27 +66,27 @@ async function refreshLibrary(){
     library=(await response.json()).images;$('library').replaceChildren();
     for(const source of library){
         const button=document.createElement('button');button.className='photo';
-        const img=document.createElement('img');img.src=url(source.path);img.loading='lazy';
+        const img=document.createElement('img');img.src=url(source.path);img.loading='lazy';img.alt='';
         const label=document.createElement('span');label.textContent=source.path.slice(4);button.append(img,label);button.onclick=()=>addNode('source',source);$('library').append(button);
     }
     if(!library.length)$('library').textContent='No images yet. Add photos to raw/, then refresh.';
     status(`${library.length} source images available.`);
 }
-function addNode(type,source){
-    if(state.nodes.length>=300){status('Node limit reached (300). Remove or consolidate nodes before adding more.',true);return;}
+function addNode(type,source,{x,y,settings}={}){
+    if(state.nodes.length>=300){status('Node limit reached (300). Remove or consolidate nodes before adding more.',true);return null;}
     const count=state.nodes.filter(n=>n.type===type).length;
-    const node={id:uid(),type,x:{source:40,crop:300,light:550,info:550}[type],y:(type==='info'?450:30)+count*190};
-    if(type==='source')node.source=clone(source);else if(type==='crop')node.settings=cropDefaults();else if(type==='light')node.settings=lightDefaults();
-    state.nodes.push(node);selected=node.id;selectedNodes=new Set([node.id]);changed();
+    const node={id:uid(),type,x:x??{source:40,crop:300,light:550,info:550}[type],y:y??(type==='info'?450:30)+count*190};
+    if(type==='source')node.source=clone(source);else if(type==='crop')node.settings={...cropDefaults(),...settings};else if(type==='light')node.settings={...lightDefaults(),...settings};
+    state.nodes.push(node);selected=node.id;selectedNodes=new Set([node.id]);changed();return node.id;
 }
 function drawGraph(){
     $('nodes').replaceChildren();
     for(const node of state.nodes){
-        const el=document.createElement('article');el.className=`node ${node.type}${selectedNodes.has(node.id)?' selected':''}`;el.dataset.id=node.id;el.style.left=node.x+'px';el.style.top=node.y+'px';
+        const el=document.createElement('article');el.className=`node ${node.type}${selectedNodes.has(node.id)?' selected':''}`;el.dataset.id=node.id;el.setAttribute('role','group');el.setAttribute('aria-label',node.type==='source'?`${title(node)} ${node.source.path}`:title(node));el.style.left=node.x+'px';el.style.top=node.y+'px';
         const header=document.createElement('h3');header.textContent=title(node);
         const body=document.createElement('div');body.className='body';
         if(node.type==='source'){
-            const img=document.createElement('img');img.src=url(node.source.path);body.append(img,document.createTextNode(node.source.path));
+            const img=document.createElement('img');img.src=url(node.source.path);img.alt='';body.append(img,document.createTextNode(node.source.path));
         }else if(node.type==='crop')body.textContent=`Zoom ${node.settings.zoom.toFixed(2)} · ${node.settings.rotation}°`;
         else if(node.type==='light')body.textContent=node.legacy?'Legacy grade · preserved':`EV ${node.settings.exposure>=0?'+':''}${node.settings.exposure.toFixed(2)} · light & color`;
         else if(node.type==='info'){body.classList.add('info-summary');body.textContent=infoSummary(node.id);}
@@ -284,8 +284,8 @@ function inspect(){
         }
         for(const [key,label,min,max,step]of node.type==='crop'?CROP_FIELDS:LIGHT_FIELDS){
             const container=document.createElement('label');container.textContent=label;container.className='adjustment';
-            const number=document.createElement('input');number.type='number';number.min=min;number.max=max;number.step=step;number.value=node.settings[key];number.disabled=!!node.legacy;
-            const range=document.createElement('input');range.type='range';range.min=min;range.max=max;range.step=step;range.value=node.settings[key];range.disabled=!!node.legacy;
+            const number=document.createElement('input');number.type='number';number.setAttribute('aria-label',label);number.min=min;number.max=max;number.step=step;number.value=node.settings[key];number.disabled=!!node.legacy;
+            const range=document.createElement('input');range.type='range';range.setAttribute('aria-label',`${label} slider`);range.min=min;range.max=max;range.step=step;range.value=node.settings[key];range.disabled=!!node.legacy;
             const apply=value=>{if(value===''||!Number.isFinite(Number(value)))return;node.settings[key]=Math.min(max,Math.max(min,Number(value)));range.value=number.value=node.settings[key];schedule();};
             number.onchange=()=>{apply(number.value);checkpoint();drawGraph();};range.oninput=()=>apply(range.value);range.onchange=()=>{checkpoint();drawGraph();};
             container.ondblclick=e=>{if(e.target===number)return;apply((node.type==='crop'?cropDefaults():lightDefaults())[key]);checkpoint();drawGraph();};container.append(number,range);root.append(container);
@@ -336,6 +336,7 @@ async function renderPreview(){
     const version=generation,snapshot=clone(state);
     const [{outputs,analysis:nextAnalysis},profile]=await Promise.all([evaluate(snapshot,256),inspectResolution(snapshot)]);
     if(version!==generation)return;
+    renderedGeneration=version;
     resolutionProfile=profile;updateResolutionControls();analysis=nextAnalysis;let missing=0;
     for(const face of FACES){const result=outputs.get(face),tile=tiles.get(face),ctx=tile.canvas.getContext('2d');ctx.fillStyle='#151922';ctx.fillRect(0,0,256,256);
         if(result.error){missing++;tile.button.title=result.error;ctx.fillStyle='#8491a6';ctx.font='16px sans-serif';ctx.fillText('No input',85,132);}else{ctx.drawImage(result,0,0);tile.button.title=LABELS[face];}}
@@ -407,10 +408,10 @@ function renderResolutionDetail(){
 function snapshot(){state.name=$('name').value;return clone(state);}
 function downloadJSON(value,filename){const blob=new Blob([JSON.stringify(value,null,2)],{type:'application/json'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);}
 $('save').onclick=()=>downloadJSON(snapshot(),`${state.name.replace(/[^a-z0-9_-]/gi,'-')||'skybox'}.pipeline.json`);$('restore').onclick=()=>$('snapshot').click();
-function restorePipeline(value) {
+function restorePipeline(value,{allowMissing=count=>confirm(`${count} sources are missing or changed. Load anyway? Export requires matching originals.`)}={}) {
     const next=validate(migrate(value));
     const warnings=next.nodes.filter(n=>n.type==='source'&&!library.some(s=>s.path===n.source.path&&s.sha256===n.source.sha256));
-    if(warnings.length&&!confirm(`${warnings.length} sources are missing or changed. Load anyway? Export requires matching originals.`))return false;
+    if(warnings.length&&!allowMissing(warnings.length))return false;
     state=next;selected=null;selectedNodes.clear();selectedEdge=null;pending=null;analysis.clear();clearImageCache();$('name').value=state.name||'untitled';resolutionProfile=null;updateResolutionControls();checkpoint();applyLayout();applyPreviewMode();drawGraph();inspect();schedule();
     return true;
 }
@@ -448,7 +449,8 @@ async function exportRequest(path, body, contentType='application/json') {
 function encodePNG(image) {
     return new Promise((resolve,reject)=>image.toBlob(blob=>blob?resolve(blob):reject(new Error('Browser could not encode this resolution. Select a smaller output size.')),'image/png'));
 }
-$('export').onclick=async()=>{
+async function runExport(){
+    if(exporting)throw new Error('An export is already running.');
     $('export').disabled=true;exporting=true;
     let folder=null;
     try {
@@ -475,13 +477,16 @@ $('export').onclick=async()=>{
         const result=await exportRequest('/api/export/finish',{folder,analysis:Object.fromEntries(stats)});
         latestExport=result.folder;updateExportLink();saveDraft();
         status(`Saved ${result.folder}/ — six PNGs + pipeline.json + manifest.json${stats.size?' + analysis.json':''}. View in Tesseract is ready.`);
+        return result.folder;
     } catch(error) {
         status(error.message+(folder?` · Incomplete export: exports/${folder}/ (marked .pending.json)` : ''),true);
+        throw error;
     } finally { exporting=false;updateResolutionControls(); }
-};
+}
+$('export').onclick=()=>runExport().catch(()=>{/* Reported in the status bar. */});
 $('crop').onclick=()=>addNode('crop');$('light').onclick=()=>addNode('light');$('info').onclick=()=>addNode('info');$('refresh').onclick=()=>refreshLibrary().catch(e=>status(e.message,true));$('size').onchange=()=>{state.resolutionMode=$('size').value==='max'?'max':'manual';if(state.resolutionMode==='manual')state.requestedSize=Number($('size').value);updateResolutionControls();checkpoint();};$('name').onchange=()=>{state.name=$('name').value;checkpoint();};
-function resetWorkspace() {
-    if (!confirm('Reset the workspace? This clears the browser draft and undo history. Save JSON first if you want to keep this arrangement. Photos and exported folders are not deleted.')) return;
+function resetWorkspace({force=false}={}) {
+    if (!force && !confirm('Reset the workspace? This clears the browser draft and undo history. Save JSON first if you want to keep this arrangement. Photos and exported folders are not deleted.')) return false;
     clearTimeout(draftTimer);
     try { localStorage.removeItem(STORAGE_KEY); } catch { /* Reset still works if browser storage is disabled. */ }
     recovered=null;
@@ -507,10 +512,135 @@ function resetWorkspace() {
     updateHistoryButtons();
     schedule();
     saveDraft();
+    return true;
 }
-$('reset-workspace').onclick=resetWorkspace;
+$('reset-workspace').onclick=()=>resetWorkspace();
 $('reload-app').onclick=()=>{saveDraft();location.reload();};
 $('name').value=state.name||'untitled';updateResolutionControls();
-applyLayout();applyPreviewMode();drawGraph();inspect();updateHistoryButtons();updateExportLink();schedule();initializeLibrary();
+applyLayout();applyPreviewMode();drawGraph();inspect();updateHistoryButtons();updateExportLink();schedule();
+const libraryReady=initializeLibrary();
+installStudioAPI();
 if(recovered){$('autosave-status').textContent='Restored · autosaved';$('autosave-status').title='Workspace restored from this browser. Undo history starts fresh after reload.';}
 if(recoveryError){$('autosave-status').textContent='Recovery failed';$('autosave-status').classList.add('error');$('autosave-status').title=recoveryError;}
+
+// Scriptable API for automation and AI agents (window.studio). Calls reuse the editor's own
+// mutation paths, so undo, autosave and the live preview behave exactly as for manual edits.
+function installStudioAPI(){
+    const require=(condition,message)=>{if(!condition)throw new Error(message);};
+    const node=id=>{const found=nodeById(id);require(found,`No node with id ${id}`);return found;};
+    const editable=()=>require(!exporting,'Studio is exporting; wait for export() to finish.');
+    const fields=type=>type==='crop'?CROP_FIELDS:LIGHT_FIELDS;
+    function cleanSettings(type,values={}){
+        const clean={};
+        for(const [key,value] of Object.entries(values)){
+            if(type==='crop'&&(key==='flipX'||key==='flipY')){require(typeof value==='boolean',`${key} must be true or false`);clean[key]=value;continue;}
+            const field=fields(type).find(([name])=>name===key);
+            require(field,`Unknown ${type==='crop'?'frame':type} setting "${key}". Valid: ${[...fields(type).map(([name])=>name),...(type==='crop'?['flipX','flipY']:[])].join(', ')}`);
+            require(Number.isFinite(Number(value)),`${key} must be a number`);
+            clean[key]=Math.min(field[3],Math.max(field[2],Number(value)));
+        }
+        return clean;
+    }
+    async function idle({timeout=30000}={}){
+        const end=Date.now()+timeout;
+        while(renderedGeneration!==generation){require(Date.now()<end,'Preview did not finish rendering in time.');await new Promise(resolve=>setTimeout(resolve,50));}
+    }
+    const range=([key,label,min,max,step])=>({key,label,min,max,step});
+    window.studio=Object.freeze({
+        ready:libraryReady.then(()=>undefined),
+        idle,
+        describe:()=>({
+            about:'Skybox Studio: build Photo → Frame → Light → Skybox graphs, then export six cube faces. All edits appear live and are undoable.',
+            guidance:[
+                'Each call is one undo step, shared with the user (⌘Z undoes yours too).',
+                'await studio.idle() before judging the preview or resolution.',
+                'To see a result, export and open it in the viewer (/), then use viewer.screenshot().',
+                'Ask the user before export(), reset() or loadPipeline().',
+                'Photos come from raw/ on disk; a browser-only agent cannot add new ones.'
+            ],
+            nodeTypes:{source:'photo from library(); needs {source:path}',frame:'geometry: zoom/pan/rotate/flip (stored as type "crop")',light:'exposure and color grade',info:'pass-through image statistics',skybox:'the single output node, id "skybox-output"; inputs are the faces'},
+            faces:FACES.map(face=>({face,label:LABELS[face]})),
+            frameSettings:[...CROP_FIELDS.map(range),{key:'flipX',type:'boolean'},{key:'flipY',type:'boolean'}],
+            lightSettings:LIGHT_FIELDS.map(range),
+            methods:{
+                'ready / idle()':'promises: library loaded / live preview finished rendering',
+                'getState()':'{pipeline, selection, latestExport, exporting, status, resolution}',
+                'library() / refreshLibrary()':'[{path, bytes, sha256}] photos in raw/',
+                'addNode(type, {source, x, y, settings})':'returns the new node id',
+                'connect(from, to, face?)':'face is required when to is the skybox',
+                'disconnect(to, face?)':'removes the wire into that input',
+                'setParams(id, settings)':'partial frame/light settings; numbers are clamped',
+                'removeNode(id) / select(ids) / frame()':'edit and show the selection',
+                'undo() / redo()':'same history as ⌘Z',
+                'setName(name) / setOutputSize("max" | px)':'export name and size',
+                'loadPipeline(json, {force}) / reset({force})':'replace the workspace',
+                'export()':'renders all six faces at full resolution; resolves to the exports/ folder'
+            }
+        }),
+        getState:()=>({pipeline:snapshot(),selection:[...selectedNodes],latestExport,exporting,status:$('status').textContent,
+            resolution:resolutionProfile&&{complete:resolutionProfile.complete,maxSide:resolutionProfile.maxSide,size:state.size,mode:state.resolutionMode}}),
+        library:()=>clone(library),
+        async refreshLibrary(){await refreshLibrary();return clone(library);},
+        addNode(type,{source,x,y,settings}={}){
+            editable();
+            if(type==='frame')type='crop';
+            require(['source','crop','light','info'].includes(type),'type must be source, frame, light or info');
+            let entry;
+            if(type==='source'){
+                require(typeof source==='string','A source node needs {source: path}, e.g. "raw/photo.jpg". See library().');
+                entry=library.find(item=>item.path===source||item.path===`raw/${source}`);
+                require(entry,`${source} is not in the library. See library() or refreshLibrary().`);
+            }
+            require(x===undefined||Number.isFinite(x),'x must be a number');require(y===undefined||Number.isFinite(y),'y must be a number');
+            const id=addNode(type,entry,{x,y,settings:type==='crop'||type==='light'?cleanSettings(type,settings):undefined});
+            require(id,$('status').textContent);return id;
+        },
+        connect(from,to,face){
+            editable();node(from);node(to);
+            const input=nodeById(to).type==='skybox'?face:undefined;
+            require(validConnection(from,to,input),nodeById(to).type==='skybox'&&!FACES.includes(face)?`Connecting to the skybox needs a face: ${FACES.join(', ')}`:'Connection rejected: invalid port type or it would create a cycle.');
+            connect(from,to,input);
+        },
+        disconnect(to,face){
+            editable();node(to);
+            const edge=incoming(to,nodeById(to).type==='skybox'?face:undefined);require(edge,'Nothing is connected to that input.');
+            state.edges=state.edges.filter(e=>e!==edge);changed();
+        },
+        setParams(id,settings){
+            editable();const target=node(id);
+            require(target.type==='crop'||target.type==='light','Only frame and light nodes have settings.');
+            require(!target.legacy,'This light node uses a migrated v1 grade; enable the new light engine in the inspector first.');
+            Object.assign(target.settings,cleanSettings(target.type,settings));changed();
+            return {...target.settings};
+        },
+        removeNode(id){
+            editable();require(node(id).type!=='skybox','The skybox output node cannot be removed.');
+            selectedNodes=new Set([id]);selectedEdge=null;deleteSelection();
+        },
+        select(ids=[]){
+            ids=[ids].flat();ids.forEach(node);
+            selectedNodes=new Set(ids);selected=ids.at(-1)||null;selectedEdge=null;drawGraph();inspect();
+        },
+        frame(){frameGraph(selectedNodes.size>0);},
+        undo(){editable();undoRedo(-1);},
+        redo(){editable();undoRedo(1);},
+        setName(name){editable();$('name').value=String(name);state.name=$('name').value;checkpoint();},
+        setOutputSize(size){
+            editable();
+            if(size==='max')state.resolutionMode='max';
+            else{require(Number.isInteger(size)&&size>0,'size must be "max" or a whole number of pixels');state.resolutionMode='manual';state.requestedSize=size;}
+            updateResolutionControls();checkpoint();
+        },
+        loadPipeline(pipeline,{force=false}={}){
+            editable();
+            restorePipeline(typeof pipeline==='string'?JSON.parse(pipeline):pipeline,{allowMissing:count=>{require(force,`${count} sources are missing or changed. Pass {force: true} to load anyway.`);return true;}});
+        },
+        reset({force=false}={}){editable();require(force,'reset() clears the draft and undo history. Pass {force: true}.');resetWorkspace({force:true});},
+        export:runExport
+    });
+    const note=document.createElement('p');note.id='agent-note';
+    note.textContent='For AI agents: this page has a JavaScript API. Run await studio.ready; studio.describe() instead of clicking.';
+    // Visually hidden, but present in the DOM and accessibility tree where browser agents look.
+    Object.assign(note.style,{position:'absolute',width:'1px',height:'1px',overflow:'hidden',clipPath:'inset(50%)',whiteSpace:'nowrap',margin:'-1px'});
+    document.body.prepend(note);console.info(note.textContent);
+}

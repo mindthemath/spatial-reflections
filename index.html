@@ -149,6 +149,28 @@
             font: bold 16px/1 Arial, sans-serif;
             cursor: pointer;
         }
+        .visual-music { border: 1px solid #53677d; background: linear-gradient(145deg, #101722e8, #090c13e8); margin: 0 0 12px; padding: 9px; }
+        .visual-music > details > summary { cursor: pointer; font-weight: bold; letter-spacing: .045em; color: #d9edff; }
+        .music-live-dot { display: inline-block; width: 7px; height: 7px; margin-left: 5px; border: 1px solid #708091; background: #202832; }
+        .music-live-dot.active { background: #85d7ff; box-shadow: 0 0 8px #52c8ff; }
+        .music-body { margin-top: 9px; }
+        .music-intro { color: #a9bacd; font-size: 11px; line-height: 1.4; margin: 0 0 8px; }
+        .music-actions { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+        .music-actions button { padding: 7px !important; cursor: pointer; }
+        .music-preset-label { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 8px; margin: 9px 0; }
+        .music-preset-label select { min-width: 0; }
+        .music-slider { display: block; margin: 7px 0; }
+        .music-slider > span { display: flex; justify-content: space-between; align-items: baseline; color: #cfdae6; font-size: 11px; }
+        .music-slider output { color: #87cfff; font-variant-numeric: tabular-nums; }
+        .music-layers { border-top: 1px solid #344251; margin-top: 9px; padding-top: 7px; }
+        .music-layers > summary { color: #aec2d8; cursor: pointer; font-size: 11px; }
+        .music-seed { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 9px; }
+        .music-seed label { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 5px; font-size: 11px; }
+        .music-seed input { min-width: 0; width: 100%; box-sizing: border-box; color: #eef3f8; background: #111821; border: 1px solid #657184; padding: 5px; }
+        .music-seed button { padding: 5px !important; cursor: pointer; }
+        .music-status { min-height: 2.6em; margin-top: 8px; color: #91aeca; font-size: 10px; line-height: 1.3; }
+        .music-status.error { color: #ffaaa0; }
+        .music-meter { display: block; width: 100%; height: 28px; margin-top: 5px; border: 1px solid #344251; box-sizing: border-box; }
     </style>
 </head>
 <body>

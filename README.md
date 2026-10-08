@@ -35,6 +35,31 @@ Both serve at **http://localhost:8000/**. The image includes ffmpeg with `libx26
 
 Put original photographs in `raw/`. The server has no Python dependencies. Both the viewer and Studio use the pinned Three.js runtime under `vendor/`, so the complete local design, image export and viewer workflow requires no internet connection. This is a trusted local workstation app, not a public production service.
 
+## Agent API
+
+Each page announces its API in a hidden one-line note, so telling an agent "use the page's agent API" is usually enough. `describe()` lists the methods, setting ranges and ground rules.
+
+Both pages expose a small JavaScript API for automation and AI agents that drive a browser, such as Claude in Chrome or Playwright. You can watch the agent work, or work alongside it, in the same window. Calls go through the same code paths as the UI, so edits appear live, are undoable in Studio, and persist like manual changes. Invalid input is rejected with an explanatory error instead of being silently ignored. Destructive calls require `{force: true}` instead of opening a confirmation dialog.
+
+```js
+await studio.ready;
+studio.describe();                              // methods, node types, setting ranges
+const photo = studio.addNode('source', {source: 'raw/photo.jpg'});
+const frame = studio.addNode('frame', {settings: {zoom: 1.5}});
+studio.connect(photo, frame);
+studio.connect(frame, 'skybox-output', 'px');
+studio.setParams(frame, {rotation: 90});
+await studio.idle();                            // live preview finished
+const folder = await studio.export();           // "exports/<name>-<stamp>"
+
+await viewer.ready;
+viewer.setState({shader: 'chrome', rotationCoefficients: {xw: 0.5}});
+await viewer.loadSkybox(folder);
+viewer.screenshot({maxSize: 512});              // PNG data URL of the 3D view
+```
+
+Publishing and video export are not in the API yet. Like the rest of the server, the API is intended for a trusted local machine.
+
 ## Studio → viewer workflow
 
 1. Build a Photo → Frame → Light → Skybox graph in Studio.
@@ -115,9 +140,11 @@ The viewer drives animation from an integer frame index rather than repeatedly a
 
 The collapsed **Video timing** section provides export FPS, loop frame count, duration, exact time step, a frame scrubber and single-frame controls. FPS controls preview cadence and reported movie duration. Screenshots preserve the current frame and FPS while remaining backward-compatible with previously saved `time` metadata.
 
-**Export video…** opens a confirmation dialog for MP4 or MKV container, resolution, quality and range. The default is a 30-second MP4 clip starting at the current frame, shortened to fit when the loop is shorter than 30 seconds. Whole-loop export remains available. A clip window uses a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a bitrate-based size estimate before any work begins. If that file name already labels a clip in `videos/`, the viewer asks before adding another.
+The optional **Generative soundtrack** analyzes the final rendered pixels at deterministic points on that same timeline. Luminance, chroma, contrast, edge energy, motion and spatial balance influence a layered drone, harmonic field, undertow, FM bells, inharmonic metal, shimmer and filtered texture. Start it explicitly to satisfy browser autoplay policy. Character, macro, layer and variation settings persist with the viewer, screenshots and published works; restoring never starts audio without a click. **Abyss drive** preserves the high-activity configuration developed for this work.
 
-Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Capture uses a reusable OffscreenCanvas with promise-based PNG encoding where supported, falling back to synchronous capture for compatibility. A failed or timed-out offscreen encoder is bypassed for the rest of that export, rather than repeatedly waiting or accumulating pending frame copies. The selected skybox must finish loading before export; its actual face hashes are part of the resume signature, and environment changes are locked during rendering. Completed videos include an adjacent JSON provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+**Export video…** opens a confirmation dialog for MP4 or MKV container, resolution, quality and range. The default is a 30-second MP4 clip starting at the current frame, shortened to fit when the loop is shorter than 30 seconds. Whole-loop export remains available. A clip window uses a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a size estimate before any work begins. If that file name already labels a clip in `videos/`, the viewer asks before adding another. **Master · dark detail** is a compilation/intermediate profile: libx264 CRF 12, slow preset, grain tuning and dark-scene adaptive quantization (`aq-mode=3`, strength 1.1), with no bitrate ceiling. It retains compatible 8-bit H.264 `yuv420p` output while giving near-black photographic texture substantially more data. Its displayed size is a conservative disk allowance because constant-quality output follows scene complexity. When music is enabled, a canonical low-resolution pixel pass creates a versioned visual score, the browser renders deterministic stereo 48 kHz PCM, and ffmpeg muxes it as AAC without re-encoding checkpointed video. Soundtrack exports are currently limited to five minutes so browser memory and temporary PCM storage remain bounded.
+
+Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Capture uses a reusable OffscreenCanvas with promise-based PNG encoding where supported, falling back to synchronous capture for compatibility. A failed or timed-out offscreen encoder is bypassed for the rest of that export, rather than repeatedly waiting or accumulating pending frame copies. The selected skybox must finish loading before export; its actual face hashes and music settings are part of the resume signature, and environment changes are locked during rendering. An uploaded soundtrack is saved durably before the first video frame, survives checkpoint pause/resume, and is hashed in the adjacent JSON provenance. Completed videos include that provenance file. Static published works can display the export UI but cannot encode video without the local API server.
 
 New exports preserve the browser's sRGB transfer curve, convert full-range RGB to limited-range BT.709 YUV, and explicitly tag the sRGB transfer (`iec61966-2-1`), BT.709 matrix and BT.709/sRGB primaries in H.264 and the container. This labels the source curve accurately; it does not bake in a gamma/brightness adjustment. MP4/MKV tests verify the tags and decoded RGB sample fidelity. Existing jobs pinned to the previous BT.709 transfer profile, and untagged legacy jobs, retain their original conversion so resuming never mixes color policies. Color-managed playback (including Finder Quick Look) still needs visual comparison; players that ignore transfer tags can differ. Checkpoint encoder failures preserve the last 4 KB of diagnostics in the interrupted job's reason.
 

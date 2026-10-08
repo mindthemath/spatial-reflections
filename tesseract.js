@@ -1,10 +1,13 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { installSkyboxLibrary } from './viewer-skyboxes.js';
+import { installVisualMusic } from './visual-music.js';
 
 // Main Three.js scene setup
 let scene, camera, renderer, controls;
 let tesseract;
+let visualMusic;
+let restoredMusicSettings = null;
 let currentShape = 'tesseract';
 let rotationSpeed = 0.005;
 let time = 0;
@@ -46,6 +49,9 @@ let lightDistance = 0.1;
 // UI elements
 let controlPanel;
 let showVertices = false;
+// Chrome's per-pixel grain re-randomizes as the projection moves, so every
+// frame carries fresh noise that dominates video bitrate.
+let surfaceGrain = true;
 let showOverlay = true;
 let cameraInfoDisplay;
 let motionStepSlider;
@@ -89,6 +95,7 @@ function viewerSettings() {
         lighting: currentLighting,
         lightDistance,
         showVertices,
+        surfaceGrain,
         animationPaused,
         exportFps,
         videoExportWidth,
@@ -97,6 +104,7 @@ function viewerSettings() {
         timelineFrame,
         panelExpanded,
         videoTimingExpanded,
+        music: visualMusic?.settings ?? restoredMusicSettings,
         camera: {
             position: camera ? { x: camera.position.x, y: camera.position.y, z: camera.position.z } : { ...savedCameraPosition },
             target: controls ? { x: controls.target.x, y: controls.target.y, z: controls.target.z } : { ...savedCameraTarget }
@@ -125,11 +133,16 @@ function applyViewerSettings(saved) {
         videoExportWidth = videoWidth;
         videoExportHeight = videoHeight;
     }
-    if (['draft', 'standard', 'high'].includes(saved.videoExportQuality)) videoExportQuality = saved.videoExportQuality;
+    if (['draft', 'standard', 'high', 'master'].includes(saved.videoExportQuality)) videoExportQuality = saved.videoExportQuality;
     if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
+    if (typeof saved.surfaceGrain === 'boolean') surfaceGrain = saved.surfaceGrain;
     if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
     if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
     if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
+    if (saved.music && typeof saved.music === 'object') {
+        restoredMusicSettings = saved.music;
+        visualMusic?.setSettings(saved.music);
+    }
     const vector = (value, fallback) => {
         if (!value || !['x', 'y', 'z'].every(axis => Number.isFinite(Number(value[axis])))) return fallback;
         return { x: Number(value.x), y: Number(value.y), z: Number(value.z) };
@@ -224,8 +237,14 @@ function init() {
     // Add keyboard controls
     window.addEventListener('keydown', onKeyDown, false);
     
-    // Add UI controls, then connect the export library to the existing Chrome environment.
+    // Add UI controls, then connect the soundtrack and export library to the scene.
     createControls();
+    visualMusic = installVisualMusic({
+        mount: document.getElementById('controlPanelContent'),
+        canvas: renderer.domElement,
+        initialSettings: restoredMusicSettings,
+        onStateChange: persistViewerSettings
+    });
     createEnvironmentMap();
     
     // Initialize file upload for loading views
@@ -542,6 +561,10 @@ function applyViewSettings(metadata) {
     
     try {
         setViewerShape(metadata.shape || metadata.render?.shape || 'tesseract');
+        if (metadata.music) {
+            restoredMusicSettings = metadata.music;
+            visualMusic?.setSettings(metadata.music);
+        }
         if (metadata.render) {
             const { camera: renderCamera, ...renderSettings } = metadata.render;
             restoreVideoRenderSettings({
@@ -784,12 +807,15 @@ function createControls() {
     const speedContainer = document.createElement('div');
     speedContainer.style.marginBottom = '10px';
     
-    motionStepLabel = document.createElement('div');
+    motionStepLabel = document.createElement('label');
+    motionStepLabel.htmlFor = 'viewer-motion-step';
+    motionStepLabel.style.display = 'block';
     motionStepLabel.textContent = `Motion Step: ${rotationSpeed.toFixed(3)} / frame`;
     motionStepLabel.style.marginBottom = '5px';
     speedContainer.appendChild(motionStepLabel);
     
     motionStepSlider = document.createElement('input');
+    motionStepSlider.id = 'viewer-motion-step';
     motionStepSlider.type = 'range';
     motionStepSlider.min = '0';
     motionStepSlider.max = '10';
@@ -830,6 +856,27 @@ function createControls() {
     vertexToggle.appendChild(vertexCheckbox);
     vertexToggle.appendChild(vertexLabel);
     controlPanel.appendChild(vertexToggle);
+
+    const grainToggle = document.createElement('div');
+    grainToggle.style.marginBottom = '10px';
+    const grainCheckbox = document.createElement('input');
+    grainCheckbox.type = 'checkbox';
+    grainCheckbox.id = 'grainToggle';
+    grainCheckbox.checked = surfaceGrain;
+    grainCheckbox.addEventListener('change', function() {
+        surfaceGrain = this.checked;
+        faces.forEach(face => {
+            if (face.material?.uniforms?.surfaceGrain) face.material.uniforms.surfaceGrain.value = surfaceGrain ? 1 : 0;
+        });
+    });
+    const grainLabel = document.createElement('label');
+    grainLabel.htmlFor = 'grainToggle';
+    grainLabel.textContent = 'Chrome surface grain';
+    grainLabel.title = 'Shimmering per-frame grain; turning it off makes video exports far smaller';
+    grainLabel.style.marginLeft = '5px';
+    grainToggle.appendChild(grainCheckbox);
+    grainToggle.appendChild(grainLabel);
+    controlPanel.appendChild(grainToggle);
     
     const shapeLabel = document.createElement('label');
     shapeLabel.textContent = '4D shape: ';
@@ -856,7 +903,9 @@ function createControls() {
     const shaderContainer = document.createElement('div');
     shaderContainer.style.marginBottom = '10px';
     
-    const shaderLabel = document.createElement('div');
+    const shaderLabel = document.createElement('label');
+    shaderLabel.htmlFor = 'viewer-shader';
+    shaderLabel.style.display = 'block';
     shaderLabel.textContent = 'Shader Type:';
     shaderLabel.style.marginBottom = '5px';
     shaderContainer.appendChild(shaderLabel);
@@ -902,7 +951,9 @@ function createControls() {
     const lightingContainer = document.createElement('div');
     lightingContainer.style.marginBottom = '10px';
     
-    const lightingLabel = document.createElement('div');
+    const lightingLabel = document.createElement('label');
+    lightingLabel.htmlFor = 'viewer-lighting';
+    lightingLabel.style.display = 'block';
     lightingLabel.textContent = 'Lighting:';
     lightingLabel.style.marginBottom = '5px';
     lightingContainer.appendChild(lightingLabel);
@@ -937,8 +988,10 @@ function createControls() {
     lightingSelect.appendChild(quadOption);
     
     // Light distance control
-    const distanceLabel = document.createElement('div');
+    const distanceLabel = document.createElement('label');
     distanceLabel.id = 'viewer-light-distance-label';
+    distanceLabel.htmlFor = 'viewer-light-distance';
+    distanceLabel.style.display = 'block';
     distanceLabel.textContent = `Light Distance: ${lightDistance.toFixed(1)}`;
     distanceLabel.style.marginTop = '5px';
     distanceLabel.style.marginBottom = '5px';
@@ -1142,6 +1195,7 @@ function createControls() {
 
     timelineSlider = document.createElement('input');
     timelineSlider.type = 'range';
+    timelineSlider.setAttribute('aria-label', 'Timeline frame');
     timelineSlider.min = '0';
     timelineSlider.max = '0';
     timelineSlider.step = '1';
@@ -1163,10 +1217,11 @@ function createControls() {
     frameButtons.style.display = 'flex';
     frameButtons.style.gap = '5px';
     frameButtons.style.marginTop = '6px';
-    [['− Frame', -1], ['+ Frame', 1]].forEach(([label, direction]) => {
+    [['− Frame', -1, 'Previous frame'], ['+ Frame', 1, 'Next frame']].forEach(([label, direction, name]) => {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = label;
+        button.setAttribute('aria-label', name);
         button.style.flex = '1';
         button.style.padding = '4px';
         button.addEventListener('click', () => {
@@ -1405,6 +1460,8 @@ function syncViewerControlsFromState() {
     if (distanceLabel) distanceLabel.textContent = `Light Distance: ${lightDistance.toFixed(1)}`;
     const vertexToggle = document.getElementById('vertexToggle');
     if (vertexToggle) vertexToggle.checked = showVertices;
+    const grainToggle = document.getElementById('grainToggle');
+    if (grainToggle) grainToggle.checked = surfaceGrain;
     if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
     const resolution = document.getElementById('video-export-resolution');
     if (resolution) resolution.value = `${videoExportWidth}x${videoExportHeight}`;
@@ -1554,7 +1611,9 @@ function updateLoopTimingUI() {
     `;
 }
 
-const VIDEO_QUALITY_BITS_PER_PIXEL = { draft: 0.035, standard: 0.07, high: 0.12 };
+// Master is content-dependent CRF encoding. Its conservative value is used
+// only for preflight size/disk planning, never as an encoder bitrate ceiling.
+const VIDEO_QUALITY_BITS_PER_PIXEL = { draft: 0.035, standard: 0.07, high: 0.12, master: 0.8 };
 
 function formatBytes(bytes) {
     if (!Number.isFinite(bytes)) return '—';
@@ -1601,11 +1660,14 @@ function videoRenderSignature() {
         lighting: currentLighting,
         lightDistance,
         showVertices,
+        // Omitted when on so signatures from before the toggle stay valid.
+        ...(surfaceGrain ? {} : {surfaceGrain}),
         camera: {
             position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
         },
         fps: exportFps,
+        music: visualMusic?.settings ?? restoredMusicSettings,
         environment: skyboxLibrary?.getRenderState().identity || null
     });
 }
@@ -1619,7 +1681,7 @@ function createVideoExportDialog() {
                 <strong>EXPORT VIDEO</strong>
                 <button id="close-video-export" type="button">Close</button>
             </div>
-            <p>Render deterministic frames from the current camera, geometry, shader and skybox, then stream them to the local server for H.264 encoding. Video has no audio.</p>
+            <p>Render deterministic frames from the current camera, geometry, shader and skybox, then stream them to the local server for H.264 encoding. An enabled generative soundtrack is rendered from the same visual timeline.</p>
             <div class="video-export-grid">
                 <label>File name<input id="video-export-name" maxlength="60" value="tesseract"></label>
                 <label>Resolution<select id="video-export-resolution">
@@ -1637,6 +1699,7 @@ function createVideoExportDialog() {
                     <option value="draft">Draft</option>
                     <option value="standard">Standard</option>
                     <option value="high">High</option>
+                    <option value="master">Master · dark detail</option>
                 </select></label>
                 <label>Range<select id="video-export-range">
                     <option value="full">Whole loop</option>
@@ -1720,6 +1783,8 @@ async function openVideoExportDialog() {
     videoExportDialog.dataset.statusMode = 'checking';
     videoExportDialog.dataset.serverAvailable = '';
     videoExportDialog.dataset.freeBytes = '';
+    videoExportDialog.dataset.musicAvailable = '';
+    videoExportDialog.dataset.musicReason = '';
     videoExportDialog.dataset.encoderRecovery = JSON.stringify({
         recovered: 0, alreadyExited: 0, refused: 0, skippedActive: 0, failed: 0, indexFailed: false
     });
@@ -1732,6 +1797,8 @@ async function openVideoExportDialog() {
         if (!value.available && !value.canManage) throw new Error(value.reason || 'Video service is unavailable');
         videoExportDialog.dataset.serverAvailable = value.available ? 'yes' : 'no';
         videoExportDialog.dataset.videoMode = value.videoMode || 'resumable';
+        videoExportDialog.dataset.musicAvailable = value.musicAvailable === false ? 'no' : 'yes';
+        videoExportDialog.dataset.musicReason = value.musicReason || '';
         const simpleMode = videoExportDialog.dataset.videoMode === 'simple';
         for (const id of ['video-export-checkpoint', 'video-export-scratch']) {
             const label = document.getElementById(id)?.closest?.('label');
@@ -1928,6 +1995,7 @@ function videoExportPlanFromRequest(request) {
         checkpointSeconds: Number.isFinite(Number(request.checkpointSeconds))
             ? Number(request.checkpointSeconds) : 60,
         scratchPath: request.scratchPath || '',
+        music: request.music || null,
         error: ''
     };
 }
@@ -1989,9 +2057,14 @@ function videoExportPlan() {
     }
 
     const duration = frames / exportFps;
+    if (typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled && duration > 900) error = 'Generative soundtrack exports are currently limited to 15 minutes.';
+    if (typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled && videoExportDialog.dataset.musicAvailable === 'no') {
+        error = videoExportDialog.dataset.musicReason || 'The local ffmpeg does not provide AAC soundtrack encoding.';
+    }
     const bitRate = width * height * exportFps * VIDEO_QUALITY_BITS_PER_PIXEL[quality];
     const estimatedBytes = bitRate * duration / 8 * 1.03;
-    return { width, height, format, quality, range, startFrame, frames, duration, bitRate, estimatedBytes, checkpointSeconds, scratchPath, error };
+    return { width, height, format, quality, range, startFrame, frames, duration, bitRate, estimatedBytes, checkpointSeconds, scratchPath,
+        music: typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled ? {enabled: true} : null, error };
 }
 
 function updateVideoExportSummary() {
@@ -2017,12 +2090,18 @@ function updateVideoExportSummary() {
             : plan.checkpointSeconds === 0
             ? 'No checkpoints. Pausing or interruption restarts from frame 0.'
             : `Durable progress is saved every ${plan.checkpointSeconds} seconds.`;
+        const qualityText = plan.quality === 'master'
+            ? 'Master · CRF 12 · slow · grain-tuned dark-detail AQ'
+            : `${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target`;
+        const estimateText = plan.quality === 'master'
+            ? 'conservative preflight allowance'
+            : `estimated ${plan.format.toUpperCase()} size`;
         summary.innerHTML = `
             <strong>${plan.resumed ? 'Resuming saved export · ' : ''}${rangeText}</strong><br>
             ${plan.width} × ${plan.height} · ${plan.fps || exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
-            H.264 ${plan.format.toUpperCase()} · ${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target · no audio · current ${currentShader} shader<br>
-            Duration ${formatDuration(plan.duration)} · estimated ${plan.format.toUpperCase()} size <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
-            <small>Saved under <code>videos/</code>. ${checkpointText} Size is a bitrate-based estimate; visual complexity can change the final file size.${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
+            H.264 ${plan.format.toUpperCase()} · ${qualityText} · ${plan.music?.enabled ? 'generative AAC soundtrack' : 'no audio'} · current ${currentShader} shader<br>
+            Duration ${formatDuration(plan.duration)} · ${estimateText} <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
+            <small>Saved under <code>videos/</code>. ${checkpointText} ${plan.quality === 'master' ? 'Master has no bitrate ceiling; actual size follows visual complexity.' : 'Visual complexity can change the final file size.'}${plan.music?.enabled ? ` Soundtrack preparation temporarily uses about ${formatBytes(plan.duration * 48000 * 4 + 44)}.` : ''}${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
         summary.classList.remove('error');
     }
     confirm.disabled = videoExportRunning || videoExportDialog.dataset.serverAvailable !== 'yes' || !plan || Boolean(plan.error) || spaceError;
@@ -2163,6 +2242,49 @@ async function canvasPNG(canvas) {
     return dataUrlToBlob(canvas.toDataURL('image/png'));
 }
 
+async function prepareMusicExport(plan, status) {
+    if (!visualMusic?.settings.enabled) return null;
+    const originalFrame = timelineFrame;
+    const originalAspect = camera.aspect;
+    const previousTarget = renderer.getRenderTarget();
+    const analysisWidth = 64;
+    const analysisHeight = Math.max(24, Math.min(64, Math.round(analysisWidth * plan.height / plan.width)));
+    const target = new THREE.WebGLRenderTarget(analysisWidth, analysisHeight, {
+        depthBuffer: true,
+        stencilBuffer: false
+    });
+    try {
+        camera.aspect = plan.width / plan.height;
+        camera.updateProjectionMatrix();
+        renderer.setRenderTarget(target);
+        return await visualMusic.prepareExport({
+            startFrame: plan.startFrame,
+            frames: plan.frames,
+            fps: exportFps,
+            signal: videoExportAbort.signal,
+            samplePixels: async frame => {
+                setTimelineFrame(frame);
+                updateTesseractProjection();
+                renderer.render(scene, camera);
+                const data = new Uint8Array(analysisWidth * analysisHeight * 4);
+                renderer.readRenderTargetPixels(target, 0, 0, analysisWidth, analysisHeight, data);
+                return {data, width: analysisWidth, height: analysisHeight};
+            },
+            onProgress: ({phase, progress: amount}) => {
+                const labels = {analyze: 'Reading visual score', synthesize: 'Synthesizing soundtrack', encode: 'Preparing soundtrack'};
+                status.textContent = `${labels[phase]}… ${Math.round(amount * 100)}%`;
+            }
+        });
+    } finally {
+        renderer.setRenderTarget(previousTarget);
+        target.dispose();
+        camera.aspect = originalAspect;
+        camera.updateProjectionMatrix();
+        setTimelineFrame(originalFrame);
+        updateTesseractProjection();
+    }
+}
+
 function screenshotMetadata(extra = {}) {
     return {
         shape: currentShape,
@@ -2190,6 +2312,7 @@ function screenshotMetadata(extra = {}) {
             y: controls.target.y,
             z: controls.target.z
         },
+        music: visualMusic?.settings ?? restoredMusicSettings,
         ...extra
     };
 }
@@ -2337,6 +2460,7 @@ async function runVideoExport(plan, resumableJob = null) {
         // A complete checkpoint job only needs server-side concatenation, not
         // a verified current environment or the ability to render its resolution.
         if (!resumableJob || resumableJob.nextFrame < plan.frames) prepareCapture();
+        const soundtrack = resumableJob ? null : await prepareMusicExport(plan, status);
         if (resumableJob) {
             activeVideoExportJob = await videoApi('/api/video/resume', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2355,7 +2479,15 @@ async function runVideoExport(plan, resumableJob = null) {
                     checkpointSeconds: plan.checkpointSeconds, scratchPath: plan.scratchPath,
                     sourceUrl: location.pathname + location.search, renderSignature: videoRenderSignature(),
                     loopFrameCount: loopTiming.frameCount, loopPeriod: loopTiming.period,
-                    timeStep: loopTiming.timeStep, viewerState: viewerSettings() })
+                    timeStep: loopTiming.timeStep, viewerState: viewerSettings(),
+                    ...(soundtrack ? {music: soundtrack.metadata} : {}) })
+            });
+        }
+
+        if (soundtrack) {
+            status.textContent = 'Uploading soundtrack…';
+            await videoApi(`/api/video/audio?id=${activeVideoExportJob.id}&lease=${activeVideoExportJob.lease}`, {
+                method: 'POST', headers: {'Content-Type': 'audio/wav'}, body: soundtrack.wav, signal: videoExportAbort.signal
             });
         }
 
@@ -2442,6 +2574,11 @@ async function runVideoExport(plan, resumableJob = null) {
         if (videoExportStopAction === 'discard' && !stopError) {
             videoExportDialog.dataset.statusMode = 'cancelled';
             status.textContent = 'Export cancelled and discarded.';
+            status.classList.remove('error');
+        } else if (videoExportStopAction && !stopError && !hadJob) {
+            // Stopped while preparing the soundtrack, before the server job existed.
+            videoExportDialog.dataset.statusMode = 'cancelled';
+            status.textContent = 'Export cancelled.';
             status.classList.remove('error');
         } else if (videoExportStopAction === 'pause' && !stopError && hadJob) {
             videoExportDialog.dataset.statusMode = 'paused';
@@ -2739,7 +2876,8 @@ function createShaderMaterial() {
     
     const uniforms = {
         lightingType: { value: lightingTypeInt },
-        lightDistance: { value: lightDistance }
+        lightDistance: { value: lightDistance },
+        surfaceGrain: { value: surfaceGrain ? 1 : 0 }
     };
     
     // Add environment map for chrome shader
@@ -2907,6 +3045,7 @@ function createChromeShader() {
     return `
         uniform int lightingType;
         uniform float lightDistance;
+        uniform float surfaceGrain;
         uniform samplerCube envMap;
         varying vec3 vNormal;
         varying vec3 vPosition;
@@ -2935,7 +3074,7 @@ function createChromeShader() {
             float fresnelFactor = fresnel(viewDir, normal, 5.0);
             
             // Add subtle noise for surface imperfection
-            float noisePattern = random(vPosition.xy * 20.0) * 0.05;
+            float noisePattern = random(vPosition.xy * 20.0) * 0.05 * surfaceGrain;
             
             // Chrome color - mix environment map with base chrome color
             vec3 chromeColor = mix(
@@ -3255,14 +3394,16 @@ function animate(timestamp) {
     // Update the tesseract projection
     updateTesseractProjection();
     
-    // Render the scene
+    // Render the scene, then let the soundtrack inspect the actual final pixels.
     renderer.render(scene, camera);
+    visualMusic?.tick({frame: timelineFrame, fps: exportFps, paused: animationPaused});
 }
 
 // Initialize file upload handler for loading views
 function initFileUpload() {
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
+    fileInput.setAttribute('aria-label', 'Load saved view (PNG screenshot)');
     fileInput.accept = 'image/png';
     fileInput.style.display = 'none';
     document.body.appendChild(fileInput);
@@ -3322,4 +3463,179 @@ function updateMaterialsWithEnvMap() {
             }
         });
     }
-} 
+}
+
+// Scriptable API for automation and AI agents (window.viewer). Settings are applied through
+// the same controls a person uses, so the panel, scene and saved settings stay in sync.
+function installViewerAPI() {
+    const SETTINGS = {
+        shape: { control: 'viewer-shape', values: ['tesseract', 'rectified-5-cell'] },
+        shader: { control: 'viewer-shader', values: ['chrome', 'rough', 'iridescent'] },
+        lighting: { control: 'viewer-lighting', values: ['diagonal', 'topdown', 'quad'] },
+        lightDistance: { control: 'viewer-light-distance', min: 0.1, max: 20, step: 0.1 },
+        rotationSpeed: { min: 0, max: 0.01, step: 0.001 },
+        rotationCoefficients: { axes: ['xw', 'yw', 'zw'], min: -1, max: 1, step: 0.05 },
+        showVertices: { type: 'boolean' },
+        surfaceGrain: { type: 'boolean', note: 'chrome shader only' },
+        exportFps: { values: [24, 25, 30, 50, 60] },
+        animationPaused: { type: 'boolean' },
+        timelineFrame: { type: 'integer', note: 'wraps around the loop length' },
+        camera: { shape: '{position: {x, y, z}, target: {x, y, z}}', note: 'default position is (3, 3, 3), target (0, 0, 0)' }
+    };
+    const require = (condition, message) => {
+        if (!condition) throw new Error(message);
+    };
+    const unlocked = () => require(!videoExportRunning, 'The viewer is locked while a video export renders.');
+    const setControl = (element, value) => {
+        element.value = String(value);
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    const number = (key, value) => {
+        require(Number.isFinite(Number(value)), `${key} must be a number`);
+        return Number(value);
+    };
+    const vector = (key, value) => {
+        require(value && ['x', 'y', 'z'].every(axis => Number.isFinite(Number(value[axis]))), `${key} must be {x, y, z} numbers`);
+        return { x: Number(value.x), y: Number(value.y), z: Number(value.z) };
+    };
+
+    function setState(changes) {
+        unlocked();
+        require(changes && typeof changes === 'object', 'setState takes an object of settings; see describe()');
+        const unknown = Object.keys(changes).filter(key => !(key in SETTINGS));
+        require(!unknown.length, `Unknown setting ${unknown.join(', ')}. Valid: ${Object.keys(SETTINGS).join(', ')}`);
+        for (const key of ['shape', 'shader', 'lighting', 'exportFps']) {
+            if (key in changes) require(SETTINGS[key].values.includes(changes[key]), `${key} must be one of ${SETTINGS[key].values.join(', ')}`);
+        }
+        for (const [key, value] of Object.entries(changes)) {
+            switch (key) {
+                case 'shape': case 'shader': case 'lighting':
+                    setControl(document.getElementById(SETTINGS[key].control), value);
+                    break;
+                case 'lightDistance':
+                    setControl(document.getElementById('viewer-light-distance'), number(key, value));
+                    break;
+                case 'rotationSpeed':
+                    setControl(motionStepSlider, Math.round(number(key, value) * 1000));
+                    break;
+                case 'rotationCoefficients':
+                    require(value && typeof value === 'object', 'rotationCoefficients must be {xw, yw, zw}');
+                    for (const [axis, coefficient] of Object.entries(value)) {
+                        require(SETTINGS.rotationCoefficients.axes.includes(axis), `Unknown rotation axis ${axis}; use xw, yw or zw`);
+                        setControl(document.getElementById(`rotation-${axis}`), Math.round(number(axis, coefficient) * 20));
+                    }
+                    break;
+                case 'showVertices': {
+                    require(typeof value === 'boolean', 'showVertices must be true or false');
+                    const checkbox = document.getElementById('vertexToggle');
+                    checkbox.checked = value;
+                    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+                case 'surfaceGrain': {
+                    require(typeof value === 'boolean', 'surfaceGrain must be true or false');
+                    const checkbox = document.getElementById('grainToggle');
+                    checkbox.checked = value;
+                    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+                case 'exportFps':
+                    setControl(exportFpsSelect, value);
+                    break;
+                case 'animationPaused':
+                    require(typeof value === 'boolean', 'animationPaused must be true or false');
+                    animationPaused = value;
+                    lastAnimationTimestamp = null;
+                    frameAccumulator = 0;
+                    break;
+                case 'timelineFrame':
+                    require(Number.isInteger(value), 'timelineFrame must be a whole number');
+                    pauseAnimation();
+                    setTimelineFrame(value);
+                    break;
+                case 'camera':
+                    if (value?.position) camera.position.set(...Object.values(vector('camera.position', value.position)));
+                    if (value?.target) controls.target.set(...Object.values(vector('camera.target', value.target)));
+                    controls.update();
+                    updateCameraInfo();
+                    break;
+            }
+        }
+        persistViewerSettings();
+        return getState();
+    }
+
+    function getState() {
+        return {
+            ...viewerSettings(),
+            skybox: skyboxLibrary?.activeFolder?.() ?? null,
+            skyboxStatus: skyboxLibrary?.statusMessage?.() ?? '',
+            ready: !!skyboxLibrary?.getRenderState?.().ready,
+            loop: { frameCount: loopTiming.frameCount, exact: loopTiming.exact },
+            videoExportRunning,
+            published: publication?.schemaVersion === 1
+        };
+    }
+
+    window.viewer = Object.freeze({
+        ready: Promise.resolve(skyboxLibrary?.initialLoad).then(() => undefined),
+        describe: () => ({
+            about: 'Tesseract viewer: a 4D polytope rendered in three.js, reflecting a six-face skybox. Changes show live and are saved in this browser.',
+            guidance: [
+                'Settings persist in this browser, exactly like changes made in the panel.',
+                'Use screenshot() to see the scene; the canvas is not readable as text.',
+                'Ask the user before loadSkybox() replaces their current environment.'
+            ],
+            settings: SETTINGS,
+            methods: {
+                'ready': 'promise: the first skybox load has finished',
+                'getState()': 'current settings, active skybox and loop length',
+                'setState(changes)': 'partial settings (see settings); sliders snap to their steps; returns getState()',
+                'play() / pause()': 'start or stop the animation',
+                'listExports()': 'completed Studio exports [{folder, name, createdAt, size, ...}]',
+                'loadSkybox(folder)': '"default" or "exports/<name>"; rejects with the reason if it cannot load',
+                'screenshot({maxSize})': 'PNG data URL of the 3D view (no control panel), longest side at most maxSize (default 1024)'
+            }
+        }),
+        getState,
+        setState,
+        play: () => setState({ animationPaused: false }),
+        pause: () => setState({ animationPaused: true }),
+        async listExports() {
+            const response = await fetch('/api/exports', { cache: 'no-store' });
+            require(response.ok, 'The export library needs studio/server.py');
+            return (await response.json()).exports;
+        },
+        async loadSkybox(folder) {
+            unlocked();
+            require(typeof folder === 'string', 'loadSkybox takes "default" or "exports/<name>"');
+            const loaded = await skyboxLibrary.loadSelection(folder);
+            require(loaded, skyboxLibrary.statusMessage?.() || 'The skybox could not be loaded');
+            return getState();
+        },
+        screenshot({ maxSize = 1024 } = {}) {
+            renderer.render(scene, camera);
+            const source = renderer.domElement;
+            const scale = Math.min(1, number('maxSize', maxSize) / Math.max(source.width, source.height));
+            const output = document.createElement('canvas');
+            output.width = Math.max(1, Math.round(source.width * scale));
+            output.height = Math.max(1, Math.round(source.height * scale));
+            output.getContext('2d').drawImage(source, 0, 0, output.width, output.height);
+            return output.toDataURL('image/png');
+        }
+    });
+    if (publication?.schemaVersion !== 1) announceAgentAPI('viewer');
+}
+
+// One visually hidden sentence so browser agents discover the API from the DOM or accessibility tree.
+function announceAgentAPI(name) {
+    const note = document.createElement('p');
+    note.id = 'agent-note';
+    note.textContent = `For AI agents: this page has a JavaScript API. Run await ${name}.ready; ${name}.describe() instead of clicking.`;
+    Object.assign(note.style, { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', margin: '-1px' });
+    document.body.prepend(note);
+    console.info(note.textContent);
+}
+
+installViewerAPI();

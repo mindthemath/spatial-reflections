@@ -1,4 +1,4 @@
-.PHONY: serve static build run run-isolated install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser _test-all _test-browser unstick
+.PHONY: serve static build run run-isolated install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser test-agent-api _test-all _test-browser unstick
 
 TEST_GUARD = python3 scripts/test_guard.py
 
@@ -24,6 +24,7 @@ run: build
 		-v $$(pwd)/raw:/app/raw:ro \
 		-v $$(pwd)/exports:/app/exports:rw \
 		-v $$(pwd)/videos:/app/videos:rw \
+		-v $$(pwd)/site:/app/site:rw \
 		spatial-reflections
 
 # No bind mounts: only the baked-in fallback PNGs, and exports/videos vanish with the container.
@@ -69,8 +70,10 @@ test-fast:
 	node studio/test_video_resume_ui.cjs
 	node studio/test_video_export_form.cjs
 	node studio/test_drag_drop.cjs
+	node studio/test_visual_music.mjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
 	python3 -m unittest discover -s studio -p 'test_video_simple.py'
+	python3 -m unittest studio.test_video_audio studio.test_video_encoding
 	cd studio && python3 -m unittest test_server.ServerStartupTest
 	$(MAKE) test-guard
 
@@ -86,7 +89,7 @@ test-video-soak:
 	$(TEST_GUARD) --timeout 7200 -- python3 studio/video_soak.py --source "$(VIDEO_SOAK_SOURCE)" --seconds "$(VIDEO_SOAK_SECONDS)"
 
 test-video-encoder:
-	$(TEST_GUARD) --timeout 90 -- python3 -m unittest studio.test_video_resume studio.test_video_resume_integration studio.test_video_simple studio.test_video_simple_integration
+	$(TEST_GUARD) --timeout 120 -- python3 -m unittest studio.test_video_resume studio.test_video_resume_integration studio.test_video_simple studio.test_video_simple_integration studio.test_video_audio studio.test_video_audio_integration studio.test_video_encoding
 
 test-video-capture:
 	$(TEST_GUARD) --timeout 60 -- node studio/test_video_capture.cjs
@@ -97,7 +100,11 @@ test-video-simple-browser:
 test-browser:
 	$(TEST_GUARD) --network --timeout 360 -- $(MAKE) _test-browser
 
+test-agent-api:
+	$(TEST_GUARD) --network --timeout 180 -- node studio/test_agent_api.cjs
+
 _test-browser:
 	$(MAKE) test-video-capture
 	node studio/test_browser.cjs
+	$(MAKE) test-agent-api
 	$(MAKE) test-video-simple-browser

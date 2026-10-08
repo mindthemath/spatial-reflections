@@ -11,7 +11,7 @@ RUN chown appuser:appuser /app
 
 USER appuser
 COPY --chown=appuser:appuser vendor/ vendor
-COPY --chown=appuser:appuser index.html skybox-paths.js tesseract.js viewer-skyboxes.js .
+COPY --chown=appuser:appuser index.html skybox-paths.js tesseract.js viewer-skyboxes.js visual-music-core.js visual-music.js .
 COPY --chown=appuser:appuser studio/ studio
 # fallback skybox faces; the raw/ bind mount in `make run` hides these
 COPY --chown=appuser:appuser raw/*.png raw/

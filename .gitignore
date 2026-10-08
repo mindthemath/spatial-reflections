@@ -4,6 +4,8 @@ skybox/
 raw/
 # generated studio and video exports
 exports/
+# Also ignore a worktree-local symlink to the primary checkout's exports.
+/exports
 videos/
 # Bun / Playwright local state
 node_modules/
