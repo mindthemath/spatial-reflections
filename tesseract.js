@@ -113,6 +113,32 @@ function viewerSettings() {
     };
 }
 
+function defaultViewerSettings() {
+    return {
+        shape: 'tesseract',
+        rotationSpeed: 0.005,
+        rotationCoefficients: { xw: 0, yw: 0, zw: 0 },
+        shader: 'chrome',
+        lighting: 'diagonal',
+        lightDistance: 0.1,
+        showVertices: false,
+        surfaceGrain: true,
+        animationPaused: true,
+        exportFps: 60,
+        videoExportWidth: 1920,
+        videoExportHeight: 1080,
+        videoExportQuality: 'standard',
+        timelineFrame: 0,
+        panelExpanded: true,
+        videoTimingExpanded: false,
+        music: visualMusic?.defaultSettings ?? { enabled: false },
+        camera: {
+            position: { x: 3, y: 3, z: 3 },
+            target: { x: 0, y: 0, z: 0 }
+        }
+    };
+}
+
 function applyViewerSettings(saved) {
     if (!saved || typeof saved !== 'object') return;
     const clamp = (value, min, max, fallback) => {
@@ -246,6 +272,9 @@ function init() {
         initialSettings: restoredMusicSettings,
         onStateChange: persistViewerSettings
     });
+    if (publication?.schemaVersion === 1 && publication.viewer?.musicAutoplay === true) {
+        visualMusic.requestAutoplay();
+    }
     createEnvironmentMap();
     
     // Initialize file upload for loading views
@@ -271,6 +300,7 @@ function createEnvironmentMap() {
         renderer,
         publication,
         getViewerState: viewerSettings,
+        getDefaultViewerState: defaultViewerSettings,
         getShader: () => currentShader,
         onTexture: texture => {
             const previous = envMap;
