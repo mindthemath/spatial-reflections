@@ -59,6 +59,7 @@ let motionStepLabel;
 let loopInfoDisplay;
 let timelineSlider;
 let timelineFrameDisplay;
+let timelineFrameInput;
 let exportFpsSelect;
 let videoExportButton;
 let videoExportDialog;
@@ -1213,6 +1214,52 @@ function createControls() {
     timelineFrameDisplay.style.textAlign = 'center';
     videoTimingContent.appendChild(timelineFrameDisplay);
 
+    const frameJump = document.createElement('form');
+    frameJump.style.display = 'flex';
+    frameJump.style.alignItems = 'center';
+    frameJump.style.gap = '5px';
+    frameJump.style.marginTop = '6px';
+
+    const frameJumpLabel = document.createElement('label');
+    frameJumpLabel.htmlFor = 'timeline-frame-input';
+    frameJumpLabel.textContent = 'Go to frame';
+    frameJumpLabel.style.whiteSpace = 'nowrap';
+    frameJump.appendChild(frameJumpLabel);
+
+    timelineFrameInput = document.createElement('input');
+    timelineFrameInput.id = 'timeline-frame-input';
+    timelineFrameInput.type = 'number';
+    timelineFrameInput.min = '1';
+    timelineFrameInput.max = '1';
+    timelineFrameInput.step = '1';
+    timelineFrameInput.value = '1';
+    timelineFrameInput.style.width = '0';
+    timelineFrameInput.style.minWidth = '60px';
+    timelineFrameInput.style.flex = '1';
+    timelineFrameInput.addEventListener('focus', pauseAnimation);
+    frameJump.appendChild(timelineFrameInput);
+
+    const frameJumpButton = document.createElement('button');
+    frameJumpButton.type = 'submit';
+    frameJumpButton.textContent = 'Go';
+    frameJumpButton.style.padding = '4px 8px';
+    frameJump.appendChild(frameJumpButton);
+
+    frameJump.addEventListener('submit', event => {
+        event.preventDefault();
+        pauseAnimation();
+        const requestedFrame = Number(timelineFrameInput.value);
+        if (Number.isInteger(requestedFrame)) {
+            const displayFrame = Math.min(loopTiming.frameCount, Math.max(1, requestedFrame));
+            setTimelineFrame(displayFrame - 1);
+            persistViewerSettings();
+        } else {
+            timelineFrameInput.value = String(timelineFrame + 1);
+        }
+        timelineFrameInput.select();
+    });
+    videoTimingContent.appendChild(frameJump);
+
     const frameButtons = document.createElement('div');
     frameButtons.style.display = 'flex';
     frameButtons.style.gap = '5px';
@@ -1588,6 +1635,11 @@ function updateLoopTimingUI() {
     }
     if (timelineFrameDisplay) {
         timelineFrameDisplay.textContent = `Frame ${timelineFrame + 1} / ${loopTiming.frameCount}`;
+    }
+    if (timelineFrameInput) {
+        timelineFrameInput.max = String(loopTiming.frameCount);
+        timelineFrameInput.value = String(timelineFrame + 1);
+        timelineFrameInput.disabled = loopTiming.frameCount <= 1;
     }
     if (!loopInfoDisplay) return;
 
@@ -3060,7 +3112,9 @@ function createChromeShader() {
             vec3 viewDir = normalize(vViewPosition);
             
             // World space reflection for environment mapping
-            vec3 worldNormal = normalize(mat3(viewMatrix) * normal);
+            // vNormal is in view space. Transform it back into world space
+            // before reflecting the world-space camera direction.
+            vec3 worldNormal = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
             vec3 worldViewDir = normalize(cameraPosition - vWorldPosition);
             vec3 worldReflection = reflect(-worldViewDir, worldNormal);
             
