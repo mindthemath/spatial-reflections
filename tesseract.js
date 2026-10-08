@@ -3205,7 +3205,6 @@ function createTesseract() {
     
     const topology = polytopeTopology(currentShape);
     const vertices4D = topology.vertices;
-    const edgeList = topology.edges;
     
     // First create vertex objects
     vertices = [];
@@ -3224,35 +3223,9 @@ function createTesseract() {
         vertices.push(vertexMesh);
     }
     
-    // Create edges as line segments (not cylinders) to ensure precise connections
+    // Faces meet directly; separate line geometry caused intermittent white
+    // outlines where coplanar edges competed with faces in the depth buffer.
     edges = [];
-    const edgeMaterial = new THREE.LineBasicMaterial({ color: 0xffffff });
-    
-    for (let i = 0; i < edgeList.length; i++) {
-        const [startIdx, endIdx] = edgeList[i];
-        const start4D = vertices4D[startIdx];
-        const end4D = vertices4D[endIdx];
-        
-        const start3D = project4Dto3D(start4D);
-        const end3D = project4Dto3D(end4D);
-        
-        const points = [];
-        points.push(new THREE.Vector3(start3D.x, start3D.y, start3D.z));
-        points.push(new THREE.Vector3(end3D.x, end3D.y, end3D.z));
-        
-        const edgeGeometry = new THREE.BufferGeometry().setFromPoints(points);
-        const edge = new THREE.Line(edgeGeometry, edgeMaterial);
-        
-        edge.userData = { 
-            startIdx, 
-            endIdx, 
-            start4D: {...start4D}, 
-            end4D: {...end4D} 
-        };
-        
-        tesseract.add(edge);
-        edges.push(edge);
-    }
     
     // Create faces for the tesseract
     faces = [];
