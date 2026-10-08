@@ -686,7 +686,7 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
         async prepareExport({startFrame, frames, fps, samplePixels, onProgress = null}) {
             if (!engine.settings.enabled) return null;
             const duration = frames / fps;
-            if (duration > 300) throw new Error('Generative soundtrack exports are currently limited to 5 minutes');
+            if (duration > 900) throw new Error('Generative soundtrack exports are currently limited to 15 minutes');
             const featureFrames = [];
             let previousLuma = null;
             const analysisFrames = Math.max(1, Math.ceil(duration * 8));

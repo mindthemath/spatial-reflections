@@ -2027,7 +2027,7 @@ function videoExportPlan() {
     }
 
     const duration = frames / exportFps;
-    if (typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled && duration > 300) error = 'Generative soundtrack exports are currently limited to 5 minutes.';
+    if (typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled && duration > 900) error = 'Generative soundtrack exports are currently limited to 15 minutes.';
     if (typeof visualMusic !== 'undefined' && visualMusic?.settings.enabled && videoExportDialog.dataset.musicAvailable === 'no') {
         error = videoExportDialog.dataset.musicReason || 'The local ffmpeg does not provide AAC soundtrack encoding.';
     }
