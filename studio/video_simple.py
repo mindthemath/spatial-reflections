@@ -17,9 +17,11 @@ from datetime import datetime, timezone
 if __package__:
     from .video_audio import mux_audio_args
     from .video_color import COLOR_PROFILE, browser_video_color_args
+    from .video_encoding import h264_encoding_args
 else:
     from video_audio import mux_audio_args
     from video_color import COLOR_PROFILE, browser_video_color_args
+    from video_encoding import h264_encoding_args
 
 
 class SimpleVideoBackend:
@@ -113,7 +115,6 @@ class SimpleVideoBackend:
             if not 1 <= int(threads) <= 4:
                 raise ValueError('Test encoder threads must be between 1 and 4')
             thread_args = ['-threads', str(int(threads))]
-        bit_rate = request['bitRate']
         container = (['-movflags', '+faststart'] if request['format'] == 'mp4'
                      else ['-f', 'matroska'])
         return [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-xerror',
@@ -121,9 +122,7 @@ class SimpleVideoBackend:
                 '-f', 'image2pipe', '-framerate', str(request['fps']), '-vcodec', 'png',
                 '-i', 'pipe:0', '-an',
                 *browser_video_color_args(),
-                '-c:v', 'libx264', '-preset', 'medium', *thread_args,
-                '-b:v', str(bit_rate), '-maxrate', str(round(bit_rate * 1.5)),
-                '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',
+                *h264_encoding_args(request, thread_args),
                 *container, str(job['pending'])]
 
     @staticmethod

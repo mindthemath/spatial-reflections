@@ -17,8 +17,10 @@ from urllib.parse import parse_qs, urlparse
 
 try:
     from .video_audio import MAX_AUDIO_BYTES, validate_music_request, validate_wave
+    from .video_encoding import MASTER_ENCODING
 except ImportError:
     from video_audio import MAX_AUDIO_BYTES, validate_music_request, validate_wave
+    from video_encoding import MASTER_ENCODING
 
 # Lazy selection keeps the simple fallback independent of the resume module.
 VideoJobStore = None
@@ -30,7 +32,9 @@ EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
 MAX_BODY = 100 * 1024 * 1024  # Legacy JSON export limit; Studio uses streamed PNG uploads.
 MAX_FACE_BYTES = 512 * 1024 * 1024
 PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
-VIDEO_QUALITIES = {'draft': 0.035, 'standard': 0.07, 'high': 0.12}
+# Master uses CRF rather than this planning rate; its deliberately conservative
+# factor is used only for disk/size estimates before the content-dependent encode.
+VIDEO_QUALITIES = {'draft': 0.035, 'standard': 0.07, 'high': 0.12, 'master': 0.8}
 VIDEO_FORMATS = ('mp4', 'mkv')
 MAX_VIDEO_FRAME_BYTES = 100 * 1024 * 1024
 MAX_VIDEO_FRAMES = 10_000_000
@@ -380,6 +384,10 @@ def start_video(request):
         raise ValueError('Encoder startup recovery failed; inspect the video job index')
     width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
     request = {**request, 'width': width, 'height': height, 'fps': fps, 'frames': frames}
+    if quality == 'master':
+        request['encoding'] = dict(MASTER_ENCODING)
+    else:
+        request.pop('encoding', None)
     music = validate_music_request(request)
     if music:
         if FFMPEG_AUDIO_ENCODER_ERROR:

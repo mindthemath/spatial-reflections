@@ -34,4 +34,9 @@ assert.equal(vm.runInContext('videoExportPlanFromRequest(request).range',context
 context.request={...request,startFrame:17};
 vm.runInContext('restoreVideoExportForm(request)',context);
 assert.equal(elements.get('video-export-start').value,'0.567');
-console.log('PASS: saved export fields, zero-start clip classification and authoritative running summary.');
+context.request={...request,quality:'master',bitRate:50000000,estimatedBytes:100000000,music:{enabled:true}};
+context.activeVideoExportPlan=vm.runInContext('({...videoExportPlanFromRequest(request),resumed:true})',context);
+vm.runInContext('updateVideoExportSummary()',context);
+assert.match(elements.get('video-export-summary').innerHTML,/Master · CRF 12 · slow · grain-tuned dark-detail AQ/);
+assert.match(elements.get('video-export-summary').innerHTML,/no bitrate ceiling/);
+console.log('PASS: saved export fields, zero-start clip classification, master profile and authoritative running summary.');

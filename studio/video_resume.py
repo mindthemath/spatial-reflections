@@ -19,9 +19,11 @@ from pathlib import Path
 if __package__:
     from .video_audio import mux_audio_args
     from .video_color import COLOR_PROFILE, browser_video_color_args
+    from .video_encoding import h264_encoding_args
 else:
     from video_audio import mux_audio_args
     from video_color import COLOR_PROFILE, browser_video_color_args
+    from video_encoding import h264_encoding_args
 
 
 SCHEMA_VERSION = 1
@@ -868,9 +870,7 @@ class VideoJobStore:
             *(['-filter_threads', '1'] if thread_args else []), *thread_args,
             '-f', 'image2pipe', '-framerate', str(request['fps']),
             '-vcodec', 'png', '-i', 'pipe:0', '-an', *color_args,
-            '-c:v', 'libx264', '-preset', 'medium', *thread_args,
-            '-b:v', str(bit_rate), '-maxrate', str(round(bit_rate * 1.5)),
-            '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',
+            *h264_encoding_args({**request, 'bitRate': bit_rate}, thread_args),
             '-f', 'matroska', str(pending),
         ]
         stderr_path = manifest.parent / f'.segment-{segment_index:06d}.stderr.log'

@@ -475,6 +475,11 @@ class StudioAPITest(unittest.TestCase):
             server.validate_video_request({
                 'width': 1920, 'height': 1080, 'fps': 60, 'frames': 60,
                 'quality': 'standard', 'format': 'avi'})
+        master = server.validate_video_request({
+            'width': 1920, 'height': 1080, 'fps': 30, 'frames': 900,
+            'quality': 'master', 'format': 'mp4'})
+        self.assertEqual(master[4], 'master')
+        self.assertEqual(master[6], round(1920 * 1080 * 30 * .8))
 
     def test_ffmpeg_preflight_requires_libx264(self):
         supported = mock.Mock(returncode=0, stdout=' V....D libx264 H.264 encoder')
