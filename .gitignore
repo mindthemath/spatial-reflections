@@ -16,3 +16,4 @@ __pycache__/
 *.pyc
 # local generated/read-only review pages
 docs/
+.DS_Store
