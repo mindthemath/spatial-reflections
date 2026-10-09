@@ -1,5 +1,5 @@
 # Copyright 2026 Michael Pilosov. All rights reserved.
-.PHONY: serve unstick static refresh-site build run run-isolated install sync update copyright test-copyright test test-fast test-lint test-app test-studio test-video _test-js _test-app-js _test-video-js _test-video-python-fast test-all _test-all test-tools test-guard test-python test-video-backend _test-video-backend test-video-soak test-video-encoder test-app-render test-audio test-video-capture test-app-browser test-studio-browser test-video-browser test-video-simple-browser test-browser test-agent-api _test-browser
+.PHONY: serve unstick static refresh-site brightsign build run run-isolated install sync update copyright test-copyright test test-fast test-lint test-app test-studio test-video _test-js _test-app-js _test-video-js _test-video-python-fast test-all _test-all test-tools test-guard test-python test-video-backend _test-video-backend test-video-soak test-video-encoder test-app-render test-audio test-video-capture test-app-browser test-studio-browser test-video-browser test-video-simple-browser test-browser test-agent-api _test-browser
 
 # Nested guarded stages must remain serial even under make -j.
 .NOTPARALLEL:
@@ -20,6 +20,10 @@ static:
 # Re-snapshot the current viewer runtime into every published work.
 refresh-site:
 	python3 studio/server.py --refresh-site
+
+# SD card root for one work: make brightsign SLUG=mill1
+brightsign:
+	python3 scripts/brightsign.py "$(SLUG)"
 
 build:
 	docker build -t spatial-reflections .
