@@ -45,6 +45,8 @@ finally:
   browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),timeout:15000,args:['--renderer-process-limit=2','--use-gl=angle','--use-angle=swiftshader']});
   const context=await browser.newContext({viewport:{width:1700,height:1100}});
   const page=await context.newPage(),errors=[];let starting=true,failStartup;
+  // three.js only logs GLSL compile failures; the scene then silently renders nothing.
+  context.on('console',message=>{if(/Shader Error|WebGLProgram/.test(message.text()))errors.push(message.text().slice(0,500));});
   const startupFailure=new Promise((_,reject)=>{failStartup=reject;});
   page.on('pageerror',error=>{errors.push(error.message);if(starting)failStartup(new Error(`Studio startup page error: ${error.message}`));});
   page.on('response',response=>{if(starting&&response.status()>=400&&['script','stylesheet','image'].includes(response.request().resourceType()))failStartup(new Error(`Studio startup resource failed: ${response.status()} ${response.url()}`));});
