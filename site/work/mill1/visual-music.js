@@ -603,7 +603,7 @@ async function audioBufferWav(buffer, onProgress = null) {
     return new Blob([output], {type: 'audio/wav'});
 }
 
-export function installVisualMusic({mount, canvas, initialSettings = null, onStateChange = null}) {
+export function installVisualMusic({mount, canvas, initialSettings = null, onStateChange = null, onPlaybackChange = null}) {
     const section = document.createElement('section');
     section.className = 'visual-music';
     section.innerHTML = `
@@ -679,17 +679,28 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
     section.querySelector('.music-seed button').addEventListener('click', () => { engine.vary(); refreshControls(); });
     const start = section.querySelector('.music-start');
     const stop = section.querySelector('.music-stop');
-    const startSoundtrack = async () => {
-        try {
-            await engine.start(); start.disabled = true; stop.disabled = false;
-            return true;
-        } catch (error) {
-            status.textContent = error.message; status.classList.add('error');
-            return false;
-        }
+    const setPlaying = playing => {
+        start.disabled = playing; stop.disabled = !playing;
+        onPlaybackChange?.(playing);
     };
+    let pendingStart = null, cancelAutoplay = null;
+    // Idempotent: while a start waits on autoplay, later gestures only unlock the context.
+    const startSoundtrack = () => {
+        if (pendingStart) { engine.context?.resume().catch(() => {}); return pendingStart; }
+        pendingStart = (async () => {
+            try {
+                await engine.start(); setPlaying(true);
+                return true;
+            } catch (error) {
+                status.textContent = error.message; status.classList.add('error');
+                return false;
+            } finally { pendingStart = null; }
+        })();
+        return pendingStart;
+    };
+    const stopSoundtrack = () => { cancelAutoplay?.(); engine.stop(); setPlaying(false); };
     start.addEventListener('click', startSoundtrack);
-    stop.addEventListener('click', () => { engine.stop(); start.disabled = false; stop.disabled = true; });
+    stop.addEventListener('click', stopSoundtrack);
 
     const meter = section.querySelector('.music-meter');
     const meterContext = meter.getContext('2d');
@@ -716,8 +727,7 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
         refreshControls();
         engine.updateMix();
         if (engine.context && engine.settings.enabled) engine.rebuildSustains();
-        start.disabled = false;
-        stop.disabled = true;
+        setPlaying(false);
         status.textContent = engine.settings.enabled ? 'Soundtrack restored — click Start soundtrack to hear it.' : 'Sound is off.';
         dot.classList.remove('active');
     };
@@ -727,27 +737,25 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
         get settings() { return structuredClone(engine.settings); },
         get defaultSettings() { return structuredClone(DEFAULTS); },
         setSettings: applySettings,
+        get playing() { return !stop.disabled; },
+        start: startSoundtrack,
+        stop: stopSoundtrack,
         async requestAutoplay() {
             // iOS mutes Web Audio in silent mode unless the page declares media playback.
             try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* Optional. */ }
             // Browsers grant playback on different events: iOS and Chrome only
             // count a touch once it ends, so keep listening until a start succeeds.
             const GESTURES = ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'];
-            const cleanup = () => {
+            const cleanup = cancelAutoplay = () => {
+                cancelAutoplay = null;
                 for (const type of GESTURES) window.removeEventListener(type, resume, true);
             };
-            let starting = null;
-            const begin = () => starting = startSoundtrack().then(started => {
-                starting = null;
-                if (started) cleanup();
-                return started;
-            });
-            // A pending start only needs the context unlocked inside the gesture.
-            const resume = () => { if (starting && engine.context) void engine.context.resume(); else void begin(); };
+            const resume = () => { startSoundtrack().then(started => { if (started) cleanup(); }); };
             // Install the gesture fallback before trying autoplay: some browsers
             // leave AudioContext.resume() pending rather than rejecting it.
             for (const type of GESTURES) window.addEventListener(type, resume, true);
-            const attempt = begin();
+            const attempt = startSoundtrack();
+            attempt.then(started => { if (started) cleanup(); });
             const started = await Promise.race([
                 attempt,
                 new Promise(resolve => setTimeout(() => resolve(false), 250))
@@ -795,7 +803,6 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
                 }
             };
         },
-        stop: () => engine.stop(),
         destroy() { cancelAnimationFrame(meterFrame); engine.stop(); engine.context?.close(); section.remove(); }
     });
 }
