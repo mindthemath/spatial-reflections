@@ -19,9 +19,8 @@ td.m { white-space: nowrap; }
   tr.rule th { display: block; padding: 0; }
   tr.entry { display: grid; grid-template-columns: 20px minmax(0, 1fr); column-gap: 6px; padding: 2px 0; }
   tr.entry td { padding: 0; text-align: left; }
-  tr.entry td.i { grid-row: 1 / span 4; }
-  tr.entry td.t { font-style: italic; }
-  tr.entry td.n, tr.entry td.t, tr.entry td.m, tr.entry td.d { grid-column: 2; }
+  tr.entry td.i { grid-row: 1 / span 3; }
+  tr.entry td.n, tr.entry td.m, tr.entry td.d { grid-column: 2; }
 }
 </style>
 </head>
@@ -30,9 +29,9 @@ td.m { white-space: nowrap; }
 <pre id="header" hidden></pre>
 <table>
  <tbody id="listing">
-  <tr class="head"><th valign="top"><img src="icons/blank.gif" alt="[ICO]" width="20" height="22"></th><th><a data-column="N">Name</a></th><th><a data-column="T">Title</a></th><th><a data-column="M">Last modified</a></th><th><a data-column="D">Description</a></th></tr>
-  <tr class="rule"><th colspan="5"><hr></th></tr>
-  <tr class="rule"><th colspan="5"><hr></th></tr>
+  <tr class="head"><th valign="top"><img src="icons/blank.gif" alt="[ICO]" width="20" height="22"></th><th><a data-column="N">Name</a></th><th><a data-column="M">Last modified</a></th><th><a data-column="D">Description</a></th></tr>
+  <tr class="rule"><th colspan="4"><hr></th></tr>
+  <tr class="rule"><th colspan="4"><hr></th></tr>
  </tbody>
 </table>
 <address id="signature">SpatialReflections/2026 (Mathematical Michael) Server</address>
@@ -40,7 +39,7 @@ td.m { white-space: nowrap; }
 const listing = document.querySelector('#listing');
 const [, closingRule] = listing.querySelectorAll('tr.rule');
 const params = new URLSearchParams(location.search.replaceAll(';', '&'));
-const column = 'NTMD'.includes(params.get('C') || '') && params.get('C') ? params.get('C') : 'M';
+const column = 'NMD'.includes(params.get('C') || '') && params.get('C') ? params.get('C') : 'M';
 const order = params.get('O') === 'A' || params.get('O') === 'D' ? params.get('O') : (params.get('C') ? 'A' : 'D');
 
 // Like Apache: the active column's link flips the order; the others sort ascending.
@@ -53,9 +52,10 @@ const stamp = iso => {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 16).replace('T', ' ');
 };
+// Apache has no title column: the title leads the description instead.
+const describe = item => [item.title, item.description].filter(Boolean).join(': ');
 const keys = {
-  N: item => item.slug, T: item => item.title || '', M: item => item.publishedAt || '',
-  D: item => item.description || ''
+  N: item => item.slug, M: item => item.publishedAt || '', D: describe
 };
 const cell = (className, content, align) => {
   const td = document.createElement('td');
@@ -74,9 +74,9 @@ function row(item) {
   link.href = item.url;
   link.textContent = `${item.slug}/`;
   tr.append(
-    cell('i', icon), cell('n', link), cell('t', item.title || ''),
+    cell('i', icon), cell('n', link),
     cell('m', `${stamp(item.publishedAt)}  `, 'right'),
-    cell('d', item.description || ' ')
+    cell('d', describe(item) || '\u00a0')
   );
   return tr;
 }
