@@ -729,6 +729,11 @@ function applyViewSettings(metadata) {
                 if (material.uniforms.lightingType) {
                     material.uniforms.lightingType.value = lightingTypeInt;
                 }
+                // Without this, a restored "grain off" only unticks the checkbox while
+                // the existing faces keep rendering grain (and exports record it as off).
+                if (material.uniforms.surfaceGrain) {
+                    material.uniforms.surfaceGrain.value = surfaceGrain ? 1 : 0;
+                }
             }
         });
         
