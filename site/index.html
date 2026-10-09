@@ -4,47 +4,124 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Spatial Reflections by Michael Pilosov</title>
+<title>Index of /spatial-reflections</title>
 <style>
-:root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; background: #090b10; color: #e6e9ef; }
-body { max-width: 1100px; margin: 0 auto; padding: clamp(24px, 6vw, 80px); }
-header { margin-bottom: 48px; }
-h1 { font-size: clamp(2rem, 6vw, 5rem); line-height: .95; max-width: 12ch; margin: 0 0 24px; }
-#work { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 24px; }
-article { border: 1px solid #414b5c; background: #11151d; }
-article a { display: block; color: inherit; text-decoration: none; }
-article img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; background: #000; }
-article div { padding: 16px; }
-article h2 { margin: 0 0 8px; font-size: 1.15rem; }
-article p { margin: 0; color: #aeb9c9; }
-#status { color: #aeb9c9; }
-a:focus-visible { outline: 2px solid #80caff; outline-offset: 3px; }
+/* mod_autoindex ships no stylesheet: browser defaults are the look.
+   Everything below only keeps that look intact on small screens. */
+/* Dark mode is the browser's own dark defaults; only the black line-art icons need inverting. */
+:root { color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { img { filter: invert(1) hue-rotate(180deg); } }
+pre { white-space: pre-wrap; }
+img { image-rendering: pixelated; }
+td, th { vertical-align: top; }
+td.m { white-space: nowrap; }
+@media (max-width: 640px) {
+  table, tbody { display: block; }
+  tr.head { display: none; }
+  tr.rule { display: block; }
+  tr.rule th { display: block; padding: 0; }
+  tr.entry { display: grid; grid-template-columns: 20px minmax(0, 1fr); column-gap: 6px; padding: 2px 0; }
+  tr.entry td { padding: 0; text-align: left; }
+  tr.entry td.i { grid-row: 1 / span 3; }
+  tr.entry td.n, tr.entry td.m, tr.entry td.d { grid-column: 2; }
+}
 </style>
 </head>
 <body>
-<header>
-<h1>Spatial Reflections</h1>
-<h2><i>I am Trapped in a Beautiful House of Mirrors</i></h2>
-<p>A collection of photographic environments reflected by a rotating four-dimensional shape.</p>
-</header>
-<main>
-<p id="status">Loading work…</p>
-<section id="work" aria-label="Published work"></section>
-</main>
+<h1 id="heading" hidden>Index of /spatial-reflections</h1>
+<pre id="header" hidden></pre>
+<table>
+ <tbody id="listing">
+  <tr class="head"><th valign="top"><img src="icons/blank.gif" alt="[ICO]" width="20" height="22"></th><th><a data-column="N">Name</a></th><th><a data-column="M">Last modified</a></th><th><a data-column="D">Description</a></th></tr>
+  <tr class="rule"><th colspan="4"><hr></th></tr>
+  <tr class="rule"><th colspan="4"><hr></th></tr>
+ </tbody>
+</table>
+<address id="signature">SpatialReflections/2026 (Mathematical Michael) Server</address>
 <script type="module">
-const status=document.querySelector('#status'),root=document.querySelector('#work');
+const listing = document.querySelector('#listing');
+const [, closingRule] = listing.querySelectorAll('tr.rule');
+const params = new URLSearchParams(location.search.replaceAll(';', '&'));
+const column = 'NMD'.includes(params.get('C') || '') && params.get('C') ? params.get('C') : 'M';
+const order = params.get('O') === 'A' || params.get('O') === 'D' ? params.get('O') : (params.get('C') ? 'A' : 'D');
+
+// Like Apache: the active column's link flips the order; the others sort ascending.
+for (const link of listing.querySelectorAll('a[data-column]')) {
+  const next = link.dataset.column === column && order === 'A' ? 'D' : 'A';
+  link.href = `?C=${link.dataset.column};O=${next}`;
+}
+
+const stamp = iso => {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 16).replace('T', ' ');
+};
+// Apache has no title column: the title leads the description instead.
+const describe = item => [item.title, item.description].filter(Boolean).join(': ');
+const keys = {
+  N: entry => entry.name, M: entry => entry.modified || '', D: entry => entry.description
+};
+const cell = (className, content, align) => {
+  const td = document.createElement('td');
+  td.className = className;
+  if (align) td.align = align;
+  if (typeof content === 'string') td.textContent = content; else td.append(content);
+  return td;
+};
+
+function row(entry) {
+  const tr = document.createElement('tr');
+  tr.className = 'entry';
+  const icon = document.createElement('img');
+  Object.assign(icon, { src: `icons/${entry.icon}`, alt: entry.alt, width: 20, height: 22 });
+  const link = document.createElement('a');
+  link.href = entry.href;
+  link.textContent = entry.name;
+  tr.append(
+    cell('i', icon), cell('n', link),
+    cell('m', `${stamp(entry.modified)}  `, 'right'),
+    cell('d', entry.description || '\u00a0')
+  );
+  return tr;
+}
+
+const work = item => ({
+  name: `${item.slug}/`, href: item.url, icon: 'folder.gif', alt: '[DIR]',
+  modified: item.publishedAt, description: describe(item)
+});
+// Files carry their real modification time, as Apache would show it.
+const file = async (name, icon) => {
+  const response = await fetch(name, { method: 'HEAD' }).catch(() => null);
+  if (!response?.ok) return null;
+  const modified = new Date(response.headers.get('Last-Modified') ?? NaN);
+  return { name, href: name, icon, alt: '[   ]', modified: Number.isNaN(modified.getTime()) ? '' : modified.toISOString(), description: '' };
+};
+
+// Like Apache's HeaderName: a text HEADER.txt is shown verbatim in <pre>
+// and replaces the "Index of" heading (mod_autoindex emit_head, emit_H1 = 0).
+fetch('./HEADER.txt').then(response => response.ok ? response.text() : '').catch(() => '').then(text => {
+  const header = document.querySelector('#header');
+  header.textContent = text;
+  header.hidden = !text.trim();
+  document.querySelector('#heading').hidden = !header.hidden;
+});
+
 try {
-  const response=await fetch('./catalog.json');
-  if(!response.ok)throw new Error('The catalog could not be loaded.');
-  const catalog=await response.json();
-  status.hidden=!!catalog.work.length;
-  if(!catalog.work.length)status.textContent='No work has been published yet.';
-  for(const item of catalog.work){
-    const article=document.createElement('article'),link=document.createElement('a'),image=document.createElement('img'),body=document.createElement('div'),title=document.createElement('h2'),description=document.createElement('p');
-    link.href=item.url;image.src=item.thumbnail;image.alt='';image.loading='lazy';title.textContent=item.title;description.textContent=item.description||'';
-    body.append(title);if(item.description)body.append(description);link.append(image,body);article.append(link);root.append(article);
-  }
-} catch(error) { status.textContent=error.message; }
+  const response = await fetch('./catalog.json');
+  if (!response.ok) throw new Error('The catalog could not be loaded.');
+  const catalog = await response.json();
+  const entries = [...catalog.work.map(work), ...(await Promise.all([file('404.html', 'layout.gif')])).filter(Boolean)];
+  const key = keys[column];
+  const sorted = entries.sort((a, b) => key(a).localeCompare(key(b)) * (order === 'A' ? 1 : -1));
+  closingRule.before(...sorted.map(row));
+} catch (error) {
+  const tr = document.createElement('tr');
+  tr.className = 'entry';
+  tr.append(cell('i', ''), cell('n', error.message));
+  closingRule.before(tr);
+}
+
+const port = location.port || (location.protocol === 'https:' ? '443' : '80');
+document.querySelector('#signature').textContent += ` at ${location.hostname || 'localhost'} Port ${port}`;
 </script>
 </body>
 </html>
