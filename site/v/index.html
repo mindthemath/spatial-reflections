@@ -1,0 +1,79 @@
+<!doctype html>
+<!-- Copyright 2026 Michael Pilosov. All rights reserved. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Index of /spatial-reflections/v</title>
+<style>
+/* Same stylesheet as the root listing: browser defaults, fixed for small screens. */
+:root { color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { img { filter: invert(1) hue-rotate(180deg); } }
+img { image-rendering: pixelated; }
+td, th { vertical-align: top; }
+td.m { white-space: nowrap; }
+@media (max-width: 640px) {
+  table, tbody { display: block; }
+  tr.head { display: none; }
+  tr.rule { display: block; }
+  tr.rule th { display: block; padding: 0; }
+  tr.entry { display: grid; grid-template-columns: 20px minmax(0, 1fr); column-gap: 6px; padding: 2px 0; }
+  tr.entry td { padding: 0; text-align: left; }
+  tr.entry td.i { grid-row: 1 / span 3; }
+  tr.entry td.n, tr.entry td.m, tr.entry td.d { grid-column: 2; }
+}
+</style>
+</head>
+<body>
+<h1>Index of /spatial-reflections/v</h1>
+<table>
+ <tbody id="listing">
+  <tr class="head"><th valign="top"><img src="../icons/blank.gif" alt="[ICO]" width="20" height="22"></th><th><a data-column="N">Name</a></th><th><a data-column="M">Last modified</a></th><th><a data-column="D">Description</a></th></tr>
+  <tr class="rule"><th colspan="4"><hr></th></tr>
+  <tr class="entry parent"><td class="i"><img src="../icons/back.gif" alt="[PARENTDIR]" width="20" height="22"></td><td class="n"><a href="/">Parent Directory</a></td><td class="m">&nbsp;</td><td class="d">&nbsp;</td></tr>
+  <!-- Unlisted: nothing on the site links here. Videos live in R2 behind sr-cdn.clfx.cc. -->
+  <tr class="entry"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill1.mp4">mill1.mp4</a></td><td class="m" align="right">&nbsp;</td><td class="d">The Mill, I</td></tr>
+  <tr class="entry"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill2.mp4">mill2.mp4</a></td><td class="m" align="right">&nbsp;</td><td class="d">The Mill, II</td></tr>
+  <tr class="entry"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill3.mp4">mill3.mp4</a></td><td class="m" align="right">&nbsp;</td><td class="d">The Mill, III</td></tr>
+  <tr class="rule"><th colspan="4"><hr></th></tr>
+ </tbody>
+</table>
+<address id="signature">SpatialReflections/2026 (Mathematical Michael) Server</address>
+<script type="module">
+const listing = document.querySelector('#listing');
+const [, closingRule] = listing.querySelectorAll('tr.rule');
+const rows = [...listing.querySelectorAll('tr.entry:not(.parent)')];
+const params = new URLSearchParams(location.search.replaceAll(';', '&'));
+const column = ['N', 'M', 'D'].includes(params.get('C')) ? params.get('C') : 'N';
+const order = params.get('O') === 'D' ? 'D' : 'A';
+
+// Like Apache: the active column's link flips the order; the others sort ascending.
+for (const link of listing.querySelectorAll('a[data-column]')) {
+  const next = link.dataset.column === column && order === 'A' ? 'D' : 'A';
+  link.href = `?C=${link.dataset.column};O=${next}`;
+}
+
+// Real modification times from the CDN. Last-Modified is readable cross-origin,
+// but only if the bucket's CORS policy allows HEAD; otherwise the column stays blank.
+await Promise.all(rows.map(async row => {
+  const response = await fetch(row.querySelector('td.n a').href, { method: 'HEAD' }).catch(() => null);
+  const modified = new Date(response?.ok ? response.headers.get('Last-Modified') ?? NaN : NaN);
+  if (Number.isNaN(modified.getTime())) return;
+  row.dataset.modified = modified.toISOString();
+  row.querySelector('td.m').textContent = `${row.dataset.modified.slice(0, 16).replace('T', ' ')}  `;
+}));
+
+const keys = {
+  N: row => row.querySelector('td.n').textContent,
+  M: row => row.dataset.modified || '',
+  D: row => row.querySelector('td.d').textContent
+};
+rows.sort((a, b) => keys[column](a).localeCompare(keys[column](b)) * (order === 'A' ? 1 : -1));
+closingRule.before(...rows);
+
+const port = location.port || (location.protocol === 'https:' ? '443' : '80');
+document.querySelector('#signature').textContent += ` at ${location.hostname || 'localhost'} Port ${port}`;
+</script>
+</body>
+</html>
