@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "work": [
     {
-      "slug": "mill3",
-      "title": "The Mill, III",
-      "description": "",
+      "slug": "mill1",
+      "title": "The Mill, I",
+      "description": "An encapsulation of a disorienting season.",
       "publishedAt": "2026-10-09T18:48:25.294592+00:00",
-      "url": "work/mill3/",
+      "url": "work/mill1/",
       "thumbnail": ""
     },
     {
@@ -18,11 +18,11 @@
       "thumbnail": ""
     },
     {
-      "slug": "mill1",
-      "title": "The Mill, I",
-      "description": "An encapsulation of a disorienting season.",
+      "slug": "mill3",
+      "title": "The Mill, III",
+      "description": "",
       "publishedAt": "2026-10-09T18:47:21.218568+00:00",
-      "url": "work/mill1/",
+      "url": "work/mill3/",
       "thumbnail": ""
     }
   ]
