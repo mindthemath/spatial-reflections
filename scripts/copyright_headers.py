@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_RIGHTS_FILE = ROOT / 'SOURCE_RIGHTS.txt'
-EXCLUDED_PREFIXES = ('vendor/', 'node_modules/', 'exports/', 'videos/', 'raw/', 'site/work/', 'docs/')
+EXCLUDED_PREFIXES = ('vendor/', 'node_modules/', 'exports/', 'videos/', 'raw/', 'site/work/', 'site2/work/', 'docs/')
 HASH_NAMES = {'Dockerfile', 'makefile'}
 HASH_SUFFIXES = {'.py', '.sh', '.yml', '.yaml'}
 BLOCK_SUFFIXES = {'.js', '.mjs', '.cjs', '.css'}
