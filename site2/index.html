@@ -8,6 +8,9 @@
 <style>
 /* mod_autoindex ships no stylesheet: browser defaults are the look.
    Everything below only keeps that look intact on small screens. */
+/* Dark mode is the browser's own dark defaults; only the black line-art icons need inverting. */
+:root { color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { img { filter: invert(1) hue-rotate(180deg); } }
 pre { white-space: pre-wrap; }
 img { image-rendering: pixelated; }
 td, th { vertical-align: top; }
