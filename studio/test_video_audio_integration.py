@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Real ffmpeg checks for optional soundtrack muxing and resume persistence."""
 import hashlib
 import io

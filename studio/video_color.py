@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Color policy for new browser exports: preserve sRGB sample values/curve.
 
 sRGB and BT.709 share primaries, not transfer functions. swscale converts

@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 import {copyFile, mkdir, readFile, readdir, rm} from 'node:fs/promises';
 import {dirname, relative, resolve, sep} from 'node:path';
 

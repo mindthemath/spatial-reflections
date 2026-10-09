@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Serve the viewer and Studio, and write collision-free local exports."""
 import argparse
 import atexit
@@ -172,7 +173,8 @@ def publish_work(request):
     source_size = manifest.get('pipeline', {}).get('size')
     published_size = source_size if asset_size == 'original' else min(source_size or asset_size, asset_size)
     required = [ROOT / name for name in ('index.html', 'tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js',
-                                          'visual-music.js', 'visual-music-core.js')]
+                                          'visual-music.js', 'visual-music-core.js', 'SOURCE_RIGHTS.txt',
+                                          'DISTRIBUTION_RIGHTS.txt')]
     vendor = ROOT / 'vendor'
     vendor_files = (vendor / 'three.module.js', vendor / 'controls' / 'OrbitControls.js', vendor / 'THREE-LICENSE.txt')
     if any(not path.is_file() for path in (*required, *vendor_files)):

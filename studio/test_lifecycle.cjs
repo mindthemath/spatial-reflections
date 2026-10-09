@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Common lifecycle helpers. Direct test-file execution also uses the shared guard.
 const { spawnSync } = require('child_process');
 function ensureGuard(file, { network = false, timeout = 300 } = {}) {

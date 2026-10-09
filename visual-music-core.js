@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Pure deterministic composition helpers for the visual-music prototype.
 // This module deliberately has no DOM or Web Audio dependencies so its musical
 // decisions can be fixture-tested and later reused by an export renderer.

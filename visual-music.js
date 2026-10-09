@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 import {PRESETS, analyzeRGBA, compositionAt, hash32, midiFrequency, random01} from './visual-music-core.js';
 
 const STORAGE_KEY = 'spatial-reflections.music-prototype.v1';
@@ -678,13 +679,16 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
     section.querySelector('.music-seed button').addEventListener('click', () => { engine.vary(); refreshControls(); });
     const start = section.querySelector('.music-start');
     const stop = section.querySelector('.music-stop');
-    start.addEventListener('click', async () => {
+    const startSoundtrack = async () => {
         try {
             await engine.start(); start.disabled = true; stop.disabled = false;
+            return true;
         } catch (error) {
             status.textContent = error.message; status.classList.add('error');
+            return false;
         }
-    });
+    };
+    start.addEventListener('click', startSoundtrack);
     stop.addEventListener('click', () => { engine.stop(); start.disabled = false; stop.disabled = true; });
 
     const meter = section.querySelector('.music-meter');
@@ -721,7 +725,33 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
     return Object.freeze({
         tick: state => engine.tick(state),
         get settings() { return structuredClone(engine.settings); },
+        get defaultSettings() { return structuredClone(DEFAULTS); },
         setSettings: applySettings,
+        async requestAutoplay() {
+            const cleanup = () => {
+                window.removeEventListener('pointerdown', resume);
+                window.removeEventListener('keydown', resume);
+            };
+            const resume = () => {
+                cleanup();
+                void startSoundtrack();
+            };
+            // Install the gesture fallback before trying autoplay: some browsers
+            // leave AudioContext.resume() pending rather than rejecting it.
+            window.addEventListener('pointerdown', resume, {once: true});
+            window.addEventListener('keydown', resume, {once: true});
+            const attempt = startSoundtrack();
+            attempt.then(started => { if (started) cleanup(); });
+            const started = await Promise.race([
+                attempt,
+                new Promise(resolve => setTimeout(() => resolve(false), 250))
+            ]);
+            if (started) cleanup();
+            else {
+                status.textContent = 'Soundtrack autoplay is waiting for a click or key press.';
+                status.classList.remove('error');
+            }
+        },
         async prepareExport({startFrame, frames, fps, samplePixels, onProgress = null, signal = null}) {
             if (!engine.settings.enabled) return null;
             const duration = frames / fps;

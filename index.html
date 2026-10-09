@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- Copyright 2026 Michael Pilosov. All rights reserved. -->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -39,8 +40,11 @@
         #skybox-library-dialog::backdrop, #publish-skybox-dialog::backdrop, #video-export-dialog::backdrop, #confirm-action-dialog::backdrop { background: #000c; }
         #publish-skybox-dialog form, #publish-skybox-dialog label { display: grid; gap: 7px; }
         #publish-skybox-dialog form { gap: 14px; }
-        #publish-skybox-dialog input, #publish-skybox-dialog textarea { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; font: inherit; }
+        #publish-skybox-dialog input, #publish-skybox-dialog textarea, #publish-skybox-dialog select { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; font: inherit; }
         #publish-skybox-dialog textarea { min-height: 80px; resize: vertical; }
+        #publish-skybox-dialog .publish-viewer-settings { display: grid; gap: 10px; margin: 0; padding: 12px; border: 1px solid #52637c; }
+        #publish-skybox-dialog .publish-viewer-settings legend { padding: 0 5px; font-weight: bold; letter-spacing: .04em; }
+        #publish-skybox-dialog .publish-viewer-settings p, #publish-skybox-dialog .publish-viewer-settings small { margin: 0; color: #a8bacf; line-height: 1.4; }
         #publish-result { overflow-wrap: anywhere; }
         #video-export-dialog label { display: grid; gap: 5px; }
         #video-export-dialog input, #video-export-dialog select { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; border-radius: 0; font: inherit; }

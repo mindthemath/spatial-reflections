@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Opt-in production-resolution checkpoint/restart validation, isolated in temporary storage."""
 import argparse
 import json

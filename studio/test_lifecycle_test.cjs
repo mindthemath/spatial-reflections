@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // No Chromium or networking: exercise awaited server shutdown and cleanup bounds.
 const { spawn } = require('child_process');
 const assert = require('assert/strict');

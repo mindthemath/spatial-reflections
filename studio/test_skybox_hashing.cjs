@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Published/insecure-origin regression, without Chromium or HTTP connections.
 const assert = require('assert/strict');
 const fs = require('fs');

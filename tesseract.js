@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { installSkyboxLibrary } from './viewer-skyboxes.js';
@@ -59,6 +60,7 @@ let motionStepLabel;
 let loopInfoDisplay;
 let timelineSlider;
 let timelineFrameDisplay;
+let timelineFrameInput;
 let exportFpsSelect;
 let videoExportButton;
 let videoExportDialog;
@@ -112,6 +114,32 @@ function viewerSettings() {
     };
 }
 
+function defaultViewerSettings() {
+    return {
+        shape: 'tesseract',
+        rotationSpeed: 0.005,
+        rotationCoefficients: { xw: 0, yw: 0, zw: 0 },
+        shader: 'chrome',
+        lighting: 'diagonal',
+        lightDistance: 0.1,
+        showVertices: false,
+        surfaceGrain: true,
+        animationPaused: true,
+        exportFps: 60,
+        videoExportWidth: 1920,
+        videoExportHeight: 1080,
+        videoExportQuality: 'standard',
+        timelineFrame: 0,
+        panelExpanded: true,
+        videoTimingExpanded: false,
+        music: visualMusic?.defaultSettings ?? { enabled: false },
+        camera: {
+            position: { x: 3, y: 3, z: 3 },
+            target: { x: 0, y: 0, z: 0 }
+        }
+    };
+}
+
 function applyViewerSettings(saved) {
     if (!saved || typeof saved !== 'object') return;
     const clamp = (value, min, max, fallback) => {
@@ -155,6 +183,9 @@ function applyViewerSettings(saved) {
 function loadViewerSettings() {
     if (publication?.schemaVersion === 1) {
         applyViewerSettings(publication.viewer);
+        // Published work opens as artwork first; controls remain available
+        // behind the small corner button.
+        panelExpanded = false;
         return;
     }
     try {
@@ -245,6 +276,9 @@ function init() {
         initialSettings: restoredMusicSettings,
         onStateChange: persistViewerSettings
     });
+    if (publication?.schemaVersion === 1 && publication.viewer?.musicAutoplay === true) {
+        visualMusic.requestAutoplay();
+    }
     createEnvironmentMap();
     
     // Initialize file upload for loading views
@@ -270,6 +304,7 @@ function createEnvironmentMap() {
         renderer,
         publication,
         getViewerState: viewerSettings,
+        getDefaultViewerState: defaultViewerSettings,
         getShader: () => currentShader,
         onTexture: texture => {
             const previous = envMap;
@@ -1213,6 +1248,52 @@ function createControls() {
     timelineFrameDisplay.style.textAlign = 'center';
     videoTimingContent.appendChild(timelineFrameDisplay);
 
+    const frameJump = document.createElement('form');
+    frameJump.style.display = 'flex';
+    frameJump.style.alignItems = 'center';
+    frameJump.style.gap = '5px';
+    frameJump.style.marginTop = '6px';
+
+    const frameJumpLabel = document.createElement('label');
+    frameJumpLabel.htmlFor = 'timeline-frame-input';
+    frameJumpLabel.textContent = 'Go to frame';
+    frameJumpLabel.style.whiteSpace = 'nowrap';
+    frameJump.appendChild(frameJumpLabel);
+
+    timelineFrameInput = document.createElement('input');
+    timelineFrameInput.id = 'timeline-frame-input';
+    timelineFrameInput.type = 'number';
+    timelineFrameInput.min = '1';
+    timelineFrameInput.max = '1';
+    timelineFrameInput.step = '1';
+    timelineFrameInput.value = '1';
+    timelineFrameInput.style.width = '0';
+    timelineFrameInput.style.minWidth = '60px';
+    timelineFrameInput.style.flex = '1';
+    timelineFrameInput.addEventListener('focus', pauseAnimation);
+    frameJump.appendChild(timelineFrameInput);
+
+    const frameJumpButton = document.createElement('button');
+    frameJumpButton.type = 'submit';
+    frameJumpButton.textContent = 'Go';
+    frameJumpButton.style.padding = '4px 8px';
+    frameJump.appendChild(frameJumpButton);
+
+    frameJump.addEventListener('submit', event => {
+        event.preventDefault();
+        pauseAnimation();
+        const requestedFrame = Number(timelineFrameInput.value);
+        if (Number.isInteger(requestedFrame)) {
+            const displayFrame = Math.min(loopTiming.frameCount, Math.max(1, requestedFrame));
+            setTimelineFrame(displayFrame - 1);
+            persistViewerSettings();
+        } else {
+            timelineFrameInput.value = String(timelineFrame + 1);
+        }
+        timelineFrameInput.select();
+    });
+    videoTimingContent.appendChild(frameJump);
+
     const frameButtons = document.createElement('div');
     frameButtons.style.display = 'flex';
     frameButtons.style.gap = '5px';
@@ -1378,29 +1459,54 @@ function createControls() {
 
     const panelToggle = document.createElement('button');
     panelToggle.type = 'button';
-    panelToggle.textContent = '▾ Controls';
-    panelContent.hidden = !panelExpanded;
-    panelToggle.setAttribute('aria-expanded', String(panelExpanded));
     panelToggle.setAttribute('aria-controls', panelContent.id);
-    Object.assign(panelToggle.style, {
-        width: '100%',
-        background: 'transparent',
-        color: 'inherit',
-        border: 'none',
-        padding: '0',
-        textAlign: 'left',
-        font: 'inherit',
-        fontWeight: 'bold',
-        cursor: 'pointer',
-        marginBottom: panelExpanded ? '10px' : '0'
-    });
-    panelToggle.textContent = panelExpanded ? '▾ Controls' : '▸ Controls';
-    panelToggle.addEventListener('click', () => {
-        panelContent.hidden = !panelContent.hidden;
-        panelExpanded = !panelContent.hidden;
+    const updatePanelAppearance = () => {
+        panelContent.hidden = !panelExpanded;
         panelToggle.setAttribute('aria-expanded', String(panelExpanded));
-        panelToggle.textContent = panelExpanded ? '▾ Controls' : '▸ Controls';
-        panelToggle.style.marginBottom = panelExpanded ? '10px' : '0';
+        panelToggle.setAttribute('aria-label', panelExpanded ? 'Collapse controls' : 'Open controls');
+        panelToggle.title = panelExpanded ? 'Collapse controls' : 'Open controls';
+        panelToggle.textContent = panelExpanded ? '▾ Controls' : '⚙︎';
+        Object.assign(controlPanel.style, panelExpanded ? {
+            width: 'min(290px, calc(100vw - 20px))',
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            padding: '10px',
+            overflowY: 'auto'
+        } : {
+            width: '30px',
+            backgroundColor: 'transparent',
+            padding: '0',
+            overflowY: 'hidden'
+        });
+        Object.assign(panelToggle.style, panelExpanded ? {
+            width: '100%',
+            height: 'auto',
+            background: 'transparent',
+            color: 'inherit',
+            border: 'none',
+            padding: '0',
+            textAlign: 'left',
+            font: 'inherit',
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            marginBottom: '10px'
+        } : {
+            width: '30px',
+            height: '30px',
+            background: 'rgba(0, 0, 0, 0.18)',
+            color: 'rgba(255, 255, 255, 0.68)',
+            border: '1px solid rgba(255, 255, 255, 0.16)',
+            padding: '0',
+            textAlign: 'center',
+            font: '16px/28px Arial, sans-serif',
+            fontWeight: 'normal',
+            cursor: 'pointer',
+            marginBottom: '0'
+        });
+    };
+    updatePanelAppearance();
+    panelToggle.addEventListener('click', () => {
+        panelExpanded = !panelExpanded;
+        updatePanelAppearance();
         persistViewerSettings();
     });
     controlPanel.append(panelToggle, panelContent);
@@ -1588,6 +1694,11 @@ function updateLoopTimingUI() {
     }
     if (timelineFrameDisplay) {
         timelineFrameDisplay.textContent = `Frame ${timelineFrame + 1} / ${loopTiming.frameCount}`;
+    }
+    if (timelineFrameInput) {
+        timelineFrameInput.max = String(loopTiming.frameCount);
+        timelineFrameInput.value = String(timelineFrame + 1);
+        timelineFrameInput.disabled = loopTiming.frameCount <= 1;
     }
     if (!loopInfoDisplay) return;
 
@@ -3060,7 +3171,9 @@ function createChromeShader() {
             vec3 viewDir = normalize(vViewPosition);
             
             // World space reflection for environment mapping
-            vec3 worldNormal = normalize(mat3(viewMatrix) * normal);
+            // vNormal is in view space. Transform it back into world space
+            // before reflecting the world-space camera direction.
+            vec3 worldNormal = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
             vec3 worldViewDir = normalize(cameraPosition - vWorldPosition);
             vec3 worldReflection = reflect(-worldViewDir, worldNormal);
             
@@ -3205,7 +3318,6 @@ function createTesseract() {
     
     const topology = polytopeTopology(currentShape);
     const vertices4D = topology.vertices;
-    const edgeList = topology.edges;
     
     // First create vertex objects
     vertices = [];
@@ -3224,35 +3336,9 @@ function createTesseract() {
         vertices.push(vertexMesh);
     }
     
-    // Create edges as line segments (not cylinders) to ensure precise connections
+    // Faces meet directly; separate line geometry caused intermittent white
+    // outlines where coplanar edges competed with faces in the depth buffer.
     edges = [];
-    const edgeMaterial = new THREE.LineBasicMaterial({ color: 0xffffff });
-    
-    for (let i = 0; i < edgeList.length; i++) {
-        const [startIdx, endIdx] = edgeList[i];
-        const start4D = vertices4D[startIdx];
-        const end4D = vertices4D[endIdx];
-        
-        const start3D = project4Dto3D(start4D);
-        const end3D = project4Dto3D(end4D);
-        
-        const points = [];
-        points.push(new THREE.Vector3(start3D.x, start3D.y, start3D.z));
-        points.push(new THREE.Vector3(end3D.x, end3D.y, end3D.z));
-        
-        const edgeGeometry = new THREE.BufferGeometry().setFromPoints(points);
-        const edge = new THREE.Line(edgeGeometry, edgeMaterial);
-        
-        edge.userData = { 
-            startIdx, 
-            endIdx, 
-            start4D: {...start4D}, 
-            end4D: {...end4D} 
-        };
-        
-        tesseract.add(edge);
-        edges.push(edge);
-    }
     
     // Create faces for the tesseract
     faces = [];

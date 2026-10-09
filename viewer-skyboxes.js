@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 import * as THREE from 'three';
 import {normalizeExportFolder,exportFileURL,studioURL} from './skybox-paths.js';
 
@@ -50,7 +51,7 @@ function slugify(value) {
     return value.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,60);
 }
 
-export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitchChrome,getViewerState,onStateChange=()=>{},publication,confirmAction}) {
+export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitchChrome,getViewerState,getDefaultViewerState,onStateChange=()=>{},publication,confirmAction}) {
     let renderReady=false,renderIdentity=null,renderLocks=0;
     const setRenderState=(ready,identity=renderIdentity)=>{renderReady=ready;renderIdentity=identity;onStateChange({ready:renderReady,identity:renderIdentity});};
     const renderApi={
@@ -64,7 +65,7 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
     };
     if(publication?.schemaVersion===1){
         const section=document.createElement('section');section.className='viewer-skybox';
-        section.innerHTML='<div class="skybox-heading">WORK</div><div id="active-skybox"></div><p id="skybox-status" role="status">Loading published environment…</p>';
+        section.innerHTML='<div class="skybox-heading">WORK</div><div id="active-skybox"></div><p id="skybox-status" role="status">Loading published environment…</p><div class="skybox-links"><a href="DISTRIBUTION_RIGHTS.txt" target="_blank" rel="noopener">Artwork and display rights</a><a href="SOURCE_RIGHTS.txt" target="_blank" rel="noopener">Source code rights</a></div>';
         mount.prepend(section);section.querySelector('#active-skybox').textContent=publication.title||'Published work';
         const status=section.querySelector('#skybox-status');onTexture(diagnosticTexture());setRenderState(false,null);
         (async()=>{
@@ -86,10 +87,10 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
     dialog.innerHTML=`<div class="library-heading"><strong>SKYBOX / EXPORT LIBRARY</strong><button id="refresh-skyboxes" type="button">Refresh</button><button id="close-skyboxes" type="button">Close</button></div><p>Completed Studio exports. Loading changes only the environment—not your camera, animation or shader.</p><p id="skybox-library-status" role="status"></p><div id="skybox-export-list"></div>`;
     document.body.append(dialog);
     const publishDialog=document.createElement('dialog');publishDialog.id='publish-skybox-dialog';
-    publishDialog.innerHTML=`<form id="publish-skybox-form"><div class="library-heading"><strong>PUBLISH STATIC WORK</strong><button id="close-publish" type="button">Close</button></div><p>Snapshot this export, the current viewer settings, and this version of the runtime into <code>site/work/&lt;slug&gt;/</code>.</p><label>Title<input id="publish-title" required maxlength="100"></label><label>URL slug<input id="publish-slug" required maxlength="60" pattern="[a-z0-9]+(?:-[a-z0-9]+)*"></label><label>Description<textarea id="publish-description" maxlength="1000"></textarea></label><label>Maximum image size<select id="publish-size"><option value="4096" selected>4096 px</option><option value="2048">2048 px</option><option value="original">Original resolution</option></select></label><label>Format<select id="publish-format"><option value="jpg" selected>JPEG</option><option value="png">PNG</option></select></label><label>JPEG quality <output id="publish-quality-value">0.88</output><input id="publish-quality" type="range" min="0.50" max="1" step="0.01" value="0.88"></label><div class="skybox-actions"><button id="confirm-publish" type="submit">Publish snapshot</button></div><p id="publish-result" role="status"></p></form>`;
+    publishDialog.innerHTML=`<form id="publish-skybox-form"><div class="library-heading"><strong>PUBLISH STATIC WORK</strong><button id="close-publish" type="button">Close</button></div><p>Snapshot this export and this version of the runtime into <code>site/work/&lt;slug&gt;/</code>.</p><label>Title<input id="publish-title" required maxlength="100"></label><label>URL slug<input id="publish-slug" required maxlength="60" pattern="[a-z0-9]+(?:-[a-z0-9]+)*"></label><label>Description<textarea id="publish-description" maxlength="1000"></textarea></label><fieldset class="publish-viewer-settings"><legend>Published viewer</legend><label>Starting settings<select id="publish-settings-source"><option value="defaults" selected>Viewer defaults</option><option value="current">Match current settings</option></select></label><p id="publish-current-settings"></p><label>Start frame<input id="publish-start-frame" type="number" min="1" step="1" required></label><label>Animation on open<select id="publish-animation-autoplay"><option value="no">Paused</option><option value="yes">Autoplay</option></select></label><label>Soundtrack on open<select id="publish-music-autoplay"><option value="no">Off</option><option value="yes">Autoplay</option></select></label><small>Browsers may hold soundtrack autoplay until the visitor first clicks or presses a key.</small></fieldset><label>Maximum image size<select id="publish-size"><option value="4096" selected>4096 px</option><option value="2048">2048 px</option><option value="original">Original resolution</option></select></label><label>Format<select id="publish-format"><option value="jpg" selected>JPEG</option><option value="png">PNG</option></select></label><label>JPEG quality <output id="publish-quality-value">0.88</output><input id="publish-quality" type="range" min="0.50" max="1" step="0.01" value="0.88"></label><div class="skybox-actions"><button id="confirm-publish" type="submit">Publish snapshot</button></div><p id="publish-result" role="status"></p></form>`;
     document.body.append(publishDialog);
     const $=id=>document.getElementById(id);
-    let active=null,activeName='',entries=[],requestId=0;
+    let active=null,activeName='',entries=[],requestId=0,publishCurrentState=null,publishDefaultState=null;
     function message(text,error=false){for(const id of ['skybox-status','skybox-library-status']){$(id).textContent=text;$(id).classList.toggle('error',error);}}
     function refreshShaderHint() {
         $('switch-to-chrome').hidden=getShader()==='chrome';
@@ -162,19 +163,37 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
         loadSelection('default');
     };
     $('switch-to-chrome').onclick=()=>{onSwitchChrome();refreshShaderHint();};
+    const resetPublishPlayback=()=>{
+        const state=$('publish-settings-source').value==='current'?publishCurrentState:publishDefaultState;
+        if(!state)return;
+        $('publish-start-frame').value=String((Number(state.timelineFrame)||0)+1);
+        $('publish-animation-autoplay').value=state.animationPaused===false?'yes':'no';
+        $('publish-music-autoplay').value=state.music?.enabled?'yes':'no';
+    };
     $('publish-skybox').onclick=()=>{
+        publishCurrentState=structuredClone(getViewerState());
+        publishDefaultState=structuredClone(getDefaultViewerState());
         $('publish-title').value=activeName||'';$('publish-slug').value=slugify(activeName||'');$('publish-slug').dataset.edited='';
-        $('publish-description').value='';$('publish-result').replaceChildren();publishDialog.showModal();
+        $('publish-description').value='';$('publish-result').replaceChildren();
+        $('publish-current-settings').textContent=`Current viewer: frame ${(Number(publishCurrentState.timelineFrame)||0)+1} · animation ${publishCurrentState.animationPaused===false?'playing':'paused'} · soundtrack ${publishCurrentState.music?.enabled?'on':'off'}`;
+        $('publish-settings-source').value='defaults';resetPublishPlayback();publishDialog.showModal();
     };
     $('close-publish').onclick=()=>publishDialog.close();
     $('publish-title').oninput=()=>{if(!$('publish-slug').dataset.edited)$('publish-slug').value=slugify($('publish-title').value);};
     $('publish-slug').oninput=()=>{$('publish-slug').dataset.edited='yes';};
     $('publish-quality').oninput=()=>{$('publish-quality-value').value=Number($('publish-quality').value).toFixed(2);};
     $('publish-format').onchange=()=>{$('publish-quality').disabled=$('publish-format').value!=='jpg';};
+    $('publish-settings-source').onchange=resetPublishPlayback;
     $('publish-skybox-form').onsubmit=async event=>{
         event.preventDefault();const button=$('confirm-publish'),result=$('publish-result');button.disabled=true;result.textContent='Publishing snapshot…';result.classList.remove('error');
         try{
-            const response=await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('publish-title').value,slug:$('publish-slug').value,description:$('publish-description').value,exportFolder:active,viewerState:getViewerState(),assetSize:$('publish-size').value,assetFormat:$('publish-format').value,assetQuality:Number($('publish-quality').value)})});
+            const base=$('publish-settings-source').value==='current'?publishCurrentState:publishDefaultState;
+            const viewerState=structuredClone(base);
+            viewerState.timelineFrame=Math.max(0,Math.trunc(Number($('publish-start-frame').value)||1)-1);
+            viewerState.animationPaused=$('publish-animation-autoplay').value!=='yes';
+            viewerState.music={...(viewerState.music||{}),enabled:$('publish-music-autoplay').value==='yes'};
+            viewerState.musicAutoplay=$('publish-music-autoplay').value==='yes';
+            const response=await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('publish-title').value,slug:$('publish-slug').value,description:$('publish-description').value,exportFolder:active,viewerState,assetSize:$('publish-size').value,assetFormat:$('publish-format').value,assetQuality:Number($('publish-quality').value)})});
             const value=await response.json();if(!response.ok)throw new Error(value.error||'Publish failed');
             result.replaceChildren(document.createTextNode('Published: '));const link=document.createElement('a');link.href=value.url;link.textContent=value.url;link.target='_blank';link.rel='noopener';result.append(link);
         }catch(error){result.textContent=error.message;result.classList.add('error');}finally{button.disabled=false;}

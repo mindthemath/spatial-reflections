@@ -1,4 +1,5 @@
-.PHONY: serve static build run run-isolated install sync update test test-fast test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser test-agent-api _test-all _test-browser unstick
+# Copyright 2026 Michael Pilosov. All rights reserved.
+.PHONY: serve static build run run-isolated install sync update copyright test test-fast test-copyright test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser test-agent-api _test-all _test-browser unstick
 
 TEST_GUARD = python3 scripts/test_guard.py
 
@@ -50,6 +51,13 @@ update:
 	$(MAKE) sync
 	$(MAKE) test
 
+# Propagate the canonical notice in SOURCE_RIGHTS.txt to all first-party source files.
+copyright:
+	python3 scripts/copyright_headers.py
+
+test-copyright:
+	python3 scripts/copyright_headers.py --check
+
 # Full validation is explicit and serialized. Prefer test-fast while editing.
 test:
 	$(TEST_GUARD) --network --timeout 600 -- $(MAKE) _test-all
@@ -61,6 +69,7 @@ _test-all:
 
 # No browser, network server, real encoder, or production assets.
 test-fast:
+	$(MAKE) test-copyright
 	bun run test:vendor
 	bun run test:syntax
 	node studio/test_resolution.cjs

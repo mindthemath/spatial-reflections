@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 import base64
 import hashlib
 import http.client
@@ -28,6 +29,8 @@ class StudioAPITest(unittest.TestCase):
         (server.ROOT / 'raw').mkdir()
         (server.ROOT / 'raw' / 'photo.png').write_bytes(PNG)
         (server.ROOT / 'index.html').write_text('<script id="piece-config" type="application/json"></script>')
+        (server.ROOT / 'SOURCE_RIGHTS.txt').write_text('Copyright 2026 Michael Pilosov. All rights reserved.\n')
+        (server.ROOT / 'DISTRIBUTION_RIGHTS.txt').write_text('Copyright 2026 Michael Pilosov. All rights reserved.\n')
         for filename in ('tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js', 'visual-music.js', 'visual-music-core.js'):
             (server.ROOT / filename).write_text(f'// {filename}\n')
         (server.ROOT / 'vendor' / 'controls').mkdir(parents=True)
@@ -734,6 +737,8 @@ class StudioAPITest(unittest.TestCase):
         folder = server.ROOT / result['folder']
         self.assertTrue(all((folder / 'skybox' / f'{face}.png').is_file() for face in server.FACES))
         self.assertTrue((folder / 'tesseract.js').is_file())
+        self.assertEqual((folder / 'SOURCE_RIGHTS.txt').read_text(), 'Copyright 2026 Michael Pilosov. All rights reserved.\n')
+        self.assertEqual((folder / 'DISTRIBUTION_RIGHTS.txt').read_text(), 'Copyright 2026 Michael Pilosov. All rights reserved.\n')
         self.assertTrue((folder / 'vendor' / 'three.module.js').is_file())
         self.assertTrue((folder / 'vendor' / 'three.core.js').is_file())
         self.assertTrue((folder / 'vendor' / 'controls' / 'OrbitControls.js').is_file())

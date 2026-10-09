@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Validation and ffmpeg arguments for optional deterministic soundtrack WAVs."""
 import struct
 

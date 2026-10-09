@@ -2,6 +2,10 @@
 
 A reflective tesseract viewer and a photographic node-editor sidecar for constructing its cube environment.
 
+## Rights and licensing
+
+This repository is **not currently open source**. All rights are reserved. First-party source code is covered by [`SOURCE_RIGHTS.txt`](SOURCE_RIGHTS.txt); photographs, skyboxes, visual and audio material, published works, and their presentation are covered separately by [`DISTRIBUTION_RIGHTS.txt`](DISTRIBUTION_RIGHTS.txt). Third-party components retain their own notices and licenses, including Three.js under `vendor/`.
+
 ## Run locally
 
 Install the locked JavaScript tooling and Chromium once, and synchronize the vendored offline runtime:

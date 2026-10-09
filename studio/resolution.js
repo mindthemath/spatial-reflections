@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Pixel budgets, independent of Canvas/UI. Only cube-connected sources limit export.
 export const MAX_CANVAS_SIDE = 32767;
 export const RESOLUTION_PRESETS = [128,256,512,1024,2048,4096,8192,16384];

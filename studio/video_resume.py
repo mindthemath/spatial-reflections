@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Durable checkpoint storage for resumable browser-rendered video exports."""
 
 import hashlib

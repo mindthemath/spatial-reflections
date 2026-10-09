@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Browser integration test. Uses the Bun-managed Playwright dependency and never touches real raw/ or exports/.
 const {ensureGuard,bounded,stopServer,installCleanup}=require('./test_lifecycle.cjs');
 ensureGuard(__filename,{network:true,timeout:300});
@@ -108,6 +109,12 @@ finally:
   }
   const broken=path.join(root,'exports','broken-fixture');fs.cpSync(path.join(root,'exports',folder),broken,{recursive:true});
   const badManifest=JSON.parse(JSON.stringify(manifest));badManifest.pipeline.name='Broken fixture';fs.writeFileSync(path.join(broken,'manifest.json'),JSON.stringify(badManifest));fs.writeFileSync(path.join(broken,'px.png'),'not a PNG');
+  const publishedPiece={schemaVersion:1,slug:'published-test',title:'Published test',size:512,skybox:Object.fromEntries(['px','nx','py','ny','pz','nz'].map(face=>[face,`skybox/${face}.png`])),viewer:{panelExpanded:true,animationPaused:true}};
+  const publishedHTML=fs.readFileSync(path.join(root,'index.html'),'utf8').replace('<script id="piece-config" type="application/json"></script>',`<script id="piece-config" type="application/json">${JSON.stringify(publishedPiece)}</script>`);
+  fs.writeFileSync(path.join(root,'published.html'),publishedHTML);
+  const published=await page.context().newPage();published.on('pageerror',e=>errors.push(e.message));await published.goto(`http://localhost:${port}/published.html`);await published.waitForSelector('#controlPanel');
+  assert(await published.locator('#controlPanelContent').isHidden());assert.equal(await published.locator('#controlPanel > button').getAttribute('aria-label'),'Open controls');
+  assert((await published.locator('#controlPanel').boundingBox()).width<=31);await published.locator('#controlPanel > button').click();assert(await published.locator('#controlPanelContent').isVisible());await published.close();
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
@@ -342,9 +349,17 @@ finally:
   await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'untitled'})}).getByRole('button',{name:'Load skybox'}).click();
   await viewer.waitForFunction(()=>document.querySelector('#active-skybox').textContent==='untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'rough');
   await viewer.locator('#switch-to-chrome').click();assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');assert(!(await viewer.locator('#switch-to-chrome').isVisible()));
+  let publishRequest=null;await viewer.route('**/api/publish',async route=>{publishRequest=route.request().postDataJSON();await route.fulfill({status:201,contentType:'application/json',body:JSON.stringify({url:'/site/work/save-video/'})});});
   let viewerDownloads=0;viewer.on('download',()=>viewerDownloads++);await viewer.locator('#publish-skybox').click();
+  assert.equal(await viewer.locator('#publish-settings-source').inputValue(),'defaults');assert.equal(await viewer.locator('#publish-start-frame').inputValue(),'1');
+  assert.equal(await viewer.locator('#publish-animation-autoplay').inputValue(),'no');assert.equal(await viewer.locator('#publish-music-autoplay').inputValue(),'no');
   await viewer.locator('#publish-title').fill('');await viewer.locator('#publish-title').pressSequentially('save video');await viewer.waitForTimeout(100);
-  assert.equal(await viewer.locator('#publish-title').inputValue(),'save video');assert.equal(viewerDownloads,0);await viewer.locator('#close-publish').click();
+  assert.equal(await viewer.locator('#publish-title').inputValue(),'save video');assert.equal(viewerDownloads,0);
+  await viewer.locator('#publish-settings-source').selectOption('current');await viewer.locator('#publish-start-frame').fill('42');
+  await viewer.locator('#publish-animation-autoplay').selectOption('yes');await viewer.locator('#publish-music-autoplay').selectOption('yes');
+  await viewer.locator('#confirm-publish').click();await viewer.waitForFunction(()=>document.querySelector('#publish-result a'));
+  assert.equal(publishRequest.viewerState.timelineFrame,41);assert.equal(publishRequest.viewerState.animationPaused,false);assert.equal(publishRequest.viewerState.music.enabled,true);assert.equal(publishRequest.viewerState.musicAutoplay,true);assert.equal(publishRequest.viewerState.shader,'chrome');
+  await viewer.unroute('**/api/publish');await viewer.locator('#close-publish').click();
   const validURL=viewer.url();await viewer.locator('#browse-skyboxes').click();await viewer.waitForSelector('.skybox-card');
   await viewer.screenshot({path:path.join(os.tmpdir(),'tesseract-library.png')});
   await viewer.locator('.skybox-card').filter({has:viewer.locator('strong',{hasText:'Broken fixture'})}).getByRole('button',{name:'Load skybox'}).click();
