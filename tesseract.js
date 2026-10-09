@@ -3067,6 +3067,18 @@ function shaderUtilities() {
         float random(vec2 st) {
             return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
         }
+
+        // Triangular +/-1/255 dither, fixed in screen space so it adds no
+        // frame-to-frame noise. Breaks up the 8-bit steps that make dark
+        // gradients band, before video's limited-range conversion removes more.
+        float interleavedGradientNoise(vec2 p) {
+            return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+        }
+        vec3 outputDither(vec3 color) {
+            vec2 p = gl_FragCoord.xy;
+            float d = interleavedGradientNoise(p) + interleavedGradientNoise(p + vec2(37.0, 17.0)) - 1.0;
+            return color + d / 255.0;
+        }
         
         // Utility to calculate fresnel effect
         float fresnel(vec3 viewDirection, vec3 normal, float power) {
@@ -3161,7 +3173,7 @@ function createRoughShader() {
             lighting *= (1.0 - noise);
             
             // Black and white shader
-            gl_FragColor = vec4(lighting, 1.0);
+            gl_FragColor = vec4(outputDither(lighting), 1.0);
         }
     `;
 }
@@ -3201,7 +3213,7 @@ function createIridescentShader() {
             vec3 baseColor = mix(reflectionColor, iridescence, 0.7);
             vec3 final = baseColor * lighting;
             
-            gl_FragColor = vec4(final, 1.0);
+            gl_FragColor = vec4(outputDither(final), 1.0);
         }
     `;
 }
@@ -3261,7 +3273,7 @@ function createChromeShader() {
             // Apply lighting with less influence to preserve reflections
             vec3 final = chromeColor * (lighting * 0.7 + 0.3) - noisePattern;
             
-            gl_FragColor = vec4(final, 1.0);
+            gl_FragColor = vec4(outputDither(final), 1.0);
         }
     `;
 }
