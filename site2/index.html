@@ -4,7 +4,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Index of / · Spatial Reflections by Michael Pilosov</title>
+<title>Index of /spatial-reflections</title>
 <style>
 /* mod_autoindex ships no stylesheet: browser defaults are the look.
    Everything below only keeps that look intact on small screens. */
@@ -25,7 +25,7 @@ td.m { white-space: nowrap; }
 </style>
 </head>
 <body>
-<h1>Index of /</h1>
+<h1 id="heading" hidden>Index of /spatial-reflections</h1>
 <pre id="header" hidden></pre>
 <table>
  <tbody id="listing">
@@ -55,7 +55,7 @@ const stamp = iso => {
 // Apache has no title column: the title leads the description instead.
 const describe = item => [item.title, item.description].filter(Boolean).join(': ');
 const keys = {
-  N: item => item.slug, M: item => item.publishedAt || '', D: describe
+  N: entry => entry.name, M: entry => entry.modified || '', D: entry => entry.description
 };
 const cell = (className, content, align) => {
   const td = document.createElement('td');
@@ -65,35 +65,50 @@ const cell = (className, content, align) => {
   return td;
 };
 
-function row(item) {
+function row(entry) {
   const tr = document.createElement('tr');
   tr.className = 'entry';
   const icon = document.createElement('img');
-  Object.assign(icon, { src: 'icons/folder.gif', alt: '[DIR]', width: 20, height: 22 });
+  Object.assign(icon, { src: `icons/${entry.icon}`, alt: entry.alt, width: 20, height: 22 });
   const link = document.createElement('a');
-  link.href = item.url;
-  link.textContent = `${item.slug}/`;
+  link.href = entry.href;
+  link.textContent = entry.name;
   tr.append(
     cell('i', icon), cell('n', link),
-    cell('m', `${stamp(item.publishedAt)}  `, 'right'),
-    cell('d', describe(item) || '\u00a0')
+    cell('m', `${stamp(entry.modified)}  `, 'right'),
+    cell('d', entry.description || '\u00a0')
   );
   return tr;
 }
 
-// Like Apache's HeaderName: HEADER.txt is shown verbatim, preformatted.
-fetch('./HEADER.txt').then(response => response.ok ? response.text() : '').then(text => {
+const work = item => ({
+  name: `${item.slug}/`, href: item.url, icon: 'folder.gif', alt: '[DIR]',
+  modified: item.publishedAt, description: describe(item)
+});
+// Files carry their real modification time, as Apache would show it.
+const file = async (name, icon) => {
+  const response = await fetch(name, { method: 'HEAD' }).catch(() => null);
+  if (!response?.ok) return null;
+  const modified = new Date(response.headers.get('Last-Modified') ?? NaN);
+  return { name, href: name, icon, alt: '[   ]', modified: Number.isNaN(modified.getTime()) ? '' : modified.toISOString(), description: '' };
+};
+
+// Like Apache's HeaderName: a text HEADER.txt is shown verbatim in <pre>
+// and replaces the "Index of" heading (mod_autoindex emit_head, emit_H1 = 0).
+fetch('./HEADER.txt').then(response => response.ok ? response.text() : '').catch(() => '').then(text => {
   const header = document.querySelector('#header');
   header.textContent = text;
   header.hidden = !text.trim();
-}).catch(() => {});
+  document.querySelector('#heading').hidden = !header.hidden;
+});
 
 try {
   const response = await fetch('./catalog.json');
   if (!response.ok) throw new Error('The catalog could not be loaded.');
-  const { work } = await response.json();
+  const catalog = await response.json();
+  const entries = [...catalog.work.map(work), ...(await Promise.all([file('404.html', 'layout.gif')])).filter(Boolean)];
   const key = keys[column];
-  const sorted = [...work].sort((a, b) => key(a).localeCompare(key(b)) * (order === 'A' ? 1 : -1));
+  const sorted = entries.sort((a, b) => key(a).localeCompare(key(b)) * (order === 'A' ? 1 : -1));
   closingRule.before(...sorted.map(row));
 } catch (error) {
   const tr = document.createElement('tr');
