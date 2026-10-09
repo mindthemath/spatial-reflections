@@ -145,7 +145,8 @@ finally:
   assert.deepEqual(dragOverlay,{shown:'block',left:'none',cancelled:'none'});
   // Video export defaults to a 30s clip inside the loop, and still rejects an empty window before encoding.
   const simpleVideo=process.env.TESSERACT_TEST_VIDEO_MODE==='simple';
-  if(simpleVideo){await viewer.locator('.music-preset').selectOption('abyssdrive');await viewer.locator('.music-start').click();}
+  assert.equal(await viewer.locator('.visual-music > details').evaluate(details=>details.open),false);
+  if(simpleVideo){await viewer.locator('.visual-music > details > summary').click();await viewer.locator('.music-preset').selectOption('abyssdrive');await viewer.locator('.music-start').click();}
   await viewer.locator('#rotation-xw').fill('10');await viewer.locator('details').filter({hasText:'Video timing'}).locator('summary').click();
   await viewer.locator('#open-video-export').click();await viewer.waitForSelector('#video-export-dialog[open]');await viewer.waitForFunction(()=>document.querySelector('#video-export-dialog').dataset.serverAvailable==='yes'||document.querySelector('#video-export-status').classList.contains('error'));
   assert.deepEqual(await viewer.locator('#video-export-dialog').evaluate(dialog=>JSON.parse(dialog.dataset.encoderRecovery)),{recovered:0,alreadyExited:0,refused:0,skippedActive:0,failed:0,indexFailed:false});

@@ -607,7 +607,7 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
     const section = document.createElement('section');
     section.className = 'visual-music';
     section.innerHTML = `
-        <details open>
+        <details>
             <summary>Generative soundtrack <span class="music-live-dot" aria-hidden="true"></span></summary>
             <div class="music-body">
                 <p class="music-intro">The final image drives a deterministic harmonic ecosystem. Headphones recommended.</p>
