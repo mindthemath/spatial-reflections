@@ -1,0 +1,9 @@
+Copyright 2026 Michael Pilosov. All rights reserved.
+
+The photographs, source images, skyboxes, visual compositions, animations, videos, audio, published works, previews, and the selection, arrangement, and presentation of those materials are protected works owned or controlled by Michael Pilosov, except where a separate credit or notice states otherwise.
+
+An authorized website or distributed presentation may be viewed only through the presentation supplied by Michael Pilosov and for ordinary personal viewing. No permission is granted to reproduce, download for reuse, extract, separate, redistribute, republish, transmit, publicly display, publicly perform, exhibit, adapt, remix, sell, sublicense, train models on, or create derivative works from any covered material without Michael Pilosov's prior express written permission.
+
+Possession of a file or access to a published work does not transfer ownership or grant display, exhibition, distribution, performance, or reuse rights. Any authorized exhibition, installation, screening, or other public presentation requires separate written authorization and must follow the scope, venue, duration, format, attribution, and presentation conditions in that authorization.
+
+This notice does not restrict rights that cannot lawfully be restricted, and it does not alter the separate license terms of third-party components.
