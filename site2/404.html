@@ -1,0 +1,23 @@
+<!doctype html>
+<!-- Copyright 2026 Michael Pilosov. All rights reserved. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>404 Not Found</title>
+<style>p { overflow-wrap: anywhere; }</style>
+</head>
+<body>
+<h1>Not Found</h1>
+<p>The requested URL <span id="path"></span> was not found on this server.</p>
+<p>Return to the <a href="/">index</a>.</p>
+<hr>
+<address id="signature">SpatialReflections/2026 (Mathematical Michael) Server</address>
+<script>
+document.querySelector('#path').textContent = location.pathname;
+const port = location.port || (location.protocol === 'https:' ? '443' : '80');
+document.querySelector('#signature').textContent += ` at ${location.hostname || 'localhost'} Port ${port}`;
+</script>
+</body>
+</html>
