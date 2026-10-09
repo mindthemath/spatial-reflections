@@ -3667,7 +3667,7 @@ function installViewerAPI() {
         };
     }
 
-    window.viewer = Object.freeze({
+    const api = {
         ready: Promise.resolve(skyboxLibrary?.initialLoad).then(() => undefined),
         describe: () => ({
             about: 'Tesseract viewer: a 4D polytope rendered in three.js, reflecting a six-face skybox. Changes show live and are saved in this browser.',
@@ -3713,7 +3713,20 @@ function installViewerAPI() {
             output.getContext('2d').drawImage(source, 0, 0, output.width, output.height);
             return output.toDataURL('image/png');
         }
-    });
+    };
+    if (publication?.schemaVersion === 1) {
+        // Published works are static: the export library needs studio/server.py.
+        const describe = api.describe;
+        delete api.listExports;
+        delete api.loadSkybox;
+        api.describe = () => {
+            const description = describe();
+            delete description.methods['listExports()'];
+            delete description.methods['loadSkybox(folder)'];
+            return description;
+        };
+    }
+    window.viewer = Object.freeze(api);
     if (publication?.schemaVersion !== 1) announceAgentAPI('viewer');
 }
 
