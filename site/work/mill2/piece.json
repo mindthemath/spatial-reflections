@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "slug": "mill1",
-  "title": "The Mill, I",
-  "description": "An encapsulation of a disorienting season.",
-  "publishedAt": "2026-10-09T18:47:21.218568+00:00",
+  "slug": "mill2",
+  "title": "The Mill, II",
+  "description": "",
+  "publishedAt": "2026-10-09T18:47:56.909702+00:00",
   "size": 2048,
   "skybox": {
     "px": "skybox/px.jpg",
@@ -14,7 +14,7 @@
     "nz": "skybox/nz.jpg"
   },
   "viewer": {
-    "shape": "rectified-5-cell",
+    "shape": "tesseract",
     "rotationSpeed": 0.005,
     "rotationCoefficients": {
       "xw": 0.7,
@@ -31,7 +31,7 @@
     "videoExportWidth": 1920,
     "videoExportHeight": 1080,
     "videoExportQuality": "master",
-    "timelineFrame": 10900,
+    "timelineFrame": 9221,
     "panelExpanded": true,
     "videoTimingExpanded": true,
     "music": {
@@ -55,14 +55,14 @@
     },
     "camera": {
       "position": {
-        "x": 0.17834332898177666,
-        "y": -0.26185668312887495,
-        "z": 0.5549747891784402
+        "x": -0.11598811710163966,
+        "y": 0.019522068822074454,
+        "z": -0.035370735021574895
       },
       "target": {
-        "x": 0.020642541310017134,
-        "y": 0.10647574772493183,
-        "z": -0.04393900371927886
+        "x": -0.1156180546651213,
+        "y": 0.021418671056011276,
+        "z": -0.039308880963455535
       }
     },
     "musicAutoplay": true
