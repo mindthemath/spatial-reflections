@@ -1314,24 +1314,27 @@ function createControls() {
     });
     videoTimingContent.appendChild(frameButtons);
 
-    videoExportButton = document.createElement('button');
-    videoExportButton.id = 'open-video-export';
-    videoExportButton.type = 'button';
-    videoExportButton.textContent = 'Export video…';
-    videoExportButton.style.width = '100%';
-    videoExportButton.style.padding = '6px';
-    videoExportButton.style.marginTop = '8px';
-    videoExportButton.addEventListener('click', openVideoExportDialog);
-    videoTimingContent.appendChild(videoExportButton);
+    // Published works are static: video export needs studio/server.py.
+    if (publication?.schemaVersion !== 1) {
+        videoExportButton = document.createElement('button');
+        videoExportButton.id = 'open-video-export';
+        videoExportButton.type = 'button';
+        videoExportButton.textContent = 'Export video…';
+        videoExportButton.style.width = '100%';
+        videoExportButton.style.padding = '6px';
+        videoExportButton.style.marginTop = '8px';
+        videoExportButton.addEventListener('click', openVideoExportDialog);
+        videoTimingContent.appendChild(videoExportButton);
 
-    const videoTimingHint = document.createElement('div');
-    videoTimingHint.textContent = videoExportWasInterrupted
-        ? 'The previous video export was cancelled because this page was left. Start it again when you can leave this page loaded.'
-        : 'Frames render here and stream to the local server. This window can sit in the background. Leaving the page cancels the export.';
-    videoTimingHint.style.marginTop = '7px';
-    videoTimingHint.style.fontSize = '10px';
-    videoTimingHint.style.color = '#9cadc3';
-    videoTimingContent.appendChild(videoTimingHint);
+        const videoTimingHint = document.createElement('div');
+        videoTimingHint.textContent = videoExportWasInterrupted
+            ? 'The previous video export was cancelled because this page was left. Start it again when you can leave this page loaded.'
+            : 'Frames render here and stream to the local server. This window can sit in the background. Leaving the page cancels the export.';
+        videoTimingHint.style.marginTop = '7px';
+        videoTimingHint.style.fontSize = '10px';
+        videoTimingHint.style.color = '#9cadc3';
+        videoTimingContent.appendChild(videoTimingHint);
+    }
 
     videoTimingDetails.appendChild(videoTimingContent);
     controlPanel.appendChild(videoTimingDetails);
@@ -1512,7 +1515,7 @@ function createControls() {
     controlPanel.append(panelToggle, panelContent);
     controlPanel.querySelectorAll('input[type="range"]').forEach(addRangeStepper);
     document.body.appendChild(controlPanel);
-    createVideoExportDialog();
+    if (publication?.schemaVersion !== 1) createVideoExportDialog();
 
     // Input handlers update the application state first; bubbling then saves it.
     controlPanel.addEventListener('input', persistViewerSettings);
@@ -3664,7 +3667,7 @@ function installViewerAPI() {
         };
     }
 
-    window.viewer = Object.freeze({
+    const api = {
         ready: Promise.resolve(skyboxLibrary?.initialLoad).then(() => undefined),
         describe: () => ({
             about: 'Tesseract viewer: a 4D polytope rendered in three.js, reflecting a six-face skybox. Changes show live and are saved in this browser.',
@@ -3710,7 +3713,20 @@ function installViewerAPI() {
             output.getContext('2d').drawImage(source, 0, 0, output.width, output.height);
             return output.toDataURL('image/png');
         }
-    });
+    };
+    if (publication?.schemaVersion === 1) {
+        // Published works are static: the export library needs studio/server.py.
+        const describe = api.describe;
+        delete api.listExports;
+        delete api.loadSkybox;
+        api.describe = () => {
+            const description = describe();
+            delete description.methods['listExports()'];
+            delete description.methods['loadSkybox(folder)'];
+            return description;
+        };
+    }
+    window.viewer = Object.freeze(api);
     if (publication?.schemaVersion !== 1) announceAgentAPI('viewer');
 }
 

@@ -728,20 +728,26 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
         get defaultSettings() { return structuredClone(DEFAULTS); },
         setSettings: applySettings,
         async requestAutoplay() {
+            // iOS mutes Web Audio in silent mode unless the page declares media playback.
+            try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* Optional. */ }
+            // Browsers grant playback on different events: iOS and Chrome only
+            // count a touch once it ends, so keep listening until a start succeeds.
+            const GESTURES = ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'];
             const cleanup = () => {
-                window.removeEventListener('pointerdown', resume);
-                window.removeEventListener('keydown', resume);
+                for (const type of GESTURES) window.removeEventListener(type, resume, true);
             };
-            const resume = () => {
-                cleanup();
-                void startSoundtrack();
-            };
+            let starting = null;
+            const begin = () => starting = startSoundtrack().then(started => {
+                starting = null;
+                if (started) cleanup();
+                return started;
+            });
+            // A pending start only needs the context unlocked inside the gesture.
+            const resume = () => { if (starting && engine.context) void engine.context.resume(); else void begin(); };
             // Install the gesture fallback before trying autoplay: some browsers
             // leave AudioContext.resume() pending rather than rejecting it.
-            window.addEventListener('pointerdown', resume, {once: true});
-            window.addEventListener('keydown', resume, {once: true});
-            const attempt = startSoundtrack();
-            attempt.then(started => { if (started) cleanup(); });
+            for (const type of GESTURES) window.addEventListener(type, resume, true);
+            const attempt = begin();
             const started = await Promise.race([
                 attempt,
                 new Promise(resolve => setTimeout(() => resolve(false), 250))
