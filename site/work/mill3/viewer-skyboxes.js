@@ -70,7 +70,7 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
         const status=section.querySelector('#skybox-status');onTexture(diagnosticTexture());setRenderState(false,null);
         (async()=>{
             try{
-                if(!publication.skybox||!FACES.every(face=>typeof publication.skybox[face]==='string'&&new RegExp(`^skybox/${face}\\.(?:png|jpe?g)$`).test(publication.skybox[face])))throw new Error('Published skybox configuration is invalid');
+                if(!publication.skybox||!FACES.every(face=>typeof publication.skybox[face]==='string'&&new RegExp(`^(?:skybox|\\.\\./\\.\\./assets/[a-z0-9-]+)/${face}\\.(?:png|jpe?g)$`).test(publication.skybox[face])))throw new Error('Published skybox configuration is invalid');
                 const assets=await Promise.all(FACES.map(face=>loadImageAsset(publication.skybox[face],{requireHash:false})));
                 const {texture,side,displaySide}=textureFromImages(assets.map(asset=>asset.image),renderer,publication.size??null);onTexture(texture);
                 setRenderState(true,assets.every(asset=>asset.sha256)?JSON.stringify({kind:'published',slug:publication.slug||'',manifestSha256:publication.source?.manifestSha256||null,faces:Object.fromEntries(FACES.map((face,index)=>[face,assets[index].sha256]))}):null);
