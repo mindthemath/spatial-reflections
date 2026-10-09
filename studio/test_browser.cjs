@@ -114,7 +114,7 @@ finally:
   fs.writeFileSync(path.join(root,'published.html'),publishedHTML);
   const published=await page.context().newPage();published.on('pageerror',e=>errors.push(e.message));await published.goto(`http://localhost:${port}/published.html`);await published.waitForSelector('#controlPanel');
   assert(await published.locator('#controlPanelContent').isHidden());assert.equal(await published.locator('#controlPanel > button').getAttribute('aria-label'),'Open controls');
-  assert((await published.locator('#controlPanel').boundingBox()).width<=31);await published.locator('#controlPanel > button').click();assert(await published.locator('#controlPanelContent').isVisible());await published.close();
+  assert.equal(await published.locator('#open-video-export, #video-export-dialog').count(),0);assert((await published.locator('#controlPanel').boundingBox()).width<=31);await published.locator('#controlPanel > button').click();assert(await published.locator('#controlPanelContent').isVisible());await published.close();
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
