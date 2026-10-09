@@ -749,6 +749,14 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(catalog['work'][0]['url'], 'work/mirror-study/')
         self.assertEqual(self.request('POST', '/api/publish', publish)[0], 400)
 
+        (server.ROOT / 'tesseract.js').write_text('// updated runtime\n')
+        self.assertEqual(server.refresh_published_runtime(), ['mirror-study'])
+        self.assertEqual((folder / 'tesseract.js').read_text(), '// updated runtime\n')
+        self.assertEqual(json.loads((folder / 'piece.json').read_text()), piece)
+        self.assertIn('"slug":"mirror-study"', (folder / 'index.html').read_text())
+        self.assertTrue(all((folder / 'skybox' / f'{face}.png').is_file() for face in server.FACES))
+        self.assertEqual([path.name for path in (server.ROOT / 'site' / 'work').iterdir()], ['mirror-study'])
+
     def test_studio_code_bypasses_cache(self):
         (server.ROOT / 'studio').mkdir()
         (server.ROOT / 'studio' / 'app.js').write_text('const version = 3;')
