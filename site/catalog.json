@@ -1,4 +1,13 @@
 {
   "schemaVersion": 1,
-  "work": []
+  "work": [
+    {
+      "slug": "the-mill-i",
+      "title": "The Mill, I",
+      "description": "An encapsulation of a disorienting season.",
+      "publishedAt": "2026-10-09T04:48:46.048276+00:00",
+      "url": "work/the-mill-i/",
+      "thumbnail": "work/the-mill-i/preview.png"
+    }
+  ]
 }
