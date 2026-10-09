@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<!-- Copyright 2026 Michael Pilosov. All rights reserved. -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reflective Rotating Tesseract</title>
+    <style>
+        body { 
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+        button, select, input {
+            border-radius: 0;
+        }
+        button {
+            appearance: none;
+            background: #eee;
+            color: #111;
+            border: 1px solid #888;
+        }
+        .viewer-skybox { border-bottom: 1px solid #555; padding-bottom: 10px; margin-bottom: 12px; }
+        .skybox-heading { font-weight: bold; letter-spacing: 1px; margin-bottom: 6px; }
+        #active-skybox { overflow-wrap: anywhere; font-size: 13px; }
+        .skybox-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+        .skybox-actions button, #switch-to-chrome { padding: 5px; cursor: pointer; }
+        #skybox-status { font-size: 11px; line-height: 1.4; color: #a8bacf; margin: 8px 0; }
+        #skybox-status.error, #skybox-library-status.error { color: #ffaaa0; }
+        .skybox-links { display: grid; gap: 5px; margin-top: 8px; font-size: 11px; }
+        .skybox-links a, #skybox-library-dialog a { color: #80caff; }
+        #skybox-library-dialog, #publish-skybox-dialog, #video-export-dialog, #confirm-action-dialog { background: #191d25; color: #d9dee8; border: 1px solid #52637c; border-radius: 0; padding: 20px; width: min(900px, 90vw); max-height: 85vh; overflow: auto; font: 13px system-ui, sans-serif; }
+        #publish-skybox-dialog { width: min(480px, 90vw); }
+        #video-export-dialog { width: min(560px, 90vw); }
+        #confirm-action-dialog { width: min(420px, 90vw); }
+        #confirm-action-dialog p { margin: 12px 0 0; line-height: 1.45; }
+        #skybox-library-dialog::backdrop, #publish-skybox-dialog::backdrop, #video-export-dialog::backdrop, #confirm-action-dialog::backdrop { background: #000c; }
+        #publish-skybox-dialog form, #publish-skybox-dialog label { display: grid; gap: 7px; }
+        #publish-skybox-dialog form { gap: 14px; }
+        #publish-skybox-dialog input, #publish-skybox-dialog textarea, #publish-skybox-dialog select { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; font: inherit; }
+        #publish-skybox-dialog textarea { min-height: 80px; resize: vertical; }
+        #publish-skybox-dialog .publish-viewer-settings { display: grid; gap: 10px; margin: 0; padding: 12px; border: 1px solid #52637c; }
+        #publish-skybox-dialog .publish-viewer-settings legend { padding: 0 5px; font-weight: bold; letter-spacing: .04em; }
+        #publish-skybox-dialog .publish-viewer-settings p, #publish-skybox-dialog .publish-viewer-settings small { margin: 0; color: #a8bacf; line-height: 1.4; }
+        #publish-result { overflow-wrap: anywhere; }
+        #video-export-dialog label { display: grid; gap: 5px; }
+        #video-export-dialog input, #video-export-dialog select { box-sizing: border-box; width: 100%; padding: 7px; background: #10141b; color: #eef3f8; border: 1px solid #657184; border-radius: 0; font: inherit; }
+        #video-export-dialog button, #confirm-action-dialog button { padding: 7px 10px; border-radius: 0; cursor: pointer; }
+        #video-export-dialog button:disabled { opacity: .45; cursor: default; }
+        .video-export-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .video-export-grid[hidden] { display: none; }
+        .video-export-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 14px; }
+        #video-export-summary { border: 1px solid #414b5c; background: #10141b; padding: 10px; line-height: 1.55; margin-top: 12px; }
+        #video-export-progress { width: 100%; margin-top: 12px; accent-color: #80caff; }
+        #video-export-status { min-height: 1.5em; overflow-wrap: anywhere; color: #a8bacf; }
+        #video-export-status.error { color: #ffaaa0; }
+        #video-export-result a { color: #80caff; }
+        @media (max-width: 560px) { .video-export-grid { grid-template-columns: 1fr; } }
+        .library-heading { display: flex; gap: 10px; align-items: center; }
+        .library-heading strong { margin-right: auto; }
+        #skybox-export-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+        .skybox-card { border: 1px solid #414b5c; padding: 10px; display: grid; gap: 7px; }
+        .skybox-card img { width: 100%; height: 130px; object-fit: cover; }
+        .skybox-card small { color: #9cadc3; }
+        #controlPanel button:focus-visible, #controlPanel select:focus-visible, #controlPanel input:focus-visible, #skybox-library-dialog button:focus-visible, #confirm-action-dialog button:focus-visible { outline: 2px solid #80caff; outline-offset: 2px; }
+        #controlPanel button, #controlPanel select {
+            appearance: none;
+            -webkit-appearance: none;
+            background-color: #1a2029;
+            color: #eef3f8;
+            border: 1px solid #657184;
+            border-radius: 0;
+        }
+        #controlPanel button:hover:not(:disabled) { background-color: #303b4b; border-color: #91b9e0; }
+        #controlPanel button:active:not(:disabled) { background-color: #43546a; }
+        #controlPanel button:disabled { opacity: .4; cursor: default; }
+        #controlPanel select {
+            padding: 5px 26px 5px 7px !important;
+            background-image:
+                linear-gradient(45deg, transparent 50%, #d9e2ec 50%),
+                linear-gradient(135deg, #d9e2ec 50%, transparent 50%);
+            background-position: calc(100% - 12px) 50%, calc(100% - 7px) 50%;
+            background-size: 5px 5px, 5px 5px;
+            background-repeat: no-repeat;
+        }
+        #controlPanel input[type="checkbox"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            margin: 0;
+            vertical-align: middle;
+            background: #151a22;
+            border: 1px solid #8190a4;
+        }
+        #controlPanel input[type="checkbox"]:checked {
+            background: #80caff;
+            box-shadow: inset 0 0 0 3px #151a22;
+        }
+        #controlPanel input[type="range"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 100%;
+            height: 20px;
+            min-width: 0;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+        }
+        #controlPanel input[type="range"]::-webkit-slider-runnable-track {
+            height: 5px;
+            background: #778398;
+            border: 1px solid #aab4c2;
+        }
+        #controlPanel input[type="range"]::-webkit-slider-thumb {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            margin-top: -6px;
+            background: #eef4fa;
+            border: 2px solid #17202b;
+            border-radius: 0;
+        }
+        #controlPanel input[type="range"]::-moz-range-track {
+            height: 3px;
+            background: #778398;
+            border: 1px solid #aab4c2;
+            border-radius: 0;
+        }
+        #controlPanel input[type="range"]::-moz-range-thumb {
+            width: 12px;
+            height: 12px;
+            background: #eef4fa;
+            border: 2px solid #17202b;
+            border-radius: 0;
+        }
+        #controlPanel input[type="range"]:disabled { opacity: .4; }
+        #controlPanel .range-stepper {
+            display: grid;
+            grid-template-columns: 24px minmax(0, 1fr) 24px;
+            align-items: center;
+            gap: 4px;
+            min-width: 0;
+        }
+        #controlPanel .range-stepper button {
+            width: 24px;
+            height: 24px;
+            padding: 0;
+            font: bold 16px/1 Arial, sans-serif;
+            cursor: pointer;
+        }
+        .visual-music { border: 1px solid #53677d; background: linear-gradient(145deg, #101722e8, #090c13e8); margin: 0 0 12px; padding: 9px; }
+        .visual-music > details > summary { cursor: pointer; font-weight: bold; letter-spacing: .045em; color: #d9edff; }
+        .music-live-dot { display: inline-block; width: 7px; height: 7px; margin-left: 5px; border: 1px solid #708091; background: #202832; }
+        .music-live-dot.active { background: #85d7ff; box-shadow: 0 0 8px #52c8ff; }
+        .music-body { margin-top: 9px; }
+        .music-intro { color: #a9bacd; font-size: 11px; line-height: 1.4; margin: 0 0 8px; }
+        .music-actions { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+        .music-actions button { padding: 7px !important; cursor: pointer; }
+        .music-preset-label { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 8px; margin: 9px 0; }
+        .music-preset-label select { min-width: 0; }
+        .music-slider { display: block; margin: 7px 0; }
+        .music-slider > span { display: flex; justify-content: space-between; align-items: baseline; color: #cfdae6; font-size: 11px; }
+        .music-slider output { color: #87cfff; font-variant-numeric: tabular-nums; }
+        .music-layers { border-top: 1px solid #344251; margin-top: 9px; padding-top: 7px; }
+        .music-layers > summary { color: #aec2d8; cursor: pointer; font-size: 11px; }
+        .music-seed { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 9px; }
+        .music-seed label { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 5px; font-size: 11px; }
+        .music-seed input { min-width: 0; width: 100%; box-sizing: border-box; color: #eef3f8; background: #111821; border: 1px solid #657184; padding: 5px; }
+        .music-seed button { padding: 5px !important; cursor: pointer; }
+        .music-status { min-height: 2.6em; margin-top: 8px; color: #91aeca; font-size: 10px; line-height: 1.3; }
+        .music-status.error { color: #ffaaa0; }
+        .music-meter { display: block; width: 100%; height: 28px; margin-top: 5px; border: 1px solid #344251; box-sizing: border-box; }
+    </style>
+</head>
+<body>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "./vendor/three.module.js",
+                "three/addons/": "./vendor/"
+            }
+        }
+    </script>
+    <script id="piece-config" type="application/json">{"schemaVersion":1,"slug":"mill2","title":"The Mill, II","description":"Another perspective, equally unmoored from reality.","publishedAt":"2026-10-09T02:12:19.098204+00:00","size":2048,"skybox":{"px":"skybox/px.jpg","nx":"skybox/nx.jpg","py":"skybox/py.jpg","ny":"skybox/ny.jpg","pz":"skybox/pz.jpg","nz":"skybox/nz.jpg"},"viewer":{"shape":"tesseract","rotationSpeed":0.005,"rotationCoefficients":{"xw":0.7,"yw":-0.05,"zw":0.55},"shader":"chrome","lighting":"diagonal","lightDistance":0.1,"showVertices":false,"surfaceGrain":false,"animationPaused":false,"exportFps":30,"videoExportWidth":1920,"videoExportHeight":1080,"videoExportQuality":"master","timelineFrame":0,"panelExpanded":true,"videoTimingExpanded":true,"music":{"preset":"abyssdrive","enabled":true,"level":1,"density":0.33,"tension":0.88,"influence":0.87,"space":0.3,"tempo":88,"seed":1701,"layers":{"drone":1,"field":0,"bells":0.99,"pulse":0.96,"metal":0.11,"texture":0.07}},"camera":{"position":{"x":-0.11598811710163966,"y":0.019522068822074454,"z":-0.035370735021574895},"target":{"x":-0.1156180546651213,"y":0.021418671056011276,"z":-0.039308880963455535}},"musicAutoplay":true},"source":{"export":"exports/mill-v3-20261004T025756Z-03a073825b50","manifestSha256":"8b50a6b390c28f1c7ff95ddaa697b26164c05810620f46e129577453214715c3"}}</script>
+    <script type="module" src="tesseract.js"></script>
+</body>
+</html> 
