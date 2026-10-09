@@ -113,14 +113,18 @@ finally:
   const publishedHTML=fs.readFileSync(path.join(root,'index.html'),'utf8').replace('<script id="piece-config" type="application/json"></script>',`<script id="piece-config" type="application/json">${JSON.stringify(publishedPiece)}</script>`);
   fs.writeFileSync(path.join(root,'published.html'),publishedHTML);
   const published=await page.context().newPage();published.on('pageerror',e=>errors.push(e.message));await published.goto(`http://localhost:${port}/published.html`);await published.waitForSelector('#controlPanel');
-  assert(await published.locator('#controlPanelContent').isHidden());assert.equal(await published.locator('#controlPanel > button').getAttribute('aria-label'),'Open controls');
-  assert.equal(await published.locator('#open-video-export, #video-export-dialog').count(),0);assert.deepEqual(await published.evaluate(()=>[typeof viewer.listExports,typeof viewer.loadSkybox,'loadSkybox(folder)' in viewer.describe().methods]),['undefined','undefined',false]);assert((await published.locator('#controlPanel').boundingBox()).width<=31);await published.locator('#controlPanel > button').click();assert(await published.locator('#controlPanelContent').isVisible());await published.close();
+  assert(await published.locator('#controlPanelContent').isHidden());assert.equal(await published.locator('#controlPanelHeader > button[aria-controls]').getAttribute('aria-label'),'Open controls');
+  assert.equal(await published.locator('#open-video-export, #video-export-dialog').count(),0);assert.deepEqual(await published.evaluate(()=>[typeof viewer.listExports,typeof viewer.loadSkybox,'loadSkybox(folder)' in viewer.describe().methods]),['undefined','undefined',false]);assert((await published.locator('#controlPanel').boundingBox()).width<=67);await published.locator('#controlPanelHeader > button[aria-controls]').click();assert(await published.locator('#controlPanelContent').isVisible());await published.close();
   // iOS-like autoplay: resume() only starts audio inside an activating gesture, and touch-down is not one.
   fs.writeFileSync(path.join(root,'autoplay.html'),publishedHTML.replace(JSON.stringify(publishedPiece),JSON.stringify({...publishedPiece,viewer:{...publishedPiece.viewer,music:{enabled:true},musicAutoplay:true}})));
   const autoplay=await page.context().newPage();autoplay.on('pageerror',e=>errors.push(e.message));
   await autoplay.addInitScript(()=>{Object.defineProperty(navigator,'audioSession',{value:{type:'auto'}});const real=AudioContext.prototype.resume,waiting=[];AudioContext.prototype.resume=function(){if(!navigator.userActivation.isActive||window.event?.type==='pointerdown')return new Promise(resolve=>waiting.push(resolve));return real.call(this).then(()=>waiting.splice(0).forEach(resolve=>resolve()));};});
   await autoplay.goto(`http://localhost:${port}/autoplay.html`);await autoplay.waitForFunction(()=>/waiting for a click/.test(document.querySelector('.music-status')?.textContent));
+  assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Play soundtrack');
   await autoplay.mouse.click(400,300);await autoplay.waitForFunction(()=>document.querySelector('.music-start').disabled);
+  assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Mute soundtrack');assert(await autoplay.locator('#sound-toggle').isVisible());
+  await autoplay.locator('#sound-toggle').click();assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-pressed'),'false');assert(!(await autoplay.locator('.music-start').isDisabled()));
+  await autoplay.locator('#sound-toggle').click();await autoplay.waitForFunction(()=>document.querySelector('#sound-toggle').getAttribute('aria-pressed')==='true');
   assert.equal(await autoplay.evaluate(()=>navigator.audioSession.type),'playback');await autoplay.close();
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
