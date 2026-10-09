@@ -137,7 +137,7 @@ def rebuild_catalog():
                     continue
                 entries.append({'slug': slug, 'title': piece['title'], 'description': piece.get('description', ''),
                                 'publishedAt': piece['publishedAt'], 'url': f'work/{slug}/',
-                                'thumbnail': f'work/{slug}/preview.png'})
+                                'thumbnail': ''})
             except (OSError, ValueError, KeyError, TypeError):
                 continue
     entries.sort(key=lambda item: item['publishedAt'], reverse=True)
@@ -185,7 +185,6 @@ def refresh_published_runtime():
         temporary.mkdir()
         try:
             shutil.copytree(destination / 'skybox', temporary / 'skybox')
-            shutil.copy2(destination / 'preview.png', temporary / 'preview.png')
             write_runtime(temporary, piece)
             previous = work / f'.{destination.name}-{uuid.uuid4().hex}.previous'
             destination.replace(previous)
@@ -251,8 +250,6 @@ def publish_work(request):
                 try: subprocess.run(command, check=True, capture_output=True, text=True)
                 except (OSError, subprocess.CalledProcessError) as error: raise ValueError(f'Could not encode published face: {face}') from error
             skybox_files[face] = f'skybox/{target.name}'
-        preview = folder / 'preview.png'
-        shutil.copy2(preview if preview.is_file() else folder / 'px.png', temporary / 'preview.png')
         published_at = datetime.now(timezone.utc).isoformat()
         piece = {'schemaVersion': 1, 'slug': slug, 'title': title, 'description': description,
                  'publishedAt': published_at, 'size': published_size,

@@ -737,6 +737,7 @@ class StudioAPITest(unittest.TestCase):
         folder = server.ROOT / result['folder']
         self.assertTrue(all((folder / 'skybox' / f'{face}.png').is_file() for face in server.FACES))
         self.assertTrue((folder / 'tesseract.js').is_file())
+        self.assertFalse((folder / 'preview.png').exists())
         self.assertEqual((folder / 'SOURCE_RIGHTS.txt').read_text(), 'Copyright 2026 Michael Pilosov. All rights reserved.\n')
         self.assertEqual((folder / 'DISTRIBUTION_RIGHTS.txt').read_text(), 'Copyright 2026 Michael Pilosov. All rights reserved.\n')
         self.assertTrue((folder / 'vendor' / 'three.module.js').is_file())
@@ -747,6 +748,7 @@ class StudioAPITest(unittest.TestCase):
         self.assertEqual(piece['viewer']['shader'], 'chrome')
         catalog = json.loads((server.ROOT / 'site' / 'catalog.json').read_text())
         self.assertEqual(catalog['work'][0]['url'], 'work/mirror-study/')
+        self.assertEqual(catalog['work'][0]['thumbnail'], '')
         self.assertEqual(self.request('POST', '/api/publish', publish)[0], 400)
 
         (server.ROOT / 'tesseract.js').write_text('// updated runtime\n')
