@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Explicit local-export paths shared by Studio and the viewer. No arbitrary URL imports.
 export function normalizeExportFolder(value) {
     if(typeof value!=='string')throw new Error('Invalid export folder');

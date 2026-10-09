@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Isolated capture regression: no HTTP server, skyboxes, or ffmpeg processes.
 const { ensureGuard, bounded, installCleanup } = require('./test_lifecycle.cjs');
 ensureGuard(__filename, { timeout: 60 });

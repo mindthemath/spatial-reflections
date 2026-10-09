@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // window.studio / window.viewer agent API. Isolated temp root and server; never touches real raw/ or exports/.
 const {ensureGuard,bounded,stopServer,installCleanup}=require('./test_lifecycle.cjs');
 ensureGuard(__filename,{network:true,timeout:180});

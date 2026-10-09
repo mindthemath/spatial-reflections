@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Pinned H.264 encoding profiles shared by simple and resumable exports."""
 
 MASTER_ENCODING = {

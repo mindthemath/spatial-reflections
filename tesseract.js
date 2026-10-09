@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { installSkyboxLibrary } from './viewer-skyboxes.js';

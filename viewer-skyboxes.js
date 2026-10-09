@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 import * as THREE from 'three';
 import {normalizeExportFolder,exportFileURL,studioURL} from './skybox-paths.js';
 
@@ -64,7 +65,7 @@ export function installSkyboxLibrary({mount,renderer,getShader,onTexture,onSwitc
     };
     if(publication?.schemaVersion===1){
         const section=document.createElement('section');section.className='viewer-skybox';
-        section.innerHTML='<div class="skybox-heading">WORK</div><div id="active-skybox"></div><p id="skybox-status" role="status">Loading published environment…</p>';
+        section.innerHTML='<div class="skybox-heading">WORK</div><div id="active-skybox"></div><p id="skybox-status" role="status">Loading published environment…</p><div class="skybox-links"><a href="DISTRIBUTION_RIGHTS.txt" target="_blank" rel="noopener">Artwork and display rights</a><a href="SOURCE_RIGHTS.txt" target="_blank" rel="noopener">Source code rights</a></div>';
         mount.prepend(section);section.querySelector('#active-skybox').textContent=publication.title||'Published work';
         const status=section.querySelector('#skybox-status');onTexture(diagnosticTexture());setRenderState(false,null);
         (async()=>{

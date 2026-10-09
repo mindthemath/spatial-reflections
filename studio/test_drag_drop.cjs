@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Event/timer regression checks: no browser, server or encoder.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

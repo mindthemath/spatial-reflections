@@ -1,4 +1,5 @@
 #!/bin/sh
+# Copyright 2026 Michael Pilosov. All rights reserved.
 # Recover a wedged `make serve`.
 #
 # Symptom: the browser spins on localhost and the server prints no request line.

@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Resume compatibility and asynchronous skybox refresh, no browser/network.
 const assert=require('assert/strict'),fs=require('fs'),path=require('path'),vm=require('vm');
 const source=fs.readFileSync(path.join(__dirname,'..','tesseract.js'),'utf8');

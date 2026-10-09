@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 import {PRESETS, analyzeRGBA, compositionAt, hash32, midiFrequency, random01} from './visual-music-core.js';
 
 const STORAGE_KEY = 'spatial-reflections.music-prototype.v1';

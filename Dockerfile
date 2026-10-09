@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 FROM python:3.13-slim
 ARG DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -11,7 +12,7 @@ RUN chown appuser:appuser /app
 
 USER appuser
 COPY --chown=appuser:appuser vendor/ vendor
-COPY --chown=appuser:appuser index.html skybox-paths.js tesseract.js viewer-skyboxes.js visual-music-core.js visual-music.js .
+COPY --chown=appuser:appuser SOURCE_RIGHTS.txt DISTRIBUTION_RIGHTS.txt index.html skybox-paths.js tesseract.js viewer-skyboxes.js visual-music-core.js visual-music.js .
 COPY --chown=appuser:appuser studio/ studio
 # fallback skybox faces; the raw/ bind mount in `make run` hides these
 COPY --chown=appuser:appuser raw/*.png raw/

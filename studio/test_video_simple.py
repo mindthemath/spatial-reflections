@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Mocked one-shot backend tests: no browser/network/real encoder."""
 import io
 import json

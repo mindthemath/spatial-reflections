@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 import assert from 'node:assert/strict';
 import {MUSIC_SCHEMA, PRESETS, analyzeRGBA, compositionAt, random01} from '../visual-music-core.js';
 

@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Pure pixel-budget tests: no browser, Canvas, source files or dependencies required.
 const assert=require('node:assert/strict');
 (async()=>{

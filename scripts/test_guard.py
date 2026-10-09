@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Serialize resource-heavy tests, bound runtime, and clean only owned processes (POSIX)."""
 import argparse
 import fcntl

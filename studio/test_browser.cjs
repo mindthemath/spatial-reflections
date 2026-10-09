@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Browser integration test. Uses the Bun-managed Playwright dependency and never touches real raw/ or exports/.
 const {ensureGuard,bounded,stopServer,installCleanup}=require('./test_lifecycle.cjs');
 ensureGuard(__filename,{network:true,timeout:300});

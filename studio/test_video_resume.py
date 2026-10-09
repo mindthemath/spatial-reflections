@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 import hashlib
 import io
 import json

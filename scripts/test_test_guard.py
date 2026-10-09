@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Cheap, network/browser-free regression tests for the heavy-test guard."""
 import fcntl
 import json

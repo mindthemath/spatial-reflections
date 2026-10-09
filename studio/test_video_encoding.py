@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 import unittest
 
 from studio.video_encoding import MASTER_ENCODING, h264_encoding_args

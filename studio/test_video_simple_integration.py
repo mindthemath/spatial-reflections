@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """Bounded real encoder checks for the independent one-shot backend."""
 import json
 from pathlib import Path

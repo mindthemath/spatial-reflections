@@ -1,3 +1,4 @@
+/* Copyright 2026 Michael Pilosov. All rights reserved. */
 // Versioned image processing and provenance. No graph UI or Three.js dependencies.
 import {analyzeResolution,planResolution,MAX_CANVAS_SIDE} from './resolution.js';
 export const FACES = ['px','nx','py','ny','pz','nz'];

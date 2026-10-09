@@ -1,3 +1,4 @@
+# Copyright 2026 Michael Pilosov. All rights reserved.
 """One-shot video encoding. No checkpoint store, manifests, hashes or resume."""
 import fcntl
 import hashlib
