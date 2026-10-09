@@ -64,6 +64,7 @@ let timelineFrameInput;
 let exportFpsSelect;
 let videoExportButton;
 let videoExportDialog;
+let soundToggle;
 let videoExportDialogRequest = 0;
 let videoResumeJobsRequest = 0;
 let panelExpanded = true;
@@ -274,7 +275,8 @@ function init() {
         mount: document.getElementById('controlPanelContent'),
         canvas: renderer.domElement,
         initialSettings: restoredMusicSettings,
-        onStateChange: persistViewerSettings
+        onStateChange: persistViewerSettings,
+        onPlaybackChange: updateSoundToggle
     });
     if (publication?.schemaVersion === 1 && publication.viewer?.musicAutoplay === true) {
         visualMusic.requestAutoplay();
@@ -295,6 +297,30 @@ function init() {
     requestAnimationFrame(animate);
     
     console.log("Initialization complete");
+}
+
+const SOUND_ICONS = {
+    on: '<path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>',
+    off: '<path d="m16 9 6 6m0-6-6 6"/>'
+};
+
+function updateSoundToggle(playing) {
+    if (!soundToggle) return;
+    const label = playing ? 'Mute soundtrack' : 'Play soundtrack';
+    soundToggle.setAttribute('aria-label', label);
+    soundToggle.setAttribute('aria-pressed', String(playing));
+    soundToggle.title = label;
+    soundToggle.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block;margin:auto"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/>${SOUND_ICONS[playing ? 'on' : 'off']}</svg>`;
+    Object.assign(soundToggle.style, {
+        flex: 'none',
+        width: '30px',
+        height: '30px',
+        padding: '0',
+        background: 'rgba(0, 0, 0, 0.18)',
+        color: playing ? 'rgba(255, 255, 255, 0.86)' : 'rgba(255, 255, 255, 0.68)',
+        border: '1px solid rgba(255, 255, 255, 0.16)',
+        cursor: 'pointer'
+    });
 }
 
 // Create environment map for reflections
@@ -1314,24 +1340,27 @@ function createControls() {
     });
     videoTimingContent.appendChild(frameButtons);
 
-    videoExportButton = document.createElement('button');
-    videoExportButton.id = 'open-video-export';
-    videoExportButton.type = 'button';
-    videoExportButton.textContent = 'Export video…';
-    videoExportButton.style.width = '100%';
-    videoExportButton.style.padding = '6px';
-    videoExportButton.style.marginTop = '8px';
-    videoExportButton.addEventListener('click', openVideoExportDialog);
-    videoTimingContent.appendChild(videoExportButton);
+    // Published works are static: video export needs studio/server.py.
+    if (publication?.schemaVersion !== 1) {
+        videoExportButton = document.createElement('button');
+        videoExportButton.id = 'open-video-export';
+        videoExportButton.type = 'button';
+        videoExportButton.textContent = 'Export video…';
+        videoExportButton.style.width = '100%';
+        videoExportButton.style.padding = '6px';
+        videoExportButton.style.marginTop = '8px';
+        videoExportButton.addEventListener('click', openVideoExportDialog);
+        videoTimingContent.appendChild(videoExportButton);
 
-    const videoTimingHint = document.createElement('div');
-    videoTimingHint.textContent = videoExportWasInterrupted
-        ? 'The previous video export was cancelled because this page was left. Start it again when you can leave this page loaded.'
-        : 'Frames render here and stream to the local server. This window can sit in the background. Leaving the page cancels the export.';
-    videoTimingHint.style.marginTop = '7px';
-    videoTimingHint.style.fontSize = '10px';
-    videoTimingHint.style.color = '#9cadc3';
-    videoTimingContent.appendChild(videoTimingHint);
+        const videoTimingHint = document.createElement('div');
+        videoTimingHint.textContent = videoExportWasInterrupted
+            ? 'The previous video export was cancelled because this page was left. Start it again when you can leave this page loaded.'
+            : 'Frames render here and stream to the local server. This window can sit in the background. Leaving the page cancels the export.';
+        videoTimingHint.style.marginTop = '7px';
+        videoTimingHint.style.fontSize = '10px';
+        videoTimingHint.style.color = '#9cadc3';
+        videoTimingContent.appendChild(videoTimingHint);
+    }
 
     videoTimingDetails.appendChild(videoTimingContent);
     controlPanel.appendChild(videoTimingDetails);
@@ -1460,25 +1489,41 @@ function createControls() {
     const panelToggle = document.createElement('button');
     panelToggle.type = 'button';
     panelToggle.setAttribute('aria-controls', panelContent.id);
+    // The soundtrack toggle stays beside the gear so music never needs the full panel,
+    // and gives touch visitors a first tap that does not move the camera.
+    soundToggle = document.createElement('button');
+    soundToggle.type = 'button';
+    soundToggle.id = 'sound-toggle';
+    soundToggle.addEventListener('click', () => {
+        if (!visualMusic) return;
+        if (visualMusic.playing) visualMusic.stop();
+        else void visualMusic.start();
+    });
+    updateSoundToggle(false);
+    const panelHeader = document.createElement('div');
+    panelHeader.id = 'controlPanelHeader';
+    Object.assign(panelHeader.style, { display: 'flex', alignItems: 'center', gap: '6px' });
     const updatePanelAppearance = () => {
         panelContent.hidden = !panelExpanded;
         panelToggle.setAttribute('aria-expanded', String(panelExpanded));
         panelToggle.setAttribute('aria-label', panelExpanded ? 'Collapse controls' : 'Open controls');
         panelToggle.title = panelExpanded ? 'Collapse controls' : 'Open controls';
         panelToggle.textContent = panelExpanded ? '▾ Controls' : '⚙︎';
+        panelHeader.style.marginBottom = panelExpanded ? '10px' : '0';
         Object.assign(controlPanel.style, panelExpanded ? {
             width: 'min(290px, calc(100vw - 20px))',
             backgroundColor: 'rgba(0, 0, 0, 0.5)',
             padding: '10px',
             overflowY: 'auto'
         } : {
-            width: '30px',
+            width: '66px',
             backgroundColor: 'transparent',
             padding: '0',
             overflowY: 'hidden'
         });
         Object.assign(panelToggle.style, panelExpanded ? {
-            width: '100%',
+            flex: '1',
+            width: 'auto',
             height: 'auto',
             background: 'transparent',
             color: 'inherit',
@@ -1487,9 +1532,9 @@ function createControls() {
             textAlign: 'left',
             font: 'inherit',
             fontWeight: 'bold',
-            cursor: 'pointer',
-            marginBottom: '10px'
+            cursor: 'pointer'
         } : {
+            flex: 'none',
             width: '30px',
             height: '30px',
             background: 'rgba(0, 0, 0, 0.18)',
@@ -1499,8 +1544,7 @@ function createControls() {
             textAlign: 'center',
             font: '16px/28px Arial, sans-serif',
             fontWeight: 'normal',
-            cursor: 'pointer',
-            marginBottom: '0'
+            cursor: 'pointer'
         });
     };
     updatePanelAppearance();
@@ -1509,10 +1553,11 @@ function createControls() {
         updatePanelAppearance();
         persistViewerSettings();
     });
-    controlPanel.append(panelToggle, panelContent);
+    panelHeader.append(panelToggle, soundToggle);
+    controlPanel.append(panelHeader, panelContent);
     controlPanel.querySelectorAll('input[type="range"]').forEach(addRangeStepper);
     document.body.appendChild(controlPanel);
-    createVideoExportDialog();
+    if (publication?.schemaVersion !== 1) createVideoExportDialog();
 
     // Input handlers update the application state first; bubbling then saves it.
     controlPanel.addEventListener('input', persistViewerSettings);
@@ -3664,7 +3709,7 @@ function installViewerAPI() {
         };
     }
 
-    window.viewer = Object.freeze({
+    const api = {
         ready: Promise.resolve(skyboxLibrary?.initialLoad).then(() => undefined),
         describe: () => ({
             about: 'Tesseract viewer: a 4D polytope rendered in three.js, reflecting a six-face skybox. Changes show live and are saved in this browser.',
@@ -3710,7 +3755,20 @@ function installViewerAPI() {
             output.getContext('2d').drawImage(source, 0, 0, output.width, output.height);
             return output.toDataURL('image/png');
         }
-    });
+    };
+    if (publication?.schemaVersion === 1) {
+        // Published works are static: the export library needs studio/server.py.
+        const describe = api.describe;
+        delete api.listExports;
+        delete api.loadSkybox;
+        api.describe = () => {
+            const description = describe();
+            delete description.methods['listExports()'];
+            delete description.methods['loadSkybox(folder)'];
+            return description;
+        };
+    }
+    window.viewer = Object.freeze(api);
     if (publication?.schemaVersion !== 1) announceAgentAPI('viewer');
 }
 

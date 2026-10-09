@@ -147,6 +147,58 @@ def rebuild_catalog():
     temporary.replace(site / 'catalog.json')
 
 
+RUNTIME_FILES = ('tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js', 'visual-music.js',
+                 'visual-music-core.js', 'SOURCE_RIGHTS.txt', 'DISTRIBUTION_RIGHTS.txt')
+
+
+def check_runtime():
+    vendor = ROOT / 'vendor'
+    required = (ROOT / 'index.html', *(ROOT / name for name in RUNTIME_FILES),
+                vendor / 'three.module.js', vendor / 'controls' / 'OrbitControls.js', vendor / 'THREE-LICENSE.txt')
+    if any(not path.is_file() for path in required):
+        raise ValueError('Viewer runtime files are missing')
+
+
+def write_runtime(folder, piece):
+    """Snapshot the current viewer runtime into a published work folder."""
+    for name in RUNTIME_FILES:
+        shutil.copy2(ROOT / name, folder / name)
+    shutil.copytree(ROOT / 'vendor', folder / 'vendor')
+    html = (ROOT / 'index.html').read_text()
+    marker = '<script id="piece-config" type="application/json"></script>'
+    if html.count(marker) != 1:
+        raise ValueError('Viewer index is missing its publication configuration slot')
+    embedded = json.dumps(piece, separators=(',', ':')).replace('<', '\\u003c')
+    (folder / 'index.html').write_text(html.replace(marker, f'<script id="piece-config" type="application/json">{embedded}</script>'))
+    (folder / 'piece.json').write_text(json.dumps(piece, indent=2) + '\n')
+
+
+def refresh_published_runtime():
+    """Re-snapshot the viewer runtime into every published work, keeping its piece and assets."""
+    check_runtime()
+    work = ROOT / 'site' / 'work'
+    refreshed = []
+    for metadata in sorted(work.glob('*/piece.json')) if work.exists() else ():
+        destination = metadata.parent
+        piece = json.loads(metadata.read_text())
+        temporary = work / f'.{destination.name}-{uuid.uuid4().hex}.pending'
+        temporary.mkdir()
+        try:
+            shutil.copytree(destination / 'skybox', temporary / 'skybox')
+            shutil.copy2(destination / 'preview.png', temporary / 'preview.png')
+            write_runtime(temporary, piece)
+            previous = work / f'.{destination.name}-{uuid.uuid4().hex}.previous'
+            destination.replace(previous)
+            temporary.replace(destination)
+            shutil.rmtree(previous)
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+        refreshed.append(destination.name)
+    rebuild_catalog()
+    return refreshed
+
+
 def publish_work(request):
     title = str(request.get('title', '')).strip()
     description = str(request.get('description', '')).strip()
@@ -172,13 +224,7 @@ def publish_work(request):
     if not 0.5 <= asset_quality <= 1: raise ValueError('JPEG quality must be between 0.50 and 1.00')
     source_size = manifest.get('pipeline', {}).get('size')
     published_size = source_size if asset_size == 'original' else min(source_size or asset_size, asset_size)
-    required = [ROOT / name for name in ('index.html', 'tesseract.js', 'viewer-skyboxes.js', 'skybox-paths.js',
-                                          'visual-music.js', 'visual-music-core.js', 'SOURCE_RIGHTS.txt',
-                                          'DISTRIBUTION_RIGHTS.txt')]
-    vendor = ROOT / 'vendor'
-    vendor_files = (vendor / 'three.module.js', vendor / 'controls' / 'OrbitControls.js', vendor / 'THREE-LICENSE.txt')
-    if any(not path.is_file() for path in (*required, *vendor_files)):
-        raise ValueError('Viewer runtime files are missing')
+    check_runtime()
 
     work = ROOT / 'site' / 'work'
     work.mkdir(parents=True, exist_ok=True)
@@ -207,22 +253,13 @@ def publish_work(request):
             skybox_files[face] = f'skybox/{target.name}'
         preview = folder / 'preview.png'
         shutil.copy2(preview if preview.is_file() else folder / 'px.png', temporary / 'preview.png')
-        for source in required[1:]:
-            shutil.copy2(source, temporary / source.name)
-        shutil.copytree(vendor, temporary / 'vendor')
         published_at = datetime.now(timezone.utc).isoformat()
         piece = {'schemaVersion': 1, 'slug': slug, 'title': title, 'description': description,
                  'publishedAt': published_at, 'size': published_size,
                  'skybox': skybox_files, 'viewer': state,
                  'source': {'export': folder.relative_to(ROOT.resolve()).as_posix(),
                             'manifestSha256': hash_file(folder / 'manifest.json')}}
-        html = required[0].read_text()
-        marker = '<script id="piece-config" type="application/json"></script>'
-        if html.count(marker) != 1:
-            raise ValueError('Viewer index is missing its publication configuration slot')
-        embedded = json.dumps(piece, separators=(',', ':')).replace('<', '\\u003c')
-        (temporary / 'index.html').write_text(html.replace(marker, f'<script id="piece-config" type="application/json">{embedded}</script>'))
-        (temporary / 'piece.json').write_text(json.dumps(piece, indent=2) + '\n')
+        write_runtime(temporary, piece)
         temporary.replace(destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -809,7 +846,13 @@ if __name__ == '__main__':
                         help='interface to listen on; use 0.0.0.0 to accept non-local connections')
     parser.add_argument('--video-mode', choices=('resumable', 'simple'), default='resumable',
                         help='simple: one-shot encoding; cancellation discards partial output')
+    parser.add_argument('--refresh-site', action='store_true',
+                        help='re-snapshot the current viewer runtime into every site/work/<slug>/ and exit')
     args = parser.parse_args()
+    if args.refresh_site:
+        for slug in refresh_published_runtime():
+            print(f'Refreshed site/work/{slug}/')
+        raise SystemExit
     VIDEO_MODE = args.video_mode
     http = StudioHTTPServer((args.host, args.port), Handler)
     ffmpeg = shutil.which('ffmpeg')
