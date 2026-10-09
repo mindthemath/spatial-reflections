@@ -162,7 +162,7 @@ function applyViewerSettings(saved) {
         videoExportWidth = videoWidth;
         videoExportHeight = videoHeight;
     }
-    if (['draft', 'standard', 'high', 'master'].includes(saved.videoExportQuality)) videoExportQuality = saved.videoExportQuality;
+    if (['draft', 'standard', 'high', 'capped', 'master'].includes(saved.videoExportQuality)) videoExportQuality = saved.videoExportQuality;
     if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
     if (typeof saved.surfaceGrain === 'boolean') surfaceGrain = saved.surfaceGrain;
     if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
@@ -1769,7 +1769,7 @@ function updateLoopTimingUI() {
 
 // Master is content-dependent CRF encoding. Its conservative value is used
 // only for preflight size/disk planning, never as an encoder bitrate ceiling.
-const VIDEO_QUALITY_BITS_PER_PIXEL = { draft: 0.035, standard: 0.07, high: 0.12, master: 0.8 };
+const VIDEO_QUALITY_BITS_PER_PIXEL = { draft: 0.035, standard: 0.07, high: 0.12, capped: 0.8, master: 0.8 };
 
 function formatBytes(bytes) {
     if (!Number.isFinite(bytes)) return '—';
@@ -1855,6 +1855,7 @@ function createVideoExportDialog() {
                     <option value="draft">Draft</option>
                     <option value="standard">Standard</option>
                     <option value="high">High</option>
+                    <option value="capped">Capped master · streaming</option>
                     <option value="master">Master · dark detail</option>
                 </select></label>
                 <label>Range<select id="video-export-range">
@@ -2248,16 +2249,20 @@ function updateVideoExportSummary() {
             : `Durable progress is saved every ${plan.checkpointSeconds} seconds.`;
         const qualityText = plan.quality === 'master'
             ? 'Master · CRF 12 · slow · grain-tuned dark-detail AQ'
+            : plan.quality === 'capped'
+            ? `Capped master · CRF 12 · grain-tuned dark-detail AQ · ${formatBitRate(plan.bitRate)} ceiling`
             : `${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target`;
         const estimateText = plan.quality === 'master'
             ? 'conservative preflight allowance'
+            : plan.quality === 'capped'
+            ? `maximum ${plan.format.toUpperCase()} size`
             : `estimated ${plan.format.toUpperCase()} size`;
         summary.innerHTML = `
             <strong>${plan.resumed ? 'Resuming saved export · ' : ''}${rangeText}</strong><br>
             ${plan.width} × ${plan.height} · ${plan.fps || exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
             H.264 ${plan.format.toUpperCase()} · ${qualityText} · ${plan.music?.enabled ? 'generative AAC soundtrack' : 'no audio'} · current ${currentShader} shader<br>
             Duration ${formatDuration(plan.duration)} · ${estimateText} <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
-            <small>Saved under <code>videos/</code>. ${checkpointText} ${plan.quality === 'master' ? 'Master has no bitrate ceiling; actual size follows visual complexity.' : 'Visual complexity can change the final file size.'}${plan.music?.enabled ? ` Soundtrack preparation temporarily uses about ${formatBytes(plan.duration * 48000 * 4 + 44)}.` : ''}${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
+            <small>Saved under <code>videos/</code>. ${checkpointText} ${plan.quality === 'master' ? 'Master has no bitrate ceiling; actual size follows visual complexity.' : plan.quality === 'capped' ? 'Matches Master until grain or detail would exceed the ceiling; simpler footage comes in smaller.' : 'Visual complexity can change the final file size.'}${plan.music?.enabled ? ` Soundtrack preparation temporarily uses about ${formatBytes(plan.duration * 48000 * 4 + 44)}.` : ''}${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
         summary.classList.remove('error');
     }
     confirm.disabled = videoExportRunning || videoExportDialog.dataset.serverAvailable !== 'yes' || !plan || Boolean(plan.error) || spaceError;
