@@ -115,6 +115,10 @@ finally:
   const published=await page.context().newPage();published.on('pageerror',e=>errors.push(e.message));await published.goto(`http://localhost:${port}/published.html`);await published.waitForSelector('#controlPanel');
   assert(await published.locator('#controlPanelContent').isHidden());assert.equal(await published.locator('#controlPanelHeader > button[aria-controls]').getAttribute('aria-label'),'Open controls');
   assert.equal(await published.locator('#open-video-export, #video-export-dialog').count(),0);assert.deepEqual(await published.evaluate(()=>[typeof viewer.listExports,typeof viewer.loadSkybox,'loadSkybox(folder)' in viewer.describe().methods]),['undefined','undefined',false]);assert((await published.locator('#controlPanel').boundingBox()).width<=67);await published.locator('#controlPanelHeader > button[aria-controls]').click();assert(await published.locator('#controlPanelContent').isVisible());await published.close();
+  const kioskHTML=publishedHTML.replace(JSON.stringify(publishedPiece),JSON.stringify({...publishedPiece,display:{hideOverlay:true}}));
+  fs.writeFileSync(path.join(root,'kiosk.html'),kioskHTML);
+  const kiosk=await page.context().newPage();kiosk.on('pageerror',e=>errors.push(e.message));await kiosk.goto(`http://localhost:${port}/kiosk.html`);await kiosk.waitForSelector('#controlPanel',{state:'attached'});
+  assert(await kiosk.locator('#controlPanel').isHidden());await kiosk.mouse.click(400,300);await kiosk.keyboard.press('KeyO');assert(await kiosk.locator('#controlPanel').isVisible());await kiosk.close();
   // iOS-like autoplay: resume() only starts audio inside an activating gesture, and touch-down is not one.
   fs.writeFileSync(path.join(root,'autoplay.html'),publishedHTML.replace(JSON.stringify(publishedPiece),JSON.stringify({...publishedPiece,viewer:{...publishedPiece.viewer,music:{enabled:true},musicAutoplay:true}})));
   const autoplay=await page.context().newPage();autoplay.on('pageerror',e=>errors.push(e.message));
