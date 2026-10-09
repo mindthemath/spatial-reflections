@@ -2,6 +2,14 @@
   "schemaVersion": 1,
   "work": [
     {
+      "slug": "mill2",
+      "title": "The Mill, II",
+      "description": "Another perspective, equally unmoored from reality.",
+      "publishedAt": "2026-10-09T02:12:19.098204+00:00",
+      "url": "work/mill2/",
+      "thumbnail": "work/mill2/preview.png"
+    },
+    {
       "slug": "mill1",
       "title": "The Mill, I",
       "description": "An encapsulation of a disorienting season.",
