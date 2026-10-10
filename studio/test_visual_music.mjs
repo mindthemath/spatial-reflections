@@ -1,6 +1,6 @@
 /* Copyright 2026 Michael Pilosov. All rights reserved. */
 import assert from 'node:assert/strict';
-import {MUSIC_SCHEMA, PRESETS, analyzeRGBA, compositionAt, random01} from '../visual-music-core.js';
+import {MUSIC_SCHEMA, PRESETS, analysisFrame, analysisIndex, analyzeRGBA, compositionAt, random01, stepSeconds} from '../visual-music-core.js';
 
 assert.deepEqual(PRESETS.abyssdrive, {
     label: 'Abyss drive', level: 1, density: .33, tension: .88, influence: .87,
@@ -43,3 +43,27 @@ assert.notDeepEqual(
     'changed pixels change the composition'
 );
 console.log('PASS: deterministic pixel analysis, motion, chroma, seeded score and visual coupling.');
+
+// Live playback and export share one analysis timeline in loop time.
+assert.equal(analysisIndex(0), 0);
+assert.equal(analysisIndex(3 / 8), 3, 'exact boundaries do not floor to the previous analysis');
+assert.equal(analysisIndex(11 / 30), 2, 'frame 11 at 30 FPS is still within analysis 2');
+assert.equal(analysisFrame(3, 30), 11, 'analysis 3 at 30 FPS reads frame round(11.25)');
+assert.equal(analysisFrame(1, 30), 4);
+assert.equal(analysisFrame(8, 60), 60);
+for (const fps of [24, 30, 60]) {
+    for (let index = 0; index < 400; index++) {
+        // Reaching an analysis frame during playback selects that same analysis.
+        const frame = analysisFrame(index, fps);
+        assert(analysisIndex(frame / fps) <= index && analysisIndex((frame + 1) / fps) >= index, `${fps} fps, analysis ${index}`);
+    }
+}
+for (const tempo of [60, 88, 120, 137]) {
+    for (let step = 0; step < 2000; step++) {
+        // The live step counter and the export's step times agree on every step's analysis.
+        const seconds = stepSeconds(step, tempo);
+        assert.equal(Math.floor(seconds * tempo / 60 * 4 + 1e-9), step);
+        assert.equal(analysisIndex(seconds), analysisIndex(step * (60 / tempo / 4)), `tempo ${tempo} step ${step}`);
+    }
+}
+

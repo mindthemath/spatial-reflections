@@ -31,6 +31,21 @@ export function quantize(value, levels = 1024) {
     return Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * levels) / levels;
 }
 
+// One analysis timeline shared by live playback and video export: analysis k
+// reads visual frame round(k * fps / 8) and is the score's input from k/8 s
+// (loop time) until the next one. Both paths derive every time from these.
+export const ANALYSIS_RATE = 8;
+export function analysisIndex(seconds) {
+    // The epsilon keeps exact boundaries (e.g. 3/8 s) from flooring to the previous index.
+    return Math.floor(seconds * ANALYSIS_RATE + 1e-9);
+}
+export function analysisFrame(index, fps) {
+    return Math.round(index * fps / ANALYSIS_RATE);
+}
+export function stepSeconds(step, tempo) {
+    return step * 60 / tempo / 4;
+}
+
 export function analyzeRGBA(data, width, height, previousLuma = null) {
     if (!data || width < 2 || height < 2 || data.length < width * height * 4) {
         throw new Error('Pixel analysis requires a complete RGBA image');

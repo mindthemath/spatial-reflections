@@ -2430,7 +2430,7 @@ function parseSoundFrame(search) {
 const soundFrameAspect = parseSoundFrame(location.search);
 let liveSoundTarget = null;
 
-function sampleLiveSoundFrame() {
+function sampleLiveSoundFrame(frame) {
     const aspect = soundFrameAspect ?? renderer.domElement.width / renderer.domElement.height;
     const { width, height } = soundAnalysisSize(aspect);
     if (liveSoundTarget?.width !== width || liveSoundTarget?.height !== height) {
@@ -2439,7 +2439,11 @@ function sampleLiveSoundFrame() {
     }
     const previousTarget = renderer.getRenderTarget();
     const previousAspect = camera.aspect;
+    const previousFrame = timelineFrame;
     try {
+        // Render the exact analysis frame, not whichever frame is on screen.
+        setTimelineFrame(frame);
+        updateTesseractProjection();
         camera.aspect = aspect;
         camera.updateProjectionMatrix();
         renderer.setRenderTarget(liveSoundTarget);
@@ -2451,6 +2455,8 @@ function sampleLiveSoundFrame() {
         renderer.setRenderTarget(previousTarget);
         camera.aspect = previousAspect;
         camera.updateProjectionMatrix();
+        setTimelineFrame(previousFrame);
+        updateTesseractProjection();
     }
 }
 
