@@ -21,10 +21,12 @@ if __package__:
     from .video_audio import mux_audio_args
     from .video_color import COLOR_PROFILE, browser_video_color_args
     from .video_encoding import h264_encoding_args
+    from .video_naming import settings_hash
 else:
     from video_audio import mux_audio_args
     from video_color import COLOR_PROFILE, browser_video_color_args
     from video_encoding import h264_encoding_args
+    from video_naming import settings_hash
 
 
 SCHEMA_VERSION = 1
@@ -246,7 +248,7 @@ class VideoJobStore:
                             pending.unlink(missing_ok=True)
                         if job.get('state') == 'finalizing':
                             (manifest.parent / '.concat.txt').unlink(missing_ok=True)
-                            self._remove_pending_output(job_id)
+                            self._remove_pending_output(job_id, job)
                             job['state'] = 'ready'
                         elif recovered_pids or job.get('state') == 'active':
                             # Holding the recovery owner lock proves no live job
@@ -437,6 +439,7 @@ class VideoJobStore:
             'error': None,
             'createdAt': now,
             'updatedAt': now,
+            'settingsHash': settings_hash(normalized),
         }
         manifest = job_dir / 'job.json'
         try:
@@ -446,6 +449,7 @@ class VideoJobStore:
                 index['jobs'][job_id] = {
                     'manifest': str(manifest),
                     'poster': Path(self._output_filename(job_id, job)).with_suffix('.png').name,
+                    'settingsHash': job['settingsHash'],
                 }
                 self._write_index(index)
         except Exception:
@@ -492,12 +496,18 @@ class VideoJobStore:
         except (ValueError, TypeError):
             created = datetime.now(timezone.utc)
         timestamp = created.strftime('%Y%m%dT%H%M%SZ')
-        return f"{label}-{timestamp}-{job_id[:8]}.{request.get('format', 'mp4')}"
+        return f"{label}-{timestamp}-{VideoJobStore._name_suffix(job_id, job)}.{request.get('format', 'mp4')}"
 
-    def _remove_pending_output(self, job_id):
+    @staticmethod
+    def _name_suffix(job_id, job):
+        # Settings hash for new jobs; jobs created before it keep their random id.
+        suffix = (job or {}).get('settingsHash')
+        return suffix if isinstance(suffix, str) and re.fullmatch(r'[0-9a-f]{8}', suffix) else job_id[:8]
+
+    def _remove_pending_output(self, job_id, job=None):
         if not self.videos.is_dir():
             return
-        for path in self.videos.glob(f'.*-{job_id[:8]}.pending.*'):
+        for path in self.videos.glob(f'.*-{self._name_suffix(job_id, job)}.pending.*'):
             path.unlink(missing_ok=True)
 
     def _validate_job_directory(self, manifest, job_id):
@@ -685,7 +695,7 @@ class VideoJobStore:
                     if job_id in self.leases:
                         raise ValueError('Video export is already active in another browser')
                     self.leases[job_id] = {'token': lease, 'lastActivity': self.clock()}
-                self._remove_pending_output(job_id)
+                self._remove_pending_output(job_id, job)
                 self._verify_segments(manifest, job, repair=True)
                 if job['nextFrame'] < job['request']['frames'] and encoder_error:
                     raise ValueError(encoder_error)
@@ -1216,7 +1226,7 @@ class VideoJobStore:
                 poster_path = None
                 if (isinstance(poster_name, str)
                         and Path(poster_name).name == poster_name
-                        and poster_name.endswith(f'-{job_id[:8]}.png')):
+                        and poster_name.endswith(f'-{self._name_suffix(job_id, entry)}.png')):
                     poster_path = self.videos / poster_name
                 elif poster_name is not None:
                     raise ValueError('Video export index entry has an invalid poster path')
@@ -1235,7 +1245,7 @@ class VideoJobStore:
                 if poster_path is not None:
                     poster_path.unlink(missing_ok=True)
                     poster_path.with_name(f'.{poster_path.name}.pending').unlink(missing_ok=True)
-                self._remove_pending_output(job_id)
+                self._remove_pending_output(job_id, entry)
                 with self.lock:
                     index = self._read_index()
                     if index['jobs'].pop(job_id, None) is None:
