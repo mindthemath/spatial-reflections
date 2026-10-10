@@ -95,6 +95,7 @@ test-guard:
 
 test-python:
 	$(TEST_GUARD) --network --timeout 180 -- python3 -m unittest discover -s studio -p 'test_*.py'
+	$(TEST_GUARD) --timeout 60 -- python3 -m unittest discover -s scripts -p 'test_audio_diff.py'
 
 # Opt-in production-resolution encoder test. Uses temporary storage, never overwrites source.
 VIDEO_SOAK_SECONDS ?= 6
