@@ -53,6 +53,9 @@ let showVertices = false;
 // Chrome's per-pixel grain re-randomizes as the projection moves, so every
 // frame carries fresh noise that dominates video bitrate.
 let surfaceGrain = true;
+// Smudges, scratches and dust fixed to each face: texture that moves with the
+// glass, so it compresses far better than per-frame grain.
+let dirtyMirrors = false;
 let showOverlay = true;
 let cameraInfoDisplay;
 let motionStepSlider;
@@ -99,6 +102,7 @@ function viewerSettings() {
         lightDistance,
         showVertices,
         surfaceGrain,
+        dirtyMirrors,
         animationPaused,
         exportFps,
         videoExportWidth,
@@ -125,6 +129,7 @@ function defaultViewerSettings() {
         lightDistance: 0.1,
         showVertices: false,
         surfaceGrain: true,
+        dirtyMirrors: false,
         animationPaused: true,
         exportFps: 60,
         videoExportWidth: 1920,
@@ -165,6 +170,7 @@ function applyViewerSettings(saved) {
     if (['draft', 'standard', 'high', 'capped', 'master'].includes(saved.videoExportQuality)) videoExportQuality = saved.videoExportQuality;
     if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
     if (typeof saved.surfaceGrain === 'boolean') surfaceGrain = saved.surfaceGrain;
+    if (typeof saved.dirtyMirrors === 'boolean') dirtyMirrors = saved.dirtyMirrors;
     if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
     if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
     if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
@@ -735,6 +741,9 @@ function applyViewSettings(metadata) {
                 if (material.uniforms.surfaceGrain) {
                     material.uniforms.surfaceGrain.value = surfaceGrain ? 1 : 0;
                 }
+                if (material.uniforms.dirtyMirrors) {
+                    material.uniforms.dirtyMirrors.value = dirtyMirrors ? 1 : 0;
+                }
             }
         });
         
@@ -944,6 +953,27 @@ function createControls() {
     grainToggle.appendChild(grainCheckbox);
     grainToggle.appendChild(grainLabel);
     controlPanel.appendChild(grainToggle);
+
+    const dirtyToggle = document.createElement('div');
+    dirtyToggle.style.marginBottom = '10px';
+    const dirtyCheckbox = document.createElement('input');
+    dirtyCheckbox.type = 'checkbox';
+    dirtyCheckbox.id = 'dirtyMirrorsToggle';
+    dirtyCheckbox.checked = dirtyMirrors;
+    dirtyCheckbox.addEventListener('change', function() {
+        dirtyMirrors = this.checked;
+        faces.forEach(face => {
+            if (face.material?.uniforms?.dirtyMirrors) face.material.uniforms.dirtyMirrors.value = dirtyMirrors ? 1 : 0;
+        });
+    });
+    const dirtyLabel = document.createElement('label');
+    dirtyLabel.htmlFor = 'dirtyMirrorsToggle';
+    dirtyLabel.textContent = 'Dirty mirrors';
+    dirtyLabel.title = 'Smudges, scratches and dust that stay on each face; compresses far better than grain';
+    dirtyLabel.style.marginLeft = '5px';
+    dirtyToggle.appendChild(dirtyCheckbox);
+    dirtyToggle.appendChild(dirtyLabel);
+    controlPanel.appendChild(dirtyToggle);
     
     const shapeLabel = document.createElement('label');
     shapeLabel.textContent = '4D shape: ';
@@ -1619,6 +1649,8 @@ function syncViewerControlsFromState() {
     if (vertexToggle) vertexToggle.checked = showVertices;
     const grainToggle = document.getElementById('grainToggle');
     if (grainToggle) grainToggle.checked = surfaceGrain;
+    const dirtyToggle = document.getElementById('dirtyMirrorsToggle');
+    if (dirtyToggle) dirtyToggle.checked = dirtyMirrors;
     if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
     const resolution = document.getElementById('video-export-resolution');
     if (resolution) resolution.value = `${videoExportWidth}x${videoExportHeight}`;
@@ -1824,6 +1856,8 @@ function videoRenderSignature() {
         showVertices,
         // Omitted when on so signatures from before the toggle stay valid.
         ...(surfaceGrain ? {} : {surfaceGrain}),
+        // Omitted when off so signatures from before dirty mirrors stay valid.
+        ...(dirtyMirrors ? {dirtyMirrors} : {}),
         camera: {
             position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
@@ -3045,10 +3079,14 @@ function createShaderMaterial() {
         varying vec3 vPosition;
         varying vec3 vViewPosition;
         varying vec3 vWorldPosition;
+        // Face-local coordinates (xy) and per-face seed (z); vertex spheres lack it.
+        attribute vec3 surface;
+        varying vec3 vSurface;
         
         void main() {
             vNormal = normalize(normalMatrix * normal);
             vPosition = position;
+            vSurface = surface;
             
             vec4 worldPosition = modelMatrix * vec4(position, 1.0);
             vWorldPosition = worldPosition.xyz;
@@ -3094,7 +3132,8 @@ function createShaderMaterial() {
     const uniforms = {
         lightingType: { value: lightingTypeInt },
         lightDistance: { value: lightDistance },
-        surfaceGrain: { value: surfaceGrain ? 1 : 0 }
+        surfaceGrain: { value: surfaceGrain ? 1 : 0 },
+        dirtyMirrors: { value: dirtyMirrors ? 1 : 0 }
     };
     
     // Add environment map for chrome shader
@@ -3275,13 +3314,64 @@ function createChromeShader() {
         uniform int lightingType;
         uniform float lightDistance;
         uniform float surfaceGrain;
+        uniform float dirtyMirrors;
         uniform samplerCube envMap;
+        varying vec3 vSurface;
         varying vec3 vNormal;
         varying vec3 vPosition;
         varying vec3 vViewPosition;
         varying vec3 vWorldPosition;
         
         ${shaderUtilities()}
+
+        // Dirty mirrors, fixed to each face (vSurface.xy: face coordinates,
+        // vSurface.z: per-face seed) so they move with the glass and stay put
+        // frame to frame. Antialiased with fwidth so fine lines do not shimmer.
+        float valueNoise(vec2 p) {
+            vec2 i = floor(p), f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(mix(random(i), random(i + vec2(1.0, 0.0)), f.x),
+                       mix(random(i + vec2(0.0, 1.0)), random(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
+        float fbm(vec2 p) {
+            float value = 0.0, amplitude = 0.5;
+            for (int octave = 0; octave < 4; octave++) {
+                value += amplitude * valueNoise(p);
+                p *= 2.03;
+                amplitude *= 0.5;
+            }
+            return value;
+        }
+        vec3 dirtyMirror(vec3 color, vec3 surface) {
+            vec2 uv = surface.xy * 6.0 + surface.z * 37.0;
+            // Smudges: soft haze that lifts and flattens the reflection.
+            float smudge = smoothstep(0.42, 0.78, fbm(uv * 0.55));
+            color = mix(color, color * 0.8 + 0.04, smudge * 0.6);
+            // Fine scratches: sparse thin segments in three directions per face.
+            float scratch = 0.0;
+            for (int k = 0; k < 3; k++) {
+                float angle = random(vec2(surface.z * 13.0, float(k) + 1.0)) * 3.14159;
+                vec2 along = vec2(cos(angle), sin(angle));
+                vec2 p = uv * 3.0;
+                float across = dot(p, vec2(-along.y, along.x)) * 2.5;
+                float lane = floor(across);
+                float width = max(fwidth(across), 1e-4);
+                float line = 1.0 - smoothstep(0.0, 1.5 * width, abs(fract(across) - 0.5) - 0.02);
+                float present = step(0.82, random(vec2(lane, float(k) + surface.z)));
+                float segment = smoothstep(0.55, 0.7, valueNoise(vec2(dot(p, along) * 0.8, lane + 19.0 * float(k))));
+                scratch = max(scratch, line * present * segment);
+            }
+            color += scratch * 0.07;
+            // Dust: sparse soft specks.
+            vec2 cell = floor(uv * 5.0);
+            vec2 center = cell + 0.2 + 0.6 * vec2(random(cell + surface.z), random(cell.yx + 3.1 + surface.z));
+            float radius = 0.03 + 0.05 * random(cell + 7.7);
+            float distance_ = length(uv * 5.0 - center);
+            float speck = (1.0 - smoothstep(radius, radius + fwidth(distance_) * 1.5, distance_))
+                * step(0.86, random(cell + 11.3 + surface.z));
+            color = mix(color, color * 0.55 + 0.05, speck * 0.7);
+            return color;
+        }
         
         void main() {
             // Normalized vectors
@@ -3323,6 +3413,7 @@ function createChromeShader() {
             
             // Apply lighting with less influence to preserve reflections
             vec3 final = chromeColor * (lighting * 0.7 + 0.3) - noisePattern;
+            if (dirtyMirrors > 0.5) final = dirtyMirror(final, vSurface);
             
             gl_FragColor = vec4(outputDither(final), 1.0);
         }
@@ -3414,6 +3505,19 @@ function setViewerShape(shape) {
     if (select) select.value = currentShape;
 }
 
+// Each corner sits on a unit regular polygon in the face's own coordinates, with a
+// per-face seed, fan-triangulated in the same order as facePositionArray.
+function faceSurfaceArray(indices, faceIndex) {
+    const seed = (faceIndex * 0.6180339887) % 1;
+    const corner = k => [0.5 + 0.5 * Math.cos(2 * Math.PI * k / indices.length),
+                         0.5 + 0.5 * Math.sin(2 * Math.PI * k / indices.length), seed];
+    const surface = [];
+    for (let i = 1; i + 1 < indices.length; i++) {
+        for (const k of [0, i, i + 1]) surface.push(...corner(k));
+    }
+    return new Float32Array(surface);
+}
+
 function facePositionArray(indices) {
     const positions = [];
     for (let i = 1; i + 1 < indices.length; i++) {
@@ -3462,10 +3566,12 @@ function createTesseract() {
     faces = [];
     for (const indices of topology.faces) {
         const geometry = new THREE.BufferGeometry();
+        const surface = faceSurfaceArray(indices, faces.length);
         geometry.setAttribute('position', new THREE.BufferAttribute(facePositionArray(indices), 3));
+        geometry.setAttribute('surface', new THREE.BufferAttribute(surface, 3));
         geometry.computeVertexNormals();
         const face = new THREE.Mesh(geometry, material);
-        face.userData = {vertices: indices};
+        face.userData = {vertices: indices, surface};
         tesseract.add(face);
         faces.push(face);
     }
@@ -3520,6 +3626,7 @@ function updateTesseractProjection() {
         const vertexArray = facePositionArray(faceVertices);
         
         geometry.setAttribute('position', new THREE.BufferAttribute(vertexArray, 3));
+        geometry.setAttribute('surface', new THREE.BufferAttribute(face.userData.surface, 3));
         geometry.computeVertexNormals();
         
         if (face.geometry) face.geometry.dispose();
@@ -3681,6 +3788,7 @@ function installViewerAPI() {
         rotationCoefficients: { axes: ['xw', 'yw', 'zw'], min: -1, max: 1, step: 0.05 },
         showVertices: { type: 'boolean' },
         surfaceGrain: { type: 'boolean', note: 'chrome shader only' },
+        dirtyMirrors: { type: 'boolean', note: 'chrome shader only' },
         exportFps: { values: [24, 25, 30, 50, 60] },
         animationPaused: { type: 'boolean' },
         timelineFrame: { type: 'integer', note: 'wraps around the loop length' },
@@ -3740,6 +3848,13 @@ function installViewerAPI() {
                 case 'surfaceGrain': {
                     require(typeof value === 'boolean', 'surfaceGrain must be true or false');
                     const checkbox = document.getElementById('grainToggle');
+                    checkbox.checked = value;
+                    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+                case 'dirtyMirrors': {
+                    require(typeof value === 'boolean', 'dirtyMirrors must be true or false');
+                    const checkbox = document.getElementById('dirtyMirrorsToggle');
                     checkbox.checked = value;
                     checkbox.dispatchEvent(new Event('change', { bubbles: true }));
                     break;
