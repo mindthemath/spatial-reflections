@@ -274,6 +274,7 @@ function init() {
     visualMusic = installVisualMusic({
         mount: document.getElementById('controlPanelContent'),
         canvas: renderer.domElement,
+        sampleFrame: sampleLiveSoundFrame,
         initialSettings: restoredMusicSettings,
         onStateChange: persistViewerSettings,
         onPlaybackChange: updateSoundToggle
@@ -2408,13 +2409,57 @@ async function canvasPNG(canvas) {
     return dataUrlToBlob(canvas.toDataURL('image/png'));
 }
 
+// The soundtrack hears a small offscreen render, never the visible canvas, so
+// live playback and video exports analyze frames the same way. Only the frame's
+// shape matters (64 px wide, height from the aspect ratio), not its resolution.
+function soundAnalysisSize(aspect) {
+    const width = 64;
+    return { width, height: Math.max(24, Math.min(64, Math.round(width / aspect))) };
+}
+
+// Hidden ?soundframe= lets the live soundtrack hear the frame an export would,
+// e.g. 16:9 or 1080p, without changing what viewers see. Absent, it follows the window.
+const SOUND_FRAME_ALIASES = { square: 1, '720p': 16 / 9, '1080p': 16 / 9, '1440p': 16 / 9, '4k': 16 / 9 };
+function parseSoundFrame(search) {
+    const value = new URLSearchParams(search).get('soundframe')?.trim().toLowerCase();
+    if (!value) return null;
+    if (Object.hasOwn(SOUND_FRAME_ALIASES, value)) return SOUND_FRAME_ALIASES[value];
+    const ratio = value.match(/^(\d+(?:\.\d+)?)\s*[:x]\s*(\d+(?:\.\d+)?)$/);
+    return ratio && Number(ratio[1]) > 0 && Number(ratio[2]) > 0 ? Number(ratio[1]) / Number(ratio[2]) : null;
+}
+const soundFrameAspect = parseSoundFrame(location.search);
+let liveSoundTarget = null;
+
+function sampleLiveSoundFrame() {
+    const aspect = soundFrameAspect ?? renderer.domElement.width / renderer.domElement.height;
+    const { width, height } = soundAnalysisSize(aspect);
+    if (liveSoundTarget?.width !== width || liveSoundTarget?.height !== height) {
+        liveSoundTarget?.dispose();
+        liveSoundTarget = new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false });
+    }
+    const previousTarget = renderer.getRenderTarget();
+    const previousAspect = camera.aspect;
+    try {
+        camera.aspect = aspect;
+        camera.updateProjectionMatrix();
+        renderer.setRenderTarget(liveSoundTarget);
+        renderer.render(scene, camera);
+        const data = new Uint8Array(width * height * 4);
+        renderer.readRenderTargetPixels(liveSoundTarget, 0, 0, width, height, data);
+        return { data, width, height };
+    } finally {
+        renderer.setRenderTarget(previousTarget);
+        camera.aspect = previousAspect;
+        camera.updateProjectionMatrix();
+    }
+}
+
 async function prepareMusicExport(plan, status) {
     if (!visualMusic?.settings.enabled) return null;
     const originalFrame = timelineFrame;
     const originalAspect = camera.aspect;
     const previousTarget = renderer.getRenderTarget();
-    const analysisWidth = 64;
-    const analysisHeight = Math.max(24, Math.min(64, Math.round(analysisWidth * plan.height / plan.width)));
+    const { width: analysisWidth, height: analysisHeight } = soundAnalysisSize(plan.width / plan.height);
     const target = new THREE.WebGLRenderTarget(analysisWidth, analysisHeight, {
         depthBuffer: true,
         stencilBuffer: false

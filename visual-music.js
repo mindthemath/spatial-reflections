@@ -193,10 +193,14 @@ class SpatialMusicEngine {
 
     analyze() {
         try {
-            const context = this.analysisContext;
-            context.drawImage(this.canvas, 0, 0, 48, 27);
-            const image = context.getImageData(0, 0, 48, 27);
-            const analysis = analyzeRGBA(image.data, 48, 27, this.previousLuma);
+            // Prefer the host's offscreen sound frame, which matches video export.
+            let image = this.sampleFrame?.();
+            if (!image) {
+                const context = this.analysisContext;
+                context.drawImage(this.canvas, 0, 0, 48, 27);
+                image = context.getImageData(0, 0, 48, 27);
+            }
+            const analysis = analyzeRGBA(image.data, image.width, image.height, this.previousLuma);
             this.previousLuma = analysis.luma;
             this.features = analysis.features;
             return true;
@@ -603,7 +607,7 @@ async function audioBufferWav(buffer, onProgress = null) {
     return new Blob([output], {type: 'audio/wav'});
 }
 
-export function installVisualMusic({mount, canvas, initialSettings = null, onStateChange = null, onPlaybackChange = null}) {
+export function installVisualMusic({mount, canvas, sampleFrame = null, initialSettings = null, onStateChange = null, onPlaybackChange = null}) {
     const section = document.createElement('section');
     section.className = 'visual-music';
     section.innerHTML = `
@@ -628,6 +632,7 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
         status.classList.toggle('error', state === 'error');
         dot.classList.toggle('active', state === 'running');
     }, initialSettings, onStateChange);
+    engine.sampleFrame = sampleFrame;
     const preset = section.querySelector('.music-preset');
     for (const [value, definition] of Object.entries(PRESETS)) {
         const option = document.createElement('option'); option.value = value; option.textContent = definition.label; preset.appendChild(option);

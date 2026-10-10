@@ -121,9 +121,11 @@ finally:
   fs.writeFileSync(path.join(root,'autoplay.html'),publishedHTML.replace(JSON.stringify(publishedPiece),JSON.stringify({...publishedPiece,viewer:{...publishedPiece.viewer,music:{enabled:true},musicAutoplay:true}})));
   const autoplay=await page.context().newPage();autoplay.on('pageerror',e=>errors.push(e.message));
   await autoplay.addInitScript(()=>{Object.defineProperty(navigator,'audioSession',{value:{type:'auto'}});const real=AudioContext.prototype.resume,waiting=[];AudioContext.prototype.resume=function(){if(!navigator.userActivation.isActive||window.event?.type==='pointerdown')return new Promise(resolve=>waiting.push(resolve));return real.call(this).then(()=>waiting.splice(0).forEach(resolve=>resolve()));};});
-  await autoplay.goto(`http://localhost:${port}/autoplay.html`);await autoplay.waitForFunction(()=>/waiting for a click/.test(document.querySelector('.music-status')?.textContent));
+  await autoplay.goto(`http://localhost:${port}/autoplay.html?soundframe=1080p`);await autoplay.waitForFunction(()=>/waiting for a click/.test(document.querySelector('.music-status')?.textContent));
   assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Play soundtrack');
   await autoplay.mouse.click(400,300);await autoplay.waitForFunction(()=>document.querySelector('.music-start').disabled);
+  // Live analysis reads the offscreen sound frame (here forced to 16:9) and drives the score.
+  await autoplay.evaluate(()=>viewer.play());await autoplay.waitForFunction(()=>/frame drives \d+% motion/.test(document.querySelector('.music-status').textContent),null,{timeout:10000});
   assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Mute soundtrack');assert(await autoplay.locator('#sound-toggle').isVisible());
   await autoplay.locator('#sound-toggle').click();assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-pressed'),'false');assert(!(await autoplay.locator('.music-start').isDisabled()));
   await autoplay.locator('#sound-toggle').click();await autoplay.waitForFunction(()=>document.querySelector('#sound-toggle').getAttribute('aria-pressed')==='true');
