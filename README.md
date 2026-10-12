@@ -123,7 +123,7 @@ make update    # update packages/Chromium, sync vendor/, then run the full suite
 make test      # vendor integrity, syntax, unit/API and Playwright browser tests
 ```
 
-`make update` deliberately moves Three.js and Playwright to their current releases. Vendor synchronization recursively follows relative module imports because newer Three.js releases may split the runtime across additional files. The update target fails unless vendor integrity and the complete browser suite pass. Still review visual output before committing `package.json`, `bun.lock`, and `vendor/`. Each `site/work/<slug>/` contains its own runtime snapshot. Local snapshots stay unchanged until `make refresh-site` is run. GitHub Pages refreshes these snapshots from the current canonical runtime before uploading the deployment artifact; changes to viewer sources or vendored libraries also trigger deployment. This preserves each work's `piece.json` settings and skybox assets while updating its rendering, sound and frame-restoration code. The archived `site2/` directory is not refreshed or deployed.
+`make update` deliberately moves Three.js and Playwright to their current releases. Vendor synchronization recursively follows relative module imports because newer Three.js releases may split the runtime across additional files. The update target fails unless vendor integrity and the complete browser suite pass. Still review visual output before committing `package.json`, `bun.lock`, and `vendor/`. Existing published work remains unchanged because each `site/work/<slug>/` contains its own runtime snapshot.
 
 A normal release workflow is:
 
