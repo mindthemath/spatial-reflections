@@ -26,6 +26,7 @@ a:focus-visible { outline: 2px solid #80caff; outline-offset: 3px; }
 <h1>Spatial Reflections</h1>
 <h2><i>I am Trapped in a Beautiful House of Mirrors</i></h2>
 <p>A collection of photographic environments reflected by a rotating four-dimensional shape.</p>
+<p>Mathematical Michael, 2026</p>
 </header>
 <main>
 <p id="status">Loading work…</p>
@@ -39,7 +40,7 @@ try {
   const catalog=await response.json();
   status.hidden=!!catalog.work.length;
   if(!catalog.work.length)status.textContent='No work has been published yet.';
-  for(const item of catalog.work){
+  for(const item of [...catalog.work].reverse()){
     const article=document.createElement('article'),link=document.createElement('a'),image=document.createElement('img'),body=document.createElement('div'),title=document.createElement('h2'),description=document.createElement('p');
     link.href=item.url;image.src=item.thumbnail;image.alt='';image.loading='lazy';title.textContent=item.title;description.textContent=item.description||'';
     body.append(title);if(item.description)body.append(description);link.append(image,body);article.append(link);root.append(article);

@@ -1,0 +1,7 @@
+Copyright 2026 Michael Pilosov. All rights reserved.
+
+No license is granted to use, copy, modify, adapt, merge, publish, distribute, sublicense, sell, host, or create derivative works from the first-party source code in this repository except with Michael Pilosov's prior express written permission.
+
+Access to the source code, possession of a copy, or public availability of the repository does not grant any permission beyond rights that cannot lawfully be restricted. Any future permission or license must be stated expressly in writing; no license should be inferred from silence or prior availability.
+
+Third-party components are excluded from this notice and remain subject to their own copyright notices and license terms, including the files under vendor/.
