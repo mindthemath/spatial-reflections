@@ -6,6 +6,16 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "index.html"
+      - "tesseract.js"
+      - "viewer-skyboxes.js"
+      - "skybox-paths.js"
+      - "visual-music.js"
+      - "visual-music-core.js"
+      - "vendor/**"
+      - "SOURCE_RIGHTS.txt"
+      - "DISTRIBUTION_RIGHTS.txt"
+      - "studio/server.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -27,6 +37,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+      - name: Refresh published viewer runtimes
+        run: python3 studio/server.py --refresh-site
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload static site
