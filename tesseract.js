@@ -3379,11 +3379,11 @@ function createChromeShader() {
             vec2 dustUV = uv * 180.0 + seed;
             vec2 cell = floor(dustUV);
             vec2 center = cell + 0.25 + 0.5 * vec2(random(cell), random(cell + 3.1));
-            float radius = mix(0.06, 0.17, random(cell + 7.7));
+            float radius = mix(0.015, 0.0425, random(cell + 7.7));
             float distance_ = length(dustUV - center);
             float footprint = max(length(fwidth(dustUV)), 0.0001);
             float speck = (1.0 - smoothstep(radius, radius + footprint, distance_))
-                * step(0.91 - edge * 0.28, random(cell + 11.3))
+                * step(0.97 - edge * 0.10, random(cell + 11.3))
                 * (1.0 - smoothstep(0.35, 1.2, footprint));
             color = mix(color, color * 0.62 + vec3(0.085, 0.078, 0.063), speck * 0.42);
             return color;
