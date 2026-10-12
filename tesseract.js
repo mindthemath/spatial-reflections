@@ -3363,29 +3363,29 @@ function createChromeShader() {
             float mottling = fbm(uv * 18.0 + seed);
             float deposits = fbm(uv * 47.0 + seed + 9.3);
             // Uneven soft buildup, rather than a uniform painted border.
-            float edgeWidth = mix(0.018, 0.085, mottling);
+            float edgeWidth = mix(0.03, 0.13, mottling);
             float edge = exp(-edgeDistance / edgeWidth);
-            float rim = exp(-edgeDistance / 0.012);
-            float grime = edge * (0.12 + 0.32 * mottling + 0.12 * deposits)
-                + rim * deposits * 0.12;
-            color = mix(color, color * vec3(0.65, 0.63, 0.59) + vec3(0.025, 0.023, 0.019), grime);
+            float rim = exp(-edgeDistance / 0.018);
+            float grime = clamp(edge * (0.22 + 0.52 * mottling + 0.22 * deposits)
+                + rim * deposits * 0.22, 0.0, 0.9);
+            color = mix(color, color * vec3(0.52, 0.49, 0.44) + vec3(0.025, 0.023, 0.019), grime);
 
-            // Thin, low-contrast dusty film; the center remains mostly clear.
-            float haze = (0.018 + 0.045 * mottling + edge * 0.075) * (0.5 + deposits);
-            color = mix(color, color * 0.88 + vec3(0.055, 0.052, 0.046), haze);
+            // Settled dusty film softens reflections without obscuring the center.
+            float haze = (0.05 + 0.10 * mottling + edge * 0.16) * (0.5 + deposits);
+            color = mix(color, color * 0.78 + vec3(0.085, 0.079, 0.067), haze);
 
             // Tiny irregular dust flecks, denser near edges. Fade them out under
             // minification instead of turning subpixel specks into bright dots.
             vec2 dustUV = uv * 180.0 + seed;
             vec2 cell = floor(dustUV);
             vec2 center = cell + 0.25 + 0.5 * vec2(random(cell), random(cell + 3.1));
-            float radius = mix(0.045, 0.13, random(cell + 7.7));
+            float radius = mix(0.06, 0.17, random(cell + 7.7));
             float distance_ = length(dustUV - center);
             float footprint = max(length(fwidth(dustUV)), 0.0001);
             float speck = (1.0 - smoothstep(radius, radius + footprint, distance_))
-                * step(0.96 - edge * 0.19, random(cell + 11.3))
+                * step(0.91 - edge * 0.28, random(cell + 11.3))
                 * (1.0 - smoothstep(0.35, 1.2, footprint));
-            color = mix(color, color * 0.72 + vec3(0.07, 0.065, 0.055), speck * 0.28);
+            color = mix(color, color * 0.62 + vec3(0.085, 0.078, 0.063), speck * 0.42);
             return color;
         }
         
