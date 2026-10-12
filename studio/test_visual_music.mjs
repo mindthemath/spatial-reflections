@@ -66,4 +66,3 @@ for (const tempo of [60, 88, 120, 137]) {
         assert.equal(analysisIndex(seconds), analysisIndex(step * (60 / tempo / 4)), `tempo ${tempo} step ${step}`);
     }
 }
-
