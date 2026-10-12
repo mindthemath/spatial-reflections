@@ -29,3 +29,22 @@ for (const search of ['', '?soundframe=', '?soundframe=0:9', '?soundframe=wide',
     assert.equal(parseSoundFrame(search), null, search || 'absent');
 }
 console.log('PASS: sound frames keep export sizing; ?soundframe= maps names and ratios to aspects.');
+
+const overrideSource = source.slice(source.indexOf('function withSoundAnalysisMaterial('), source.indexOf('function sampleLiveSoundFrame('));
+const previousMaterial = {};
+const renderContext = {soundAnalysisMaterial:null, scene:{overrideMaterial:previousMaterial}, envMap:{},
+ currentShape:'tesseract',currentLighting:'diagonal',lightDistance:.1,
+ createShaderMaterial(shader) {
+  assert.equal(shader,'chrome');
+  return {uniforms:Object.fromEntries(['envMap','surfaceGrain','dirtyMirrors','faceSides','lightDistance','lightingType'].map(key=>[key,{value:0}]))};
+ }};
+vm.runInNewContext(`${overrideSource};this.withSoundAnalysisMaterial=withSoundAnalysisMaterial;`,renderContext);
+renderContext.withSoundAnalysisMaterial(()=>{
+ const uniforms=renderContext.scene.overrideMaterial.uniforms;
+ assert.equal(uniforms.surfaceGrain.value,1);assert.equal(uniforms.dirtyMirrors.value,1);
+ assert.equal(uniforms.faceSides.value,4);
+});
+assert.equal(renderContext.scene.overrideMaterial,previousMaterial);
+assert.throws(()=>renderContext.withSoundAnalysisMaterial(()=>{throw new Error('capture failed');}),/capture failed/);
+assert.equal(renderContext.scene.overrideMaterial,previousMaterial,'restore visible material even after capture failure');
+console.log('PASS: music always analyzes chrome/grain/aging, with exception-safe visible material restoration.');

@@ -43,6 +43,14 @@ class VideoAudioValidationTest(unittest.TestCase):
         self.assertEqual(details['sampleRate'], 48000)
         self.assertEqual(details['channels'], 2)
 
+    def test_canonical_timeline_provenance(self):
+        request = music_request()
+        request['music'].update(analysisRender='chrome-grain-aging-v1', synthesis='whole-timeline-v2')
+        self.assertEqual(validate_music_request(request)['synthesis'], 'whole-timeline-v2')
+        request['music']['synthesis'] = 'unknown'
+        with self.assertRaisesRegex(ValueError, 'incompatible'):
+            validate_music_request(request)
+
     def test_wave_rejects_wrong_duration_format_and_truncation(self):
         request = music_request()
         with self.assertRaisesRegex(ValueError, 'exactly'):

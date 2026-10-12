@@ -108,6 +108,7 @@ test-video-encoder:
 
 test-video-capture:
 	$(TEST_GUARD) --timeout 60 -- node studio/test_video_capture.cjs
+	$(TEST_GUARD) --timeout 120 -- node studio/test_music_timeline.cjs
 
 test-video-simple-browser:
 	$(TEST_GUARD) --network --timeout 180 -- env TESSERACT_TEST_VIDEO_MODE=simple node studio/test_browser.cjs

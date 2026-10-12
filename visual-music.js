@@ -99,7 +99,11 @@ class SpatialMusicEngine {
         if (!this.context) this.buildAudioGraph();
         await this.context.resume();
         this.settings.enabled = true;
-        this.lastStep = null;
+        const {frame = 0, fps = 30} = this.timeline || {};
+        this.lastStep = Math.floor(frame / fps * this.settings.tempo / 60 * 4);
+        this.features = this.analyzeAt(analysisIndex(frame / fps), fps);
+        this.lastAnalysisIndex = analysisIndex(frame / fps);
+        this.lastFrame = frame;
         this.rebuildSustains();
         this.updateMix();
         this.onStatus('Listening to the framebuffer… play the geometry to drive events.', 'running');
@@ -224,6 +228,7 @@ class SpatialMusicEngine {
     }
 
     tick({frame, fps, paused}) {
+        this.timeline = {frame, fps};
         if (!this.settings.enabled || !this.context || this.context.state !== 'running') return;
         const index = analysisIndex(frame / fps);
         if (index !== this.lastAnalysisIndex) {
@@ -235,12 +240,18 @@ class SpatialMusicEngine {
         const step = Math.floor(visualSeconds * this.settings.tempo / 60 * 4);
         const discontinuity = this.lastFrame !== null && Math.abs(frame - this.lastFrame) > Math.max(4, fps / 2);
         if (discontinuity || step < (this.lastStep ?? step)) {
-            this.lastStep = null;
+            this.lastStep = step;
             this.analysisMemo.clear();
             this.releaseSustains(.8);
             this.rebuildSustains();
         }
         this.lastFrame = frame;
+        // Starting/unmuting/seeking joins the current step without replaying its
+        // attack. Events only fire when the timeline crosses the next step.
+        if (this.lastStep === null) {
+            this.lastStep = step;
+            return;
+        }
         if (paused || step === this.lastStep) return;
         // Do not fire a backlog after hidden-tab throttling or a timeline seek.
         this.lastStep = step;
@@ -252,9 +263,8 @@ class SpatialMusicEngine {
         // Each step hears the analysis for its own musical time, exactly as in export.
         const features = this.analyzeAt(analysisIndex(stepSeconds(step, this.settings.tempo)), fps);
         const score = compositionAt({seed: this.settings.seed, step, settings: this.settings, features});
-        const previous = this.lastComposition;
         this.lastComposition = score;
-        if (!previous || previous.bar !== score.bar) this.playHarmonicField(score, now);
+        if (step > 0 && step % 16 === 0) this.playHarmonicField(score, now);
         if (score.pulse) this.playUndertow(score, now);
         if (score.bell) this.playBell(score, now);
         if (score.metal) this.playMetal(score, now);
@@ -467,25 +477,33 @@ class SpatialMusicEngine {
         });
     }
 
-    async renderOffline({duration, startFrame, fps, featureFrames, firstIndex = 0, onProgress = null, signal = null}) {
+    async renderOffline({duration, startFrame, fps, timelineFrames = startFrame + Math.round(duration * fps), featureFrames, firstIndex = 0, onProgress = null, signal = null}) {
         const sampleRate = 48000;
         const sampleCount = Math.round(duration * sampleRate);
+        const sampleOffset = Math.round(startFrame / fps * sampleRate);
+        const totalSamples = Math.round(timelineFrames / fps * sampleRate);
+        const renderDuration = totalSamples / sampleRate;
+        if (firstIndex !== 0 || totalSamples < sampleOffset + sampleCount) {
+            throw new Error('Soundtrack synthesis requires the complete timeline from frame zero');
+        }
         const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
         if (!OfflineContext) throw new Error('This browser cannot render an offline soundtrack');
         signal?.throwIfAborted();
-        const context = new OfflineContext(2, sampleCount, sampleRate);
+        // Always render the same complete timeline, including oscillator phases,
+        // drones, note tails and effects history, then crop exact PCM. Keeping
+        // the graph and render length identical also avoids Web Audio floating
+        // point differences caused by rendering different-length prefixes.
+        const context = new OfflineContext(2, totalSamples, sampleRate);
         const offline = new SpatialMusicEngine(null, () => {}, this.settings);
         offline.settings = normalizeSettings({...this.settings, enabled: true});
         offline.buildAudioGraph(context);
         const secondsPerStep = 60 / offline.settings.tempo / 4;
-        const absoluteStart = startFrame / fps;
         // featureFrames[i] is analysis firstIndex + i on the shared loop-time timeline.
         const featuresAt = seconds => featureFrames[Math.min(featureFrames.length - 1,
             Math.max(0, analysisIndex(seconds) - firstIndex))];
-        offline.features = featuresAt(absoluteStart) || this.features;
-        const firstStep = Math.floor(absoluteStart / secondsPerStep);
-        const finalStep = Math.floor((absoluteStart + duration - 1 / sampleRate) / secondsPerStep);
-        offline.lastStep = firstStep;
+        offline.features = featuresAt(0) || this.features;
+        const finalStep = Math.floor((renderDuration - 1 / sampleRate) / secondsPerStep);
+        offline.lastStep = 0;
         offline.rebuildSustains();
 
         // Scheduling the whole score up front stalls long exports: every note
@@ -495,38 +513,32 @@ class SpatialMusicEngine {
         const windowSeconds = 10;
         const lookahead = 2;
         let nextFeature = 0;
-        let nextStep = firstStep;
-        let previous = null;
+        let nextStep = 0;
         const scheduleUntil = horizon => {
-            for (; nextFeature < featureFrames.length && (firstIndex + nextFeature) / 8 - absoluteStart < horizon; nextFeature++) {
-                const at = Math.min(duration, Math.max(0, (firstIndex + nextFeature) / 8 - absoluteStart));
+            for (; nextFeature < featureFrames.length && (firstIndex + nextFeature) / 8 < horizon; nextFeature++) {
+                const at = (firstIndex + nextFeature) / 8;
                 offline.modulateSustains(at, featureFrames[nextFeature]);
             }
             for (; nextStep <= finalStep; nextStep++) {
-                const eventTime = Math.max(0, nextStep * secondsPerStep - absoluteStart);
+                const eventTime = stepSeconds(nextStep, offline.settings.tempo);
                 if (eventTime >= horizon) break;
                 offline.features = featuresAt(stepSeconds(nextStep, offline.settings.tempo)) || offline.features;
                 const score = compositionAt({seed: offline.settings.seed, step: nextStep, settings: offline.settings, features: offline.features});
-                if (!previous || previous.bar !== score.bar) offline.playHarmonicField(score, eventTime);
+                if (nextStep > 0 && nextStep % 16 === 0) offline.playHarmonicField(score, eventTime);
                 if (score.pulse) offline.playUndertow(score, eventTime);
                 if (score.bell) offline.playBell(score, eventTime);
                 if (score.metal) offline.playMetal(score, eventTime);
                 if (score.texture) offline.playTexture(score, eventTime);
                 if (score.upper) offline.playShimmer(score, eventTime);
-                previous = score;
             }
         };
         scheduleUntil(windowSeconds + lookahead);
-        // A very short deterministic edge fade prevents PCM clicks for clips.
-        const master = offline.nodes.master.gain;
-        const fadeStart = Math.max(0, duration - .025);
-        master.setValueAtTime(dbGain(-15 + offline.settings.level * 11), fadeStart);
-        master.linearRampToValueAtTime(0, duration);
-
+        // No clip-specific fade: a direct clip must equal the same PCM slice
+        // of a longer export, including the final samples.
         let aborted = null;
-        for (let at = windowSeconds; at < duration; at += windowSeconds) {
+        for (let at = windowSeconds; at < renderDuration; at += windowSeconds) {
             context.suspend(at).then(async () => {
-                onProgress?.(at / duration);
+                onProgress?.(at / renderDuration);
                 // Let the page paint progress and handle a cancel click.
                 await new Promise(resolve => setTimeout(resolve, 0));
                 if (signal?.aborted) {
@@ -546,7 +558,11 @@ class SpatialMusicEngine {
             context.startRendering().then(resolve, reject);
         });
         onProgress?.(1);
-        return rendered;
+        return {
+            length: sampleCount,
+            sampleRate,
+            getChannelData: channel => rendered.getChannelData(channel).subarray(sampleOffset, sampleOffset + sampleCount)
+        };
     }
 
     applyPreset(name) {
@@ -729,6 +745,10 @@ export function installVisualMusic({mount, canvas, sampleFrame = null, initialSe
     drawMeter();
     const applySettings = value => {
         engine.settings = normalizeSettings({...engine.settings, ...value, layers: {...engine.settings.layers, ...value?.layers}});
+        engine.analysisMemo.clear();
+        engine.lastAnalysisIndex = null;
+        engine.lastStep = null;
+        engine.lastFrame = null;
         engine.save();
         refreshControls();
         engine.updateMix();
@@ -772,16 +792,14 @@ export function installVisualMusic({mount, canvas, sampleFrame = null, initialSe
                 status.classList.remove('error');
             }
         },
-        async prepareExport({startFrame, frames, fps, samplePixels, onProgress = null, signal = null}) {
+        async prepareExport({startFrame, frames, fps, timelineFrames = startFrame + frames, samplePixels, onProgress = null, signal = null}) {
             if (!engine.settings.enabled) return null;
             const duration = frames / fps;
             if (duration > 900) throw new Error('Generative soundtrack exports are currently limited to 15 minutes');
-            // The live analysis timeline (loop time, not clip time): from the analysis
-            // covering the first step through the clip's end, plus k-1 for motion.
-            const absoluteStart = startFrame / fps;
-            const firstStep = Math.floor(absoluteStart / stepSeconds(1, engine.settings.tempo));
-            const firstIndex = Math.min(analysisIndex(absoluteStart), analysisIndex(stepSeconds(firstStep, engine.settings.tempo)));
-            const lastIndex = analysisIndex((startFrame + frames) / fps);
+            // Analyze the same complete timeline for every export so synthesis and
+            // effects history are independent of the selected clip window.
+            const firstIndex = 0;
+            const lastIndex = analysisIndex(timelineFrames / fps);
             const read = async index => {
                 const pixels = await samplePixels(analysisFrame(index, fps));
                 return [pixels.data, pixels.width, pixels.height];
@@ -802,10 +820,11 @@ export function installVisualMusic({mount, canvas, sampleFrame = null, initialSe
             }
             const settings = structuredClone(engine.settings);
             const scoreDocument = JSON.stringify({schema: 'spatial-reflections-music-v1', settings, startFrame, frames, fps,
-                analysis: {rate: 8, firstIndex}, featureFrames});
+                analysis: {rate: 8, firstIndex, render: 'chrome-grain-aging-v1'},
+                synthesis: 'whole-timeline-v2', timelineFrames, featureFrames});
             const scoreHash = await sha256(scoreDocument);
             onProgress?.({phase: 'synthesize', progress: 0});
-            const rendered = await engine.renderOffline({duration, startFrame, fps, featureFrames, firstIndex, signal,
+            const rendered = await engine.renderOffline({duration, startFrame, fps, timelineFrames, featureFrames, firstIndex, signal,
                 onProgress: progress => onProgress?.({phase: 'synthesize', progress})});
             signal?.throwIfAborted();
             const wav = await audioBufferWav(rendered, progress => onProgress?.({phase: 'encode', progress}));
@@ -815,7 +834,8 @@ export function installVisualMusic({mount, canvas, sampleFrame = null, initialSe
                 metadata: {
                     schema: 'spatial-reflections-music-v1', enabled: true,
                     sampleRate: 48000, channels: 2, samples: rendered.length,
-                    settings, scoreHash
+                    settings, scoreHash,
+                    analysisRender: 'chrome-grain-aging-v1', synthesis: 'whole-timeline-v2'
                 }
             };
         },

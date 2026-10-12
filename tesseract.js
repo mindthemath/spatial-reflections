@@ -753,7 +753,7 @@ function applyViewSettings(metadata) {
         }
         
         // Pause animation when a view is restored
-        animationPaused = true;
+        pauseAnimation();
         persistViewerSettings();
         
         console.log("Successfully applied view settings");
@@ -1325,10 +1325,10 @@ function createControls() {
     timelineFrameInput = document.createElement('input');
     timelineFrameInput.id = 'timeline-frame-input';
     timelineFrameInput.type = 'number';
-    timelineFrameInput.min = '1';
-    timelineFrameInput.max = '1';
+    timelineFrameInput.min = '0';
+    timelineFrameInput.max = '0';
     timelineFrameInput.step = '1';
-    timelineFrameInput.value = '1';
+    timelineFrameInput.value = '0';
     timelineFrameInput.style.width = '0';
     timelineFrameInput.style.minWidth = '60px';
     timelineFrameInput.style.flex = '1';
@@ -1346,11 +1346,10 @@ function createControls() {
         pauseAnimation();
         const requestedFrame = Number(timelineFrameInput.value);
         if (Number.isInteger(requestedFrame)) {
-            const displayFrame = Math.min(loopTiming.frameCount, Math.max(1, requestedFrame));
-            setTimelineFrame(displayFrame - 1);
+            setTimelineFrame(Math.min(loopTiming.frameCount - 1, Math.max(0, requestedFrame)));
             persistViewerSettings();
         } else {
-            timelineFrameInput.value = String(timelineFrame + 1);
+            timelineFrameInput.value = String(timelineFrame);
         }
         timelineFrameInput.select();
     });
@@ -1776,11 +1775,11 @@ function updateLoopTimingUI() {
         syncRangeStepper(timelineSlider);
     }
     if (timelineFrameDisplay) {
-        timelineFrameDisplay.textContent = `Frame ${timelineFrame + 1} / ${loopTiming.frameCount}`;
+        timelineFrameDisplay.textContent = `Frame ${timelineFrame} / ${loopTiming.frameCount - 1}`;
     }
     if (timelineFrameInput) {
-        timelineFrameInput.max = String(loopTiming.frameCount);
-        timelineFrameInput.value = String(timelineFrame + 1);
+        timelineFrameInput.max = String(Math.max(0, loopTiming.frameCount - 1));
+        timelineFrameInput.value = String(timelineFrame);
         timelineFrameInput.disabled = loopTiming.frameCount <= 1;
     }
     if (!loopInfoDisplay) return;
@@ -2302,7 +2301,7 @@ function updateVideoExportSummary() {
             ${plan.width} × ${plan.height} · ${plan.fps || exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
             H.264 ${plan.format.toUpperCase()} · ${qualityText} · ${plan.music?.enabled ? 'generative AAC soundtrack' : 'no audio'} · current ${currentShader} shader<br>
             Duration ${formatDuration(plan.duration)} · ${estimateText} <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
-            <small>Saved under <code>videos/</code>. ${checkpointText} ${plan.quality === 'master' ? 'Master has no bitrate ceiling; actual size follows visual complexity.' : plan.quality === 'capped' ? 'Matches Master until grain or detail would exceed the ceiling; simpler footage comes in smaller.' : 'Visual complexity can change the final file size.'}${plan.music?.enabled ? ` Soundtrack preparation temporarily uses about ${formatBytes(plan.duration * 48000 * 4 + 44)}.` : ''}${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
+            <small>Saved under <code>videos/</code>. ${checkpointText} ${plan.quality === 'master' ? 'Master has no bitrate ceiling; actual size follows visual complexity.' : plan.quality === 'capped' ? 'Matches Master until grain or detail would exceed the ceiling; simpler footage comes in smaller.' : 'Visual complexity can change the final file size.'}${plan.music?.enabled ? ` Soundtrack preparation replays the full loop (${formatDuration(loopTiming.frameCount / (plan.fps || exportFps))}) and needs at least ${formatBytes(loopTiming.frameCount / (plan.fps || exportFps) * 48000 * 8 + plan.duration * 48000 * 4 + 44)} for PCM, plus the audio graph.` : ''}${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
         summary.classList.remove('error');
     }
     confirm.disabled = videoExportRunning || videoExportDialog.dataset.serverAvailable !== 'yes' || !plan || Boolean(plan.error) || spaceError;
@@ -2463,6 +2462,27 @@ function parseSoundFrame(search) {
 }
 const soundFrameAspect = parseSoundFrame(location.search);
 let liveSoundTarget = null;
+let soundAnalysisMaterial = null;
+
+// The score always hears chrome with grain and aging enabled, regardless of
+// display toggles. Never mutate the live materials or saved viewer settings.
+function withSoundAnalysisMaterial(render) {
+    soundAnalysisMaterial ??= createShaderMaterial('chrome');
+    const uniforms = soundAnalysisMaterial.uniforms;
+    uniforms.envMap.value = envMap;
+    uniforms.surfaceGrain.value = 1;
+    uniforms.dirtyMirrors.value = 1;
+    uniforms.faceSides.value = currentShape === 'rectified-5-cell' ? 3 : 4;
+    uniforms.lightDistance.value = lightDistance;
+    uniforms.lightingType.value = currentLighting === 'topdown' ? 1 : currentLighting === 'quad' ? 2 : 0;
+    const previous = scene.overrideMaterial;
+    try {
+        scene.overrideMaterial = soundAnalysisMaterial;
+        return render();
+    } finally {
+        scene.overrideMaterial = previous;
+    }
+}
 
 function sampleLiveSoundFrame(frame) {
     const aspect = soundFrameAspect ?? renderer.domElement.width / renderer.domElement.height;
@@ -2481,7 +2501,7 @@ function sampleLiveSoundFrame(frame) {
         camera.aspect = aspect;
         camera.updateProjectionMatrix();
         renderer.setRenderTarget(liveSoundTarget);
-        renderer.render(scene, camera);
+        withSoundAnalysisMaterial(() => renderer.render(scene, camera));
         const data = new Uint8Array(width * height * 4);
         renderer.readRenderTargetPixels(liveSoundTarget, 0, 0, width, height, data);
         return { data, width, height };
@@ -2512,11 +2532,12 @@ async function prepareMusicExport(plan, status) {
             startFrame: plan.startFrame,
             frames: plan.frames,
             fps: exportFps,
+            timelineFrames: loopTiming.frameCount,
             signal: videoExportAbort.signal,
             samplePixels: async frame => {
                 setTimelineFrame(frame);
                 updateTesseractProjection();
-                renderer.render(scene, camera);
+                withSoundAnalysisMaterial(() => renderer.render(scene, camera));
                 const data = new Uint8Array(analysisWidth * analysisHeight * 4);
                 renderer.readRenderTargetPixels(target, 0, 0, analysisWidth, analysisHeight, data);
                 return {data, width: analysisWidth, height: analysisHeight};
@@ -3072,7 +3093,7 @@ function onKeyDown(event) {
 }
 
 // Create vertex and fragment shaders based on the selected type
-function createShaderMaterial() {
+function createShaderMaterial(shaderType = currentShader) {
     // Common vertex shader for all types
     const vertexShader = `
         varying vec3 vNormal;
@@ -3101,7 +3122,7 @@ function createShaderMaterial() {
     let fragmentShader;
     
     // Select fragment shader based on current type
-    switch(currentShader) {
+    switch(shaderType) {
         case 'iridescent':
             fragmentShader = createIridescentShader();
             break;
@@ -3138,7 +3159,7 @@ function createShaderMaterial() {
     };
     
     // Add environment map for chrome shader
-    if (currentShader === 'chrome') {
+    if (shaderType === 'chrome') {
         uniforms.envMap = { value: envMap };
     }
     
