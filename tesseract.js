@@ -53,7 +53,7 @@ let showVertices = false;
 // Chrome's per-pixel grain re-randomizes as the projection moves, so every
 // frame carries fresh noise that dominates video bitrate.
 let surfaceGrain = true;
-// Smudges, scratches and dust fixed to each face: texture that moves with the
+// Aged edge grime and dust fixed to each face: texture that moves with the
 // glass, so it compresses far better than per-frame grain.
 let dirtyMirrors = false;
 let showOverlay = true;
@@ -969,7 +969,7 @@ function createControls() {
     const dirtyLabel = document.createElement('label');
     dirtyLabel.htmlFor = 'dirtyMirrorsToggle';
     dirtyLabel.textContent = 'Dirty mirrors';
-    dirtyLabel.title = 'Smudges, scratches and dust that stay on each face; compresses far better than grain';
+    dirtyLabel.title = 'Subtle aged-mirror haze, dust and accumulated edge grime that stay on each face; no scratches';
     dirtyLabel.style.marginLeft = '5px';
     dirtyToggle.appendChild(dirtyCheckbox);
     dirtyToggle.appendChild(dirtyLabel);
@@ -3133,7 +3133,8 @@ function createShaderMaterial() {
         lightingType: { value: lightingTypeInt },
         lightDistance: { value: lightDistance },
         surfaceGrain: { value: surfaceGrain ? 1 : 0 },
-        dirtyMirrors: { value: dirtyMirrors ? 1 : 0 }
+        dirtyMirrors: { value: dirtyMirrors ? 1 : 0 },
+        faceSides: { value: currentShape === 'rectified-5-cell' ? 3 : 4 }
     };
     
     // Add environment map for chrome shader
@@ -3315,6 +3316,7 @@ function createChromeShader() {
         uniform float lightDistance;
         uniform float surfaceGrain;
         uniform float dirtyMirrors;
+        uniform float faceSides;
         uniform samplerCube envMap;
         varying vec3 vSurface;
         varying vec3 vNormal;
@@ -3326,7 +3328,7 @@ function createChromeShader() {
 
         // Dirty mirrors, fixed to each face (vSurface.xy: face coordinates,
         // vSurface.z: per-face seed) so they move with the glass and stay put
-        // frame to frame. Antialiased with fwidth so fine lines do not shimmer.
+        // frame to frame. Fine dust is filtered out as faces become small.
         float valueNoise(vec2 p) {
             vec2 i = floor(p), f = fract(p);
             f = f * f * (3.0 - 2.0 * f);
@@ -3343,33 +3345,47 @@ function createChromeShader() {
             return value;
         }
         vec3 dirtyMirror(vec3 color, vec3 surface) {
-            vec2 uv = surface.xy * 6.0 + surface.z * 37.0;
-            // Smudges: soft haze that lifts and flattens the reflection.
-            float smudge = smoothstep(0.42, 0.78, fbm(uv * 0.55));
-            color = mix(color, color * 0.8 + 0.04, smudge * 0.6);
-            // Fine scratches: sparse thin segments in three directions per face.
-            float scratch = 0.0;
-            for (int k = 0; k < 3; k++) {
-                float angle = random(vec2(surface.z * 13.0, float(k) + 1.0)) * 3.14159;
-                vec2 along = vec2(cos(angle), sin(angle));
-                vec2 p = uv * 3.0;
-                float across = dot(p, vec2(-along.y, along.x)) * 2.5;
-                float lane = floor(across);
-                float width = max(fwidth(across), 1e-4);
-                float line = 1.0 - smoothstep(0.0, 1.5 * width, abs(fract(across) - 0.5) - 0.02);
-                float present = step(0.82, random(vec2(lane, float(k) + surface.z)));
-                float segment = smoothstep(0.55, 0.7, valueNoise(vec2(dot(p, along) * 0.8, lane + 19.0 * float(k))));
-                scratch = max(scratch, line * present * segment);
+            vec2 uv = surface.xy;
+            vec2 seed = vec2(surface.z * 37.0, surface.z * 53.0);
+
+            // Distance to the actual polygon boundary, not the UV bounding box:
+            // square faces are diamonds here, and the other shape has triangles.
+            vec2 p = uv - 0.5;
+            float edgeDistance = 1.0;
+            float apothem = 0.5 * cos(3.14159265 / faceSides);
+            for (int k = 0; k < 4; k++) {
+                if (float(k) < faceSides) {
+                    float angle = (float(k) + 0.5) * 6.2831853 / faceSides;
+                    edgeDistance = min(edgeDistance, apothem - dot(p, vec2(cos(angle), sin(angle))));
+                }
             }
-            color += scratch * 0.07;
-            // Dust: sparse soft specks.
-            vec2 cell = floor(uv * 5.0);
-            vec2 center = cell + 0.2 + 0.6 * vec2(random(cell + surface.z), random(cell.yx + 3.1 + surface.z));
-            float radius = 0.03 + 0.05 * random(cell + 7.7);
-            float distance_ = length(uv * 5.0 - center);
-            float speck = (1.0 - smoothstep(radius, radius + fwidth(distance_) * 1.5, distance_))
-                * step(0.86, random(cell + 11.3 + surface.z));
-            color = mix(color, color * 0.55 + 0.05, speck * 0.7);
+            edgeDistance = max(edgeDistance, 0.0);
+            float mottling = fbm(uv * 18.0 + seed);
+            float deposits = fbm(uv * 47.0 + seed + 9.3);
+            // Uneven soft buildup, rather than a uniform painted border.
+            float edgeWidth = mix(0.018, 0.085, mottling);
+            float edge = exp(-edgeDistance / edgeWidth);
+            float rim = exp(-edgeDistance / 0.012);
+            float grime = edge * (0.12 + 0.32 * mottling + 0.12 * deposits)
+                + rim * deposits * 0.12;
+            color = mix(color, color * vec3(0.65, 0.63, 0.59) + vec3(0.025, 0.023, 0.019), grime);
+
+            // Thin, low-contrast dusty film; the center remains mostly clear.
+            float haze = (0.018 + 0.045 * mottling + edge * 0.075) * (0.5 + deposits);
+            color = mix(color, color * 0.88 + vec3(0.055, 0.052, 0.046), haze);
+
+            // Tiny irregular dust flecks, denser near edges. Fade them out under
+            // minification instead of turning subpixel specks into bright dots.
+            vec2 dustUV = uv * 180.0 + seed;
+            vec2 cell = floor(dustUV);
+            vec2 center = cell + 0.25 + 0.5 * vec2(random(cell), random(cell + 3.1));
+            float radius = mix(0.045, 0.13, random(cell + 7.7));
+            float distance_ = length(dustUV - center);
+            float footprint = max(length(fwidth(dustUV)), 0.0001);
+            float speck = (1.0 - smoothstep(radius, radius + footprint, distance_))
+                * step(0.96 - edge * 0.19, random(cell + 11.3))
+                * (1.0 - smoothstep(0.35, 1.2, footprint));
+            color = mix(color, color * 0.72 + vec3(0.07, 0.065, 0.055), speck * 0.28);
             return color;
         }
         
