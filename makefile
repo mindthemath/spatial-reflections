@@ -1,5 +1,5 @@
 # Copyright 2026 Michael Pilosov. All rights reserved.
-.PHONY: serve static refresh-site build run run-isolated install sync update copyright test test-fast test-copyright test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser test-agent-api _test-all _test-browser unstick
+.PHONY: serve static refresh-site brightsign build run run-isolated install sync update copyright test test-fast test-copyright test-guard test-python test-browser test-video-capture test-video-encoder test-video-soak test-video-simple-browser test-agent-api _test-all _test-browser unstick
 
 TEST_GUARD = python3 scripts/test_guard.py
 
@@ -18,6 +18,10 @@ static:
 # Re-snapshot the current viewer runtime into every published work.
 refresh-site:
 	python3 studio/server.py --refresh-site
+
+# SD card root for one work: make brightsign SLUG=mill1
+brightsign:
+	python3 scripts/brightsign.py "$(SLUG)"
 
 build:
 	docker build -t spatial-reflections .

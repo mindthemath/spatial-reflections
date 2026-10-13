@@ -271,6 +271,11 @@ function init() {
     
     // Add UI controls, then connect the soundtrack and export library to the scene.
     createControls();
+    if (publication?.display?.hideOverlay === true) {
+        // Kiosk builds start as artwork only; O still brings the panel back.
+        showOverlay = false;
+        controlPanel.style.display = 'none';
+    }
     visualMusic = installVisualMusic({
         mount: document.getElementById('controlPanelContent'),
         canvas: renderer.domElement,
