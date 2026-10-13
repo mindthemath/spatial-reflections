@@ -2396,12 +2396,16 @@ async function videoControlApi(path, options = {}) {
 }
 
 function dataUrlToBlob(dataUrl) {
+    return new Blob([dataUrlToBytes(dataUrl)], { type: 'image/png' });
+}
+
+function dataUrlToBytes(dataUrl) {
     const comma = dataUrl.indexOf(',');
     if (comma < 0) throw new Error('Could not capture the WebGL frame');
     const binary = atob(dataUrl.slice(comma + 1));
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return new Blob([bytes], { type: 'image/png' });
+    return bytes;
 }
 
 async function canvasPNG(canvas) {
@@ -2420,14 +2424,23 @@ async function canvasPNG(canvas) {
                 throw new Error('Offscreen PNG capture is unavailable');
             }
             videoCaptureContext.drawImage(canvas, 0, 0);
-            const blob = await Promise.race([
-                videoCaptureSurface.convertToBlob({ type: 'image/png' }),
+            const bytes = await Promise.race([
+                videoCaptureSurface.convertToBlob({ type: 'image/png' }).then(async blob => {
+                    if (!blob?.size) throw new Error('Offscreen PNG capture returned an empty frame');
+                    // Chromium can spill an encoder Blob to inaccessible backing
+                    // storage after many captures. size remains nonzero, while
+                    // reading/uploading it fails. Materialize bytes here so that
+                    // failure is caught before upload and activates sticky fallback.
+                    return new Uint8Array(await blob.arrayBuffer());
+                }),
                 new Promise((_, reject) => {
                     timeout = setTimeout(() => reject(new Error('Offscreen PNG capture timed out')), 30000);
                 })
             ]);
-            if (blob?.size) return blob;
-            throw new Error('Offscreen PNG capture returned an empty frame');
+            if (bytes.length < 24 || [137, 80, 78, 71, 13, 10, 26, 10].some((value, index) => bytes[index] !== value)) {
+                throw new Error('Offscreen PNG capture returned invalid PNG bytes');
+            }
+            return bytes;
         } catch (error) {
             // Never accumulate timed-out full-frame encodes or repeat the 30s
             // wait on every frame. Retry offscreen capture only in the next job.
@@ -2439,7 +2452,7 @@ async function canvasPNG(canvas) {
             clearTimeout(timeout);
         }
     }
-    return dataUrlToBlob(canvas.toDataURL('image/png'));
+    return dataUrlToBytes(canvas.toDataURL('image/png'));
 }
 
 // The soundtrack hears a small offscreen render, never the visible canvas, so
