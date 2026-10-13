@@ -5,6 +5,22 @@
 
 export const MUSIC_SCHEMA = 'spatial-reflections-music-v1';
 
+// Hand the natural post-loop continuation back to the existing opening.
+// Only the opening overlap changes; duration and the ending stay untouched.
+export function blendLoopOpening(buffer, loopSamples, seconds = 2.5) {
+    const count = Math.min(Math.round(seconds * buffer.sampleRate), loopSamples,
+        buffer.length - loopSamples);
+    if (count < 2) return;
+    for (let channel = 0; channel < 2; channel++) {
+        const samples = buffer.getChannelData(channel);
+        for (let i = 0; i < count; i++) {
+            const angle = Math.PI / 2 * i / (count - 1);
+            samples[i] = samples[loopSamples + i] * Math.cos(angle)
+                + samples[i] * Math.sin(angle);
+        }
+    }
+}
+
 export function hash32(...values) {
     let hash = 0x811c9dc5;
     for (const value of values) {

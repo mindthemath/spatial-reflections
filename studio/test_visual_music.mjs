@@ -1,12 +1,24 @@
 /* Copyright 2026 Michael Pilosov. All rights reserved. */
 import assert from 'node:assert/strict';
-import {MUSIC_SCHEMA, PRESETS, analysisFrame, analysisIndex, analyzeRGBA, compositionAt, random01, stepSeconds} from '../visual-music-core.js';
+import {MUSIC_SCHEMA, PRESETS, analysisFrame, analysisIndex, analyzeRGBA, blendLoopOpening, compositionAt, random01, stepSeconds} from '../visual-music-core.js';
 
 assert.deepEqual(PRESETS.abyssdrive, {
     label: 'Abyss drive', level: 1, density: .33, tension: .88, influence: .87,
     space: .30, tempo: 88, seed: 1701,
     layers: {drone: 1, field: 0, bells: .99, pulse: .96, metal: .11, texture: .07}
 });
+
+const overlapChannels=[new Float32Array(60).fill(1),new Float32Array(60).fill(.5)];
+for (const data of overlapChannels) data.fill(.8,40);
+const overlapBuffer={length:60,sampleRate:10,getChannelData:c=>overlapChannels[c]};
+blendLoopOpening(overlapBuffer,40,2);
+for (let c=0;c<2;c++) {
+    const data=overlapChannels[c],head=c?.5:1;
+    assert(Math.abs(data[0]-.8)<1e-7,'opening inherits the actual continuation');
+    assert.equal(data[19],head,'handover ends on the original opening');
+    assert(data.subarray(20,40).every(v=>v===head),'rest of loop is unchanged');
+    assert(data.subarray(0,20).every(v=>v>=Math.min(head,.8)),'overlap never dips toward silence');
+}
 
 const width = 12, height = 8;
 const pixels = new Uint8ClampedArray(width * height * 4);

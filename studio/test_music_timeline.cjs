@@ -46,6 +46,18 @@ console.log('PASS: timeline UI and saved frames use the same zero-based index.')
     const a=full.getChannelData(c),b=clip.getChannelData(c);
     for(let i=0;i<b.length;i++) {const error=Math.abs(a[startSample+i]-b[i]);maxError=Math.max(maxError,error);if(error>0)mismatches++;}
    }
+   const overlap=await engine.renderOffline({duration:28,startFrame:0,fps:30,featureFrames:features,loopCrossfadeSeconds:2.5});
+   const startClip=await engine.renderOffline({duration:3,startFrame:0,fps:30,timelineFrames:840,featureFrames:features,loopCrossfadeSeconds:2.5});
+   let startClipError=0;
+   for(let c=0;c<2;c++) {
+    const a=full.getChannelData(c),b=startClip.getChannelData(c);
+    for(let i=0;i<b.length;i++) startClipError=Math.max(startClipError,Math.abs(a[i]-b[i]));
+   }
+   let unchangedError=0;
+   for(let c=0;c<2;c++) {
+    const a=full.getChannelData(c),b=overlap.getChannelData(c);
+    for(let i=120000;i<b.length;i++) unchangedError=Math.max(unchangedError,Math.abs(a[i]-b[i]));
+   }
    window.Engine.prototype.playUndertow=originalPulse;
    const drone=new window.Engine(null,()=>{},engine.settings);
    drone.settings.layers={drone:1,field:0,bells:0,pulse:0,metal:0,texture:0};
@@ -70,16 +82,19 @@ console.log('PASS: timeline UI and saved frames use the same zero-based index.')
    engine.playHarmonicField=score=>fields.push(score.step);
    for(const name of ['playUndertow','playBell','playMetal','playTexture','playShimmer']) engine[name]=()=>{};
    for(const step of [0,7,16,19,32]) engine.performStep(step,30);
-   return {maxError,mismatches,length:clip.length,afterUnmute,afterCrossing,afterSeek,fields,zeroAttacks,startupRMS};
+   return {maxError,mismatches,length:clip.length,afterUnmute,afterCrossing,afterSeek,fields,zeroAttacks,startupRMS,unchangedError,startClipError,overlapLength:overlap.length};
   });
   // Web Audio's multithreaded convolution can vary by a few float ULPs
   // between independent contexts. Require agreement far below one 16-bit LSB.
   assert(result.maxError < 1e-6,`cropped/direct PCM error ${result.maxError}`);
   assert.equal(result.length,432000);
+  assert.equal(result.overlapLength,28*48000,'overlap keeps the exact loop length');
+  assert(result.unchangedError<1/32768,`overlap must leave the rest unchanged below one PCM LSB: ${result.unchangedError}`);
+  assert(result.startClipError<1e-6,'clips at frame zero must not receive the full-loop overlap');
   assert.equal(result.zeroAttacks,0,'frame zero must not schedule a new pulse attack');
   assert(result.startupRMS<.01,`drone must not start at default full gain: ${result.startupRMS}`);
   assert.equal(result.afterUnmute,0);assert.equal(result.afterCrossing,1);assert.equal(result.afterSeek,1);
   assert.deepEqual(result.fields,[16,32],'harmonic fields only fire on actual bar boundaries, not startup');
-  console.log('PASS: cropped/direct PCM agrees below 1 LSB; quiet drone initialization and no frame-zero/startup/seek attack.');
+  console.log('PASS: quiet startup; full-loop overlap retains exact length and untouched remainder; clips have no overlap and agree below 1 PCM LSB.');
  } finally { await cleanup(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});

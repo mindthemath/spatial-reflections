@@ -1,5 +1,5 @@
 /* Copyright 2026 Michael Pilosov. All rights reserved. */
-import {PRESETS, analysisFrame, analysisIndex, analyzeRGBA, compositionAt, hash32, midiFrequency, random01, stepSeconds} from './visual-music-core.js';
+import {PRESETS, analysisFrame, analysisIndex, analyzeRGBA, blendLoopOpening, compositionAt, hash32, midiFrequency, random01, stepSeconds} from './visual-music-core.js';
 
 const STORAGE_KEY = 'spatial-reflections.music-prototype.v1';
 const DEFAULTS = {
@@ -481,12 +481,14 @@ class SpatialMusicEngine {
         });
     }
 
-    async renderOffline({duration, startFrame, fps, timelineFrames = startFrame + Math.round(duration * fps), featureFrames, firstIndex = 0, onProgress = null, signal = null}) {
+    async renderOffline({duration, startFrame, fps, timelineFrames = startFrame + Math.round(duration * fps), featureFrames, firstIndex = 0, loopCrossfadeSeconds = 0, onProgress = null, signal = null}) {
         const sampleRate = 48000;
         const sampleCount = Math.round(duration * sampleRate);
         const sampleOffset = Math.round(startFrame / fps * sampleRate);
         const totalSamples = Math.round(timelineFrames / fps * sampleRate);
-        const renderDuration = totalSamples / sampleRate;
+        const overlapSamples = sampleOffset === 0 && sampleCount === totalSamples
+            ? Math.round(loopCrossfadeSeconds * sampleRate) : 0;
+        const renderDuration = (totalSamples + overlapSamples) / sampleRate;
         if (firstIndex !== 0 || totalSamples < sampleOffset + sampleCount) {
             throw new Error('Soundtrack synthesis requires the complete timeline from frame zero');
         }
@@ -497,7 +499,9 @@ class SpatialMusicEngine {
         // drones, note tails and effects history, then crop exact PCM. Keeping
         // the graph and render length identical also avoids Web Audio floating
         // point differences caused by rendering different-length prefixes.
-        const context = new OfflineContext(2, totalSamples, sampleRate);
+        // Full-loop exports alone add a short note-free post-roll, carrying
+        // existing sustains/effects into the opening instead of silencing it.
+        const context = new OfflineContext(2, totalSamples + overlapSamples, sampleRate);
         const offline = new SpatialMusicEngine(null, () => {}, this.settings);
         offline.settings = normalizeSettings({...this.settings, enabled: true});
         offline.buildAudioGraph(context);
@@ -506,7 +510,7 @@ class SpatialMusicEngine {
         const featuresAt = seconds => featureFrames[Math.min(featureFrames.length - 1,
             Math.max(0, analysisIndex(seconds) - firstIndex))];
         offline.features = featuresAt(0) || this.features;
-        const finalStep = Math.floor((renderDuration - 1 / sampleRate) / secondsPerStep);
+        const finalStep = Math.floor((totalSamples / sampleRate - 1 / sampleRate) / secondsPerStep);
         offline.lastStep = 0;
         offline.rebuildSustains();
 
@@ -563,6 +567,7 @@ class SpatialMusicEngine {
             signal?.addEventListener('abort', () => reject(signal.reason), {once: true});
             context.startRendering().then(resolve, reject);
         });
+        if (overlapSamples) blendLoopOpening(rendered, totalSamples, loopCrossfadeSeconds);
         onProgress?.(1);
         return {
             length: sampleCount,
@@ -830,7 +835,8 @@ export function installVisualMusic({mount, canvas, sampleFrame = null, initialSe
                 synthesis: 'whole-timeline-v3', timelineFrames, featureFrames});
             const scoreHash = await sha256(scoreDocument);
             onProgress?.({phase: 'synthesize', progress: 0});
-            const rendered = await engine.renderOffline({duration, startFrame, fps, timelineFrames, featureFrames, firstIndex, signal,
+            const loopCrossfadeSeconds = startFrame === 0 && frames === timelineFrames ? 2.5 : 0;
+            const rendered = await engine.renderOffline({duration, startFrame, fps, timelineFrames, featureFrames, firstIndex, signal, loopCrossfadeSeconds,
                 onProgress: progress => onProgress?.({phase: 'synthesize', progress})});
             signal?.throwIfAborted();
             const wav = await audioBufferWav(rendered, progress => onProgress?.({phase: 'encode', progress}));
@@ -841,7 +847,8 @@ export function installVisualMusic({mount, canvas, sampleFrame = null, initialSe
                     schema: 'spatial-reflections-music-v1', enabled: true,
                     sampleRate: 48000, channels: 2, samples: rendered.length,
                     settings, scoreHash,
-                    analysisRender: 'chrome-grain-aging-v1', synthesis: 'whole-timeline-v3'
+                    analysisRender: 'chrome-grain-aging-v1', synthesis: 'whole-timeline-v3',
+                    ...(loopCrossfadeSeconds ? {loopCrossfadeSeconds} : {})
                 }
             };
         },
