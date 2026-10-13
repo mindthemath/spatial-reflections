@@ -34,7 +34,7 @@ def validate_music_request(request):
             or music.get('channels') != AUDIO_CHANNELS
             or music.get('samples') != samples
             or music.get('analysisRender', 'chrome-grain-aging-v1') != 'chrome-grain-aging-v1'
-            or music.get('synthesis', 'whole-timeline-v2') != 'whole-timeline-v2'
+            or music.get('synthesis', 'whole-timeline-v2') not in ('whole-timeline-v2', 'whole-timeline-v3')
             or not isinstance(music.get('settings'), dict)
             or not isinstance(music.get('scoreHash'), str)
             or len(music['scoreHash']) != 64

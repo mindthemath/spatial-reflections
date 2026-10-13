@@ -34,6 +34,9 @@ console.log('PASS: timeline UI and saved frames use the same zero-based index.')
    const features = Array.from({length:225},(_,i)=>({...engine.features,
     luminance:.2+(i%11)/30,motion:(i%7)/20,edge:(i%5)/10,
     regions:Array.from({length:12},(_,k)=>((i+k)%13)/13)}));
+   let zeroAttacks=0;
+   const originalPulse=window.Engine.prototype.playUndertow;
+   window.Engine.prototype.playUndertow=function(score,at){if(score.step===0)zeroAttacks++;return originalPulse.call(this,score,at);};
    const full = await engine.renderOffline({duration:28,startFrame:0,fps:30,featureFrames:features});
    const startFrame=341, frames=270, startSample=startFrame*1600;
    const clip = await engine.renderOffline({duration:frames/30,startFrame,fps:30,
@@ -43,6 +46,13 @@ console.log('PASS: timeline UI and saved frames use the same zero-based index.')
     const a=full.getChannelData(c),b=clip.getChannelData(c);
     for(let i=0;i<b.length;i++) {const error=Math.abs(a[startSample+i]-b[i]);maxError=Math.max(maxError,error);if(error>0)mismatches++;}
    }
+   window.Engine.prototype.playUndertow=originalPulse;
+   const drone=new window.Engine(null,()=>{},engine.settings);
+   drone.settings.layers={drone:1,field:0,bells:0,pulse:0,metal:0,texture:0};
+   const quiet=await drone.renderOffline({duration:1,startFrame:0,fps:30,featureFrames:features.slice(0,9)});
+   let startupEnergy=0;
+   for(const value of quiet.getChannelData(0).subarray(0,2400))startupEnergy+=value*value;
+   const startupRMS=Math.sqrt(startupEnergy/2400);
    // Startup, paused unmute and seeks must not replay an event at the current step.
    const live = new window.Engine(null,()=>{},engine.settings);
    live.context={state:'running',currentTime:0};live.analyzeAt=()=>live.features;
@@ -60,14 +70,16 @@ console.log('PASS: timeline UI and saved frames use the same zero-based index.')
    engine.playHarmonicField=score=>fields.push(score.step);
    for(const name of ['playUndertow','playBell','playMetal','playTexture','playShimmer']) engine[name]=()=>{};
    for(const step of [0,7,16,19,32]) engine.performStep(step,30);
-   return {maxError,mismatches,length:clip.length,afterUnmute,afterCrossing,afterSeek,fields};
+   return {maxError,mismatches,length:clip.length,afterUnmute,afterCrossing,afterSeek,fields,zeroAttacks,startupRMS};
   });
   // Web Audio's multithreaded convolution can vary by a few float ULPs
   // between independent contexts. Require agreement far below one 16-bit LSB.
   assert(result.maxError < 1e-6,`cropped/direct PCM error ${result.maxError}`);
   assert.equal(result.length,432000);
+  assert.equal(result.zeroAttacks,0,'frame zero must not schedule a new pulse attack');
+  assert(result.startupRMS<.01,`drone must not start at default full gain: ${result.startupRMS}`);
   assert.equal(result.afterUnmute,0);assert.equal(result.afterCrossing,1);assert.equal(result.afterSeek,1);
   assert.deepEqual(result.fields,[16,32],'harmonic fields only fire on actual bar boundaries, not startup');
-  console.log('PASS: cropped/direct soundtrack agrees below 1 PCM LSB, no startup/seek attack, canonical bar events.');
+  console.log('PASS: cropped/direct PCM agrees below 1 LSB; quiet drone initialization and no frame-zero/startup/seek attack.');
  } finally { await cleanup(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});

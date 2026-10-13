@@ -47,6 +47,8 @@ class VideoAudioValidationTest(unittest.TestCase):
         request = music_request()
         request['music'].update(analysisRender='chrome-grain-aging-v1', synthesis='whole-timeline-v2')
         self.assertEqual(validate_music_request(request)['synthesis'], 'whole-timeline-v2')
+        request['music']['synthesis'] = 'whole-timeline-v3'
+        self.assertEqual(validate_music_request(request)['synthesis'], 'whole-timeline-v3')
         request['music']['synthesis'] = 'unknown'
         with self.assertRaisesRegex(ValueError, 'incompatible'):
             validate_music_request(request)

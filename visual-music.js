@@ -259,6 +259,7 @@ class SpatialMusicEngine {
     }
 
     performStep(step, fps) {
+        if (step === 0) return;
         const now = this.context.currentTime + .018;
         // Each step hears the analysis for its own musical time, exactly as in export.
         const features = this.analyzeAt(analysisIndex(stepSeconds(step, this.settings.tempo)), fps);
@@ -304,6 +305,9 @@ class SpatialMusicEngine {
             filter.type = index === 0 ? 'lowpass' : 'bandpass';
             filter.frequency.value = index === 0 ? 420 : 260 + index * 310;
             filter.Q.value = index === 0 ? .55 : 1.2 + index;
+            // Set the intrinsic value too: the first modulation at time zero
+            // cancels scheduled values, which otherwise exposes default gain 1.
+            gain.gain.value = .0001;
             gain.gain.setValueAtTime(.0001, now);
             gain.gain.exponentialRampToValueAtTime((.032 / (1 + index * .28)) * this.settings.layers.drone, now + 3.5 + index);
             gain.connect(filter);
@@ -513,7 +517,9 @@ class SpatialMusicEngine {
         const windowSeconds = 10;
         const lookahead = 2;
         let nextFeature = 0;
-        let nextStep = 0;
+        // Frame zero is a starting position, not a new musical attack. Keep
+        // every subsequent event and all synthesis settings unchanged.
+        let nextStep = 1;
         const scheduleUntil = horizon => {
             for (; nextFeature < featureFrames.length && (firstIndex + nextFeature) / 8 < horizon; nextFeature++) {
                 const at = (firstIndex + nextFeature) / 8;
@@ -821,7 +827,7 @@ export function installVisualMusic({mount, canvas, sampleFrame = null, initialSe
             const settings = structuredClone(engine.settings);
             const scoreDocument = JSON.stringify({schema: 'spatial-reflections-music-v1', settings, startFrame, frames, fps,
                 analysis: {rate: 8, firstIndex, render: 'chrome-grain-aging-v1'},
-                synthesis: 'whole-timeline-v2', timelineFrames, featureFrames});
+                synthesis: 'whole-timeline-v3', timelineFrames, featureFrames});
             const scoreHash = await sha256(scoreDocument);
             onProgress?.({phase: 'synthesize', progress: 0});
             const rendered = await engine.renderOffline({duration, startFrame, fps, timelineFrames, featureFrames, firstIndex, signal,
@@ -835,7 +841,7 @@ export function installVisualMusic({mount, canvas, sampleFrame = null, initialSe
                     schema: 'spatial-reflections-music-v1', enabled: true,
                     sampleRate: 48000, channels: 2, samples: rendered.length,
                     settings, scoreHash,
-                    analysisRender: 'chrome-grain-aging-v1', synthesis: 'whole-timeline-v2'
+                    analysisRender: 'chrome-grain-aging-v1', synthesis: 'whole-timeline-v3'
                 }
             };
         },
