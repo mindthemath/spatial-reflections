@@ -87,7 +87,7 @@ test-fast:
 	node studio/test_visual_music.mjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
 	python3 -m unittest discover -s studio -p 'test_video_simple.py'
-	python3 -m unittest studio.test_video_audio studio.test_video_encoding
+	python3 -m unittest studio.test_video_audio studio.test_video_encoding studio.test_video_naming
 	cd studio && python3 -m unittest test_server.ServerStartupTest
 	$(MAKE) test-guard
 
