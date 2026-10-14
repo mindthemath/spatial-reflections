@@ -48,11 +48,28 @@ class SettingsHashTest(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.assertEqual(settings_hash(request(**changes)), baseline)
 
-    def test_output_settings_change_the_hash(self):
+    def test_delivery_settings_do_not_change_the_hash(self):
         baseline = settings_hash(request())
-        for changes in ({'startFrame': 10901}, {'frames': 901}, {'quality': 'master'}, {'format': 'mkv'},
-                        {'width': 1280}, {'encoding': {'crf': 13}},
-                        {'signature': {'surfaceGrain': True}},
+        for changes in ({'startFrame': 0}, {'frames': 25133}, {'quality': 'master'}, {'format': 'mkv'},
+                        {'width': 1280}, {'height': 720}, {'fps': 60}, {'bitRate': 100000},
+                        {'encoding': {'crf': 13}}, {'colorProfile': 'other'},
+                        {'signature': {'fps': 60}},
+                        {'music': {**request()['music'], 'samples': 40212800, 'loopCrossfadeSeconds': 2.5}},
+                        {'music': {**request()['music'], 'sampleRate': 96000, 'channels': 1}}):
+            with self.subTest(changes=changes):
+                self.assertEqual(settings_hash(request(**changes)), baseline)
+        full = request(startFrame=0, frames=25133, fps=60, width=1280, quality='master',
+                       signature={'fps': 60},
+                       music={**request()['music'], 'samples': 40212800, 'loopCrossfadeSeconds': 2.5})
+        self.assertEqual(settings_hash(full), baseline, 'clip and full variants share scene/music identity')
+
+    def test_scene_and_music_settings_change_the_hash(self):
+        baseline = settings_hash(request())
+        for changes in ({'signature': {'surfaceGrain': True}},
+                        {'signature': {'dirtyMirrors': True}},
+                        {'signature': {'rotationSpeed': .006}},
+                        {'music': {**request()['music'], 'synthesis': 'whole-timeline-v3'}},
+                        {'music': {**request()['music'], 'analysisRender': 'different'}},
                         {'signature': {'camera': {'position': [0.25, 0.01, 0.63], 'target': [0.02, 0.1, -0.04]}}},
                         {'signature': {'music': {'preset': 'abyssdrive', 'enabled': True, 'seed': 1702}}},
                         {'signature': {'environment': '{"kind":"export","faces":{"px":"cd"}}'}},

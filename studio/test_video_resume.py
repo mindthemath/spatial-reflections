@@ -454,10 +454,12 @@ class VideoJobStoreTest(unittest.TestCase):
         first = self.store.create(request(name='take one', checkpointSeconds=1))
         again = self.store.create(request(name='take two', checkpointSeconds=60))
         other = self.store.create(request(name='take one', startFrame=1))
+        changed_scene = self.store.create(request(name='take one', renderSignature='different-scene'))
         suffix = lambda job: self.store.output_filename(job['id']).rsplit('-', 1)[1]
         self.assertNotEqual(first['id'], again['id'])
         self.assertEqual(suffix(first), suffix(again))
-        self.assertNotEqual(suffix(first), suffix(other))
+        self.assertEqual(suffix(first), suffix(other))
+        self.assertNotEqual(suffix(first), suffix(changed_scene))
 
     def test_startup_reaps_orphaned_finalizer(self):
         job = self.ready_job('mp4')
