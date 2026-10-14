@@ -507,7 +507,15 @@ class VideoJobStore:
     def _remove_pending_output(self, job_id, job=None):
         if not self.videos.is_dir():
             return
-        for path in self.videos.glob(f'.*-{self._name_suffix(job_id, job)}.pending.*'):
+        # Related exports now share a scene hash. Never use that group identity
+        # to remove another job's pending deliverable.
+        if job and isinstance(job.get('request'), dict):
+            stem = Path(self._output_filename(job_id, job)).stem
+        elif job and isinstance(job.get('poster'), str) and Path(job['poster']).name == job['poster']:
+            stem = Path(job['poster']).stem
+        else:
+            stem = f'*-{job_id[:8]}'
+        for path in self.videos.glob(f'.{stem}.pending.*'):
             path.unlink(missing_ok=True)
 
     def _validate_job_directory(self, manifest, job_id):
@@ -1245,7 +1253,7 @@ class VideoJobStore:
                 if poster_path is not None:
                     poster_path.unlink(missing_ok=True)
                     poster_path.with_name(f'.{poster_path.name}.pending').unlink(missing_ok=True)
-                self._remove_pending_output(job_id, entry)
+                self._remove_pending_output(job_id, {'poster': poster_path.name} if poster_path else entry)
                 with self.lock:
                     index = self._read_index()
                     if index['jobs'].pop(job_id, None) is None:
