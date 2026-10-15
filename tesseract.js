@@ -3447,7 +3447,7 @@ function createPhysicalChromeMaterial(uniforms) {
         // Approximate chromium normal-incidence reflectance, in linear RGB.
         color: new THREE.Color().setRGB(0.55, 0.56, 0.58),
         metalness: 1,
-        roughness: 0.06,
+        roughness: 0.005,
         envMap: uniforms.envMap.value,
         envMapIntensity: 1,
         side: THREE.DoubleSide
@@ -3456,20 +3456,38 @@ function createPhysicalChromeMaterial(uniforms) {
     material.uniforms = uniforms;
     material.onBeforeCompile = shader => {
         for (const name of ['surfaceGrain', 'dirtyMirrors', 'faceSides']) shader.uniforms[name] = uniforms[name];
+        shader.uniforms.mirrorEnvironment = uniforms.envMap;
         shader.vertexShader = 'attribute vec3 surface; varying vec3 vSurface;\n' + shader.vertexShader;
         shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = surface;');
-        shader.fragmentShader = `uniform float surfaceGrain; uniform float dirtyMirrors; uniform float faceSides;
+        shader.fragmentShader = `uniform samplerCube mirrorEnvironment;
+            uniform float surfaceGrain; uniform float dirtyMirrors; uniform float faceSides;
             varying vec3 vSurface;
             ${shaderUtilities()}
             ${chromeSurfaceShader()}
         ` + shader.fragmentShader;
+        // Standard PBR clamps roughness to 0.0525 and uses a prefiltered map.
+        // For polished surfaces, retain source resolution instead. Dust still
+        // uses the filtered map; the BRDF/Fresnel and direct lights stay standard.
+        const environmentShader = THREE.ShaderChunk.envmap_physical_pars_fragment.replace(
+            'vec4 envMapColor = textureCubeUV( envMap, envMapRotation * reflectVec, roughness );',
+            `vec4 envMapColor;
+            if (roughness <= 0.06) {
+                vec3 direction = envMapRotation * reflectVec;
+                // Match Three.js's image-cubemap orientation during PMREM creation.
+                direction.x = -direction.x;
+                envMapColor = textureCube(mirrorEnvironment, direction);
+            } else {
+                envMapColor = textureCubeUV(envMap, envMapRotation * reflectVec, roughness);
+            }`
+        );
+        shader.fragmentShader = shader.fragmentShader.replace('#include <envmap_physical_pars_fragment>', environmentShader);
         shader.fragmentShader = shader.fragmentShader.replace('#include <roughnessmap_fragment>', `
             #include <roughnessmap_fragment>
             float coverage = 0.0;
             if (dirtyMirrors > 0.5) coverage = mirrorDirt(vSurface);
             // Uniform branches skip disabled effects across the entire draw.
             float grain = 0.0;
-            if (surfaceGrain > 0.5) grain = 0.04 * valueNoise(vSurface.xy * 120.0 + vSurface.z);
+            if (surfaceGrain > 0.5) grain = 0.005 * valueNoise(vSurface.xy * 120.0 + vSurface.z);
             // A spatial mixture of polished metal and rough, nonmetallic dust.
             roughnessFactor = mix(roughnessFactor + grain, 0.85, coverage);
             diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.16, 0.13, 0.09), coverage);
@@ -3477,7 +3495,7 @@ function createPhysicalChromeMaterial(uniforms) {
         shader.fragmentShader = shader.fragmentShader.replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor *= 1.0 - coverage;');
         shader.fragmentShader = shader.fragmentShader.replace('#include <dithering_fragment>', 'gl_FragColor.rgb = outputDither(gl_FragColor.rgb);');
     };
-    material.customProgramCacheKey = () => 'physical-chrome-v1';
+    material.customProgramCacheKey = () => 'physical-chrome-v2';
     return material;
 }
 

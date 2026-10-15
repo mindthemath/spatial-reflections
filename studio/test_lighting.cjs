@@ -182,10 +182,35 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             uniforms.winding.value = -1;
             uniforms.worldNormal.value.set(0, 0, -2);
             const back = measure();
+            // A high-frequency environment distinguishes source sampling from
+            // the standard material's minimum-roughness filtered reflection.
+            const pattern = document.createElement('canvas'); pattern.width = pattern.height = 512;
+            const paint = pattern.getContext('2d');
+            for (let x=0;x<512;x+=8) {
+                paint.fillStyle = (x/8)%2 ? '#ffffff' : '#000000';
+                paint.fillRect(x,0,8,512);
+            }
+            const detailedCube = new THREE.CubeTexture(Array(6).fill(pattern));
+            detailedCube.colorSpace = THREE.SRGBColorSpace; detailedCube.needsUpdate = true;
+            camera.position.set(0,0,2); camera.lookAt(0,0,0);
+            const sharpMetal = createMaterial(THREE,detailedCube);
+            sharpMetal.uniforms.surfaceGrain.value=0; sharpMetal.uniforms.dirtyMirrors.value=0;
+            const filteredMetal = new THREE.MeshStandardMaterial({color:sharpMetal.color, metalness:1, roughness:0.005, envMap:detailedCube, side:THREE.DoubleSide});
+            renderer.setSize(256,256);
+            const contrast = material => {
+                mesh.material=material; renderer.render(scene,camera);
+                const pixels=new Uint8Array(256*256*4),gl=renderer.getContext();
+                gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+                let sum=0;
+                for(let y=64;y<192;y++)for(let x=40;x<216;x++)sum+=(pixels[(y*256+x)*4]-pixels[(y*256+x-1)*4])**2;
+                return sum;
+            };
+            const sharpContrast=contrast(sharpMetal),filteredContrast=contrast(filteredMetal);
             renderer.dispose();
-            return { displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
+            return { sharpContrast, filteredContrast, displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
         }, { shaders, utilities: context.shaderUtilities(), helpers, textureHelper });
         assert.deepEqual(errors, [], 'all viewer shaders compile without WebGL errors');
+        assert(result.sharpContrast > result.filteredContrast * 1.2, `polished reflections retain detail: ${result.sharpContrast} > ${result.filteredContrast}`);
         assert.equal(result.displaySide,16,'tiny source images are safely resized for physical environment filtering');
         for (const channel of result.roundTrip.slice(0, 3)) assert(Math.abs(channel - 128) <= 1, 'sRGB texture → linear → sRGB preserves middle gray');
         assert(result.highlights[0] < result.highlights[1] && result.highlights[1] < result.highlights[2] && result.highlights[2] < 255, 'HDR highlights retain distinct levels instead of clipping to white');
