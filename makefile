@@ -83,10 +83,11 @@ test-fast:
 	node studio/test_video_resume_ui.cjs
 	node studio/test_video_export_form.cjs
 	node studio/test_drag_drop.cjs
+	node studio/test_sound_frame.cjs
 	node studio/test_visual_music.mjs
 	python3 -m unittest discover -s studio -p 'test_video_resume.py'
 	python3 -m unittest discover -s studio -p 'test_video_simple.py'
-	python3 -m unittest studio.test_video_audio studio.test_video_encoding
+	python3 -m unittest studio.test_video_audio studio.test_video_encoding studio.test_video_naming
 	cd studio && python3 -m unittest test_server.ServerStartupTest
 	$(MAKE) test-guard
 
@@ -95,6 +96,7 @@ test-guard:
 
 test-python:
 	$(TEST_GUARD) --network --timeout 180 -- python3 -m unittest discover -s studio -p 'test_*.py'
+	$(TEST_GUARD) --timeout 60 -- python3 -m unittest discover -s scripts -p 'test_audio_diff.py'
 
 # Opt-in production-resolution encoder test. Uses temporary storage, never overwrites source.
 VIDEO_SOAK_SECONDS ?= 6
@@ -106,6 +108,7 @@ test-video-encoder:
 
 test-video-capture:
 	$(TEST_GUARD) --timeout 60 -- node studio/test_video_capture.cjs
+	$(TEST_GUARD) --timeout 120 -- node studio/test_music_timeline.cjs
 
 test-video-simple-browser:
 	$(TEST_GUARD) --network --timeout 180 -- env TESSERACT_TEST_VIDEO_MODE=simple node studio/test_browser.cjs

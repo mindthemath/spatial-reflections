@@ -450,6 +450,34 @@ class VideoJobStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'recovery'):
             recreated.resume(job['id'])
 
+    def test_output_names_hash_settings_not_job_ids(self):
+        first = self.store.create(request(name='take one', checkpointSeconds=1))
+        again = self.store.create(request(name='take two', checkpointSeconds=60))
+        other = self.store.create(request(name='take one', startFrame=1))
+        changed_scene = self.store.create(request(name='take one', renderSignature='different-scene'))
+        suffix = lambda job: self.store.output_filename(job['id']).rsplit('-', 1)[1]
+        self.assertNotEqual(first['id'], again['id'])
+        self.assertEqual(suffix(first), suffix(again))
+        self.assertEqual(suffix(first), suffix(other))
+        self.assertNotEqual(suffix(first), suffix(changed_scene))
+
+    def test_pending_cleanup_preserves_related_exports_with_same_hash(self):
+        clip = self.store.create(request(name='clip', startFrame=1))
+        full = self.store.create(request(name='full', startFrame=0))
+        clip_job = json.loads(self.manifest(clip).read_text())
+        full_job = json.loads(self.manifest(full).read_text())
+        self.assertEqual(clip_job['settingsHash'], full_job['settingsHash'])
+        pending = []
+        for job in (clip, full):
+            filename = Path(self.store.output_filename(job['id']))
+            path = self.root / 'videos' / f'.{filename.stem}.pending{filename.suffix}'
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(b'owned pending output')
+            pending.append(path)
+        self.store._remove_pending_output(clip['id'], clip_job)
+        self.assertFalse(pending[0].exists())
+        self.assertTrue(pending[1].exists())
+
     def test_startup_reaps_orphaned_finalizer(self):
         job = self.ready_job('mp4')
         manifest_path = self.manifest(job)
@@ -458,7 +486,10 @@ class VideoJobStoreTest(unittest.TestCase):
         self.write_manifest(job, manifest)
         concat = manifest_path.parent / '.concat.txt'
         concat.write_text('stale')
-        pending_output = self.root / 'videos' / f".finished-mp4-20261003T000000Z-{job['id'][:8]}.pending.mp4"
+        # Output names end in the job's settings hash, not its random id.
+        self.assertRegex(manifest['settingsHash'], r'^[0-9a-f]{8}$')
+        filename = Path(self.store.output_filename(job['id']))
+        pending_output = self.root / 'videos' / f'.{filename.stem}.pending{filename.suffix}'
         pending_output.write_bytes(b'partial output')
         killed = []
         self.store.processes_for_path = lambda path: [4242] if path == concat else []

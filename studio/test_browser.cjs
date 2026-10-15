@@ -45,6 +45,8 @@ finally:
   browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),timeout:15000,args:['--renderer-process-limit=2','--use-gl=angle','--use-angle=swiftshader']});
   const context=await browser.newContext({viewport:{width:1700,height:1100}});
   const page=await context.newPage(),errors=[];let starting=true,failStartup;
+  // three.js only logs GLSL compile failures; the scene then silently renders nothing.
+  context.on('console',message=>{if(/Shader Error|WebGLProgram/.test(message.text()))errors.push(message.text().slice(0,500));});
   const startupFailure=new Promise((_,reject)=>{failStartup=reject;});
   page.on('pageerror',error=>{errors.push(error.message);if(starting)failStartup(new Error(`Studio startup page error: ${error.message}`));});
   page.on('response',response=>{if(starting&&response.status()>=400&&['script','stylesheet','image'].includes(response.request().resourceType()))failStartup(new Error(`Studio startup resource failed: ${response.status()} ${response.url()}`));});
@@ -119,9 +121,11 @@ finally:
   fs.writeFileSync(path.join(root,'autoplay.html'),publishedHTML.replace(JSON.stringify(publishedPiece),JSON.stringify({...publishedPiece,viewer:{...publishedPiece.viewer,music:{enabled:true},musicAutoplay:true}})));
   const autoplay=await page.context().newPage();autoplay.on('pageerror',e=>errors.push(e.message));
   await autoplay.addInitScript(()=>{Object.defineProperty(navigator,'audioSession',{value:{type:'auto'}});const real=AudioContext.prototype.resume,waiting=[];AudioContext.prototype.resume=function(){if(!navigator.userActivation.isActive||window.event?.type==='pointerdown')return new Promise(resolve=>waiting.push(resolve));return real.call(this).then(()=>waiting.splice(0).forEach(resolve=>resolve()));};});
-  await autoplay.goto(`http://localhost:${port}/autoplay.html`);await autoplay.waitForFunction(()=>/waiting for a click/.test(document.querySelector('.music-status')?.textContent));
+  await autoplay.goto(`http://localhost:${port}/autoplay.html?soundframe=1080p`);await autoplay.waitForFunction(()=>/waiting for a click/.test(document.querySelector('.music-status')?.textContent));
   assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Play soundtrack');
   await autoplay.mouse.click(400,300);await autoplay.waitForFunction(()=>document.querySelector('.music-start').disabled);
+  // Live analysis reads the offscreen sound frame (here forced to 16:9) and drives the score.
+  await autoplay.evaluate(()=>viewer.play());await autoplay.waitForFunction(()=>/frame drives \d+% motion/.test(document.querySelector('.music-status').textContent),null,{timeout:10000});
   assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Mute soundtrack');assert(await autoplay.locator('#sound-toggle').isVisible());
   await autoplay.locator('#sound-toggle').click();assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-pressed'),'false');assert(!(await autoplay.locator('.music-start').isDisabled()));
   await autoplay.locator('#sound-toggle').click();await autoplay.waitForFunction(()=>document.querySelector('#sound-toggle').getAttribute('aria-pressed')==='true');

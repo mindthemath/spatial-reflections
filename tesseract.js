@@ -53,6 +53,9 @@ let showVertices = false;
 // Chrome's per-pixel grain re-randomizes as the projection moves, so every
 // frame carries fresh noise that dominates video bitrate.
 let surfaceGrain = true;
+// Aged edge grime and dust fixed to each face: texture that moves with the
+// glass, so it compresses far better than per-frame grain.
+let dirtyMirrors = false;
 let showOverlay = true;
 let cameraInfoDisplay;
 let motionStepSlider;
@@ -99,6 +102,7 @@ function viewerSettings() {
         lightDistance,
         showVertices,
         surfaceGrain,
+        dirtyMirrors,
         animationPaused,
         exportFps,
         videoExportWidth,
@@ -125,6 +129,7 @@ function defaultViewerSettings() {
         lightDistance: 0.1,
         showVertices: false,
         surfaceGrain: true,
+        dirtyMirrors: false,
         animationPaused: true,
         exportFps: 60,
         videoExportWidth: 1920,
@@ -162,9 +167,10 @@ function applyViewerSettings(saved) {
         videoExportWidth = videoWidth;
         videoExportHeight = videoHeight;
     }
-    if (['draft', 'standard', 'high', 'master'].includes(saved.videoExportQuality)) videoExportQuality = saved.videoExportQuality;
+    if (['draft', 'standard', 'high', 'capped', 'master'].includes(saved.videoExportQuality)) videoExportQuality = saved.videoExportQuality;
     if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
     if (typeof saved.surfaceGrain === 'boolean') surfaceGrain = saved.surfaceGrain;
+    if (typeof saved.dirtyMirrors === 'boolean') dirtyMirrors = saved.dirtyMirrors;
     if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
     if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
     if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
@@ -237,6 +243,13 @@ let dropZoneVisible = false;
 let envMap;
 let skyboxLibrary;
 
+// Bound both ends of the view, including restored and programmatic camera changes.
+function clampCameraCoordinates() {
+    camera.position.clampScalar(-3, 3);
+    controls.target.clampScalar(-3, 3);
+    camera.lookAt(controls.target);
+}
+
 // Initialize the scene
 function init() {
     console.log("Initializing...");
@@ -245,7 +258,7 @@ function init() {
     scene = new THREE.Scene();
     
     // Create camera
-    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
     camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
     
     // Create renderer
@@ -257,7 +270,10 @@ function init() {
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
+    controls.minDistance = 0.01; // Hard stop for scroll/pinch zoom toward the target.
     controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
+    controls.addEventListener('change', clampCameraCoordinates);
+    clampCameraCoordinates();
     controls.addEventListener('end', persistViewerSettings);
     
     // Create the tesseract
@@ -274,6 +290,7 @@ function init() {
     visualMusic = installVisualMusic({
         mount: document.getElementById('controlPanelContent'),
         canvas: renderer.domElement,
+        sampleFrame: sampleLiveSoundFrame,
         initialSettings: restoredMusicSettings,
         onStateChange: persistViewerSettings,
         onPlaybackChange: updateSoundToggle
@@ -729,6 +746,14 @@ function applyViewSettings(metadata) {
                 if (material.uniforms.lightingType) {
                     material.uniforms.lightingType.value = lightingTypeInt;
                 }
+                // Without this, a restored "grain off" only unticks the checkbox while
+                // the existing faces keep rendering grain (and exports record it as off).
+                if (material.uniforms.surfaceGrain) {
+                    material.uniforms.surfaceGrain.value = surfaceGrain ? 1 : 0;
+                }
+                if (material.uniforms.dirtyMirrors) {
+                    material.uniforms.dirtyMirrors.value = dirtyMirrors ? 1 : 0;
+                }
             }
         });
         
@@ -738,7 +763,7 @@ function applyViewSettings(metadata) {
         }
         
         // Pause animation when a view is restored
-        animationPaused = true;
+        pauseAnimation();
         persistViewerSettings();
         
         console.log("Successfully applied view settings");
@@ -938,6 +963,27 @@ function createControls() {
     grainToggle.appendChild(grainCheckbox);
     grainToggle.appendChild(grainLabel);
     controlPanel.appendChild(grainToggle);
+
+    const dirtyToggle = document.createElement('div');
+    dirtyToggle.style.marginBottom = '10px';
+    const dirtyCheckbox = document.createElement('input');
+    dirtyCheckbox.type = 'checkbox';
+    dirtyCheckbox.id = 'dirtyMirrorsToggle';
+    dirtyCheckbox.checked = dirtyMirrors;
+    dirtyCheckbox.addEventListener('change', function() {
+        dirtyMirrors = this.checked;
+        faces.forEach(face => {
+            if (face.material?.uniforms?.dirtyMirrors) face.material.uniforms.dirtyMirrors.value = dirtyMirrors ? 1 : 0;
+        });
+    });
+    const dirtyLabel = document.createElement('label');
+    dirtyLabel.htmlFor = 'dirtyMirrorsToggle';
+    dirtyLabel.textContent = 'Dirty mirrors';
+    dirtyLabel.title = 'Subtle aged-mirror haze, dust and accumulated edge grime that stay on each face; no scratches';
+    dirtyLabel.style.marginLeft = '5px';
+    dirtyToggle.appendChild(dirtyCheckbox);
+    dirtyToggle.appendChild(dirtyLabel);
+    controlPanel.appendChild(dirtyToggle);
     
     const shapeLabel = document.createElement('label');
     shapeLabel.textContent = '4D shape: ';
@@ -1289,10 +1335,10 @@ function createControls() {
     timelineFrameInput = document.createElement('input');
     timelineFrameInput.id = 'timeline-frame-input';
     timelineFrameInput.type = 'number';
-    timelineFrameInput.min = '1';
-    timelineFrameInput.max = '1';
+    timelineFrameInput.min = '0';
+    timelineFrameInput.max = '0';
     timelineFrameInput.step = '1';
-    timelineFrameInput.value = '1';
+    timelineFrameInput.value = '0';
     timelineFrameInput.style.width = '0';
     timelineFrameInput.style.minWidth = '60px';
     timelineFrameInput.style.flex = '1';
@@ -1310,11 +1356,10 @@ function createControls() {
         pauseAnimation();
         const requestedFrame = Number(timelineFrameInput.value);
         if (Number.isInteger(requestedFrame)) {
-            const displayFrame = Math.min(loopTiming.frameCount, Math.max(1, requestedFrame));
-            setTimelineFrame(displayFrame - 1);
+            setTimelineFrame(Math.min(loopTiming.frameCount - 1, Math.max(0, requestedFrame)));
             persistViewerSettings();
         } else {
-            timelineFrameInput.value = String(timelineFrame + 1);
+            timelineFrameInput.value = String(timelineFrame);
         }
         timelineFrameInput.select();
     });
@@ -1613,6 +1658,8 @@ function syncViewerControlsFromState() {
     if (vertexToggle) vertexToggle.checked = showVertices;
     const grainToggle = document.getElementById('grainToggle');
     if (grainToggle) grainToggle.checked = surfaceGrain;
+    const dirtyToggle = document.getElementById('dirtyMirrorsToggle');
+    if (dirtyToggle) dirtyToggle.checked = dirtyMirrors;
     if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
     const resolution = document.getElementById('video-export-resolution');
     if (resolution) resolution.value = `${videoExportWidth}x${videoExportHeight}`;
@@ -1738,11 +1785,11 @@ function updateLoopTimingUI() {
         syncRangeStepper(timelineSlider);
     }
     if (timelineFrameDisplay) {
-        timelineFrameDisplay.textContent = `Frame ${timelineFrame + 1} / ${loopTiming.frameCount}`;
+        timelineFrameDisplay.textContent = `Frame ${timelineFrame} / ${loopTiming.frameCount - 1}`;
     }
     if (timelineFrameInput) {
-        timelineFrameInput.max = String(loopTiming.frameCount);
-        timelineFrameInput.value = String(timelineFrame + 1);
+        timelineFrameInput.max = String(Math.max(0, loopTiming.frameCount - 1));
+        timelineFrameInput.value = String(timelineFrame);
         timelineFrameInput.disabled = loopTiming.frameCount <= 1;
     }
     if (!loopInfoDisplay) return;
@@ -1769,7 +1816,7 @@ function updateLoopTimingUI() {
 
 // Master is content-dependent CRF encoding. Its conservative value is used
 // only for preflight size/disk planning, never as an encoder bitrate ceiling.
-const VIDEO_QUALITY_BITS_PER_PIXEL = { draft: 0.035, standard: 0.07, high: 0.12, master: 0.8 };
+const VIDEO_QUALITY_BITS_PER_PIXEL = { draft: 0.035, standard: 0.07, high: 0.12, capped: 0.8, master: 0.8 };
 
 function formatBytes(bytes) {
     if (!Number.isFinite(bytes)) return '—';
@@ -1818,6 +1865,8 @@ function videoRenderSignature() {
         showVertices,
         // Omitted when on so signatures from before the toggle stay valid.
         ...(surfaceGrain ? {} : {surfaceGrain}),
+        // Omitted when off so signatures from before dirty mirrors stay valid.
+        ...(dirtyMirrors ? {dirtyMirrors} : {}),
         camera: {
             position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
@@ -1855,6 +1904,7 @@ function createVideoExportDialog() {
                     <option value="draft">Draft</option>
                     <option value="standard">Standard</option>
                     <option value="high">High</option>
+                    <option value="capped">Capped master · streaming</option>
                     <option value="master">Master · dark detail</option>
                 </select></label>
                 <label>Range<select id="video-export-range">
@@ -2248,16 +2298,20 @@ function updateVideoExportSummary() {
             : `Durable progress is saved every ${plan.checkpointSeconds} seconds.`;
         const qualityText = plan.quality === 'master'
             ? 'Master · CRF 12 · slow · grain-tuned dark-detail AQ'
+            : plan.quality === 'capped'
+            ? `Capped master · CRF 12 · grain-tuned dark-detail AQ · ${formatBitRate(plan.bitRate)} ceiling`
             : `${plan.quality[0].toUpperCase() + plan.quality.slice(1)} quality · ${formatBitRate(plan.bitRate)} target`;
         const estimateText = plan.quality === 'master'
             ? 'conservative preflight allowance'
+            : plan.quality === 'capped'
+            ? `maximum ${plan.format.toUpperCase()} size`
             : `estimated ${plan.format.toUpperCase()} size`;
         summary.innerHTML = `
             <strong>${plan.resumed ? 'Resuming saved export · ' : ''}${rangeText}</strong><br>
             ${plan.width} × ${plan.height} · ${plan.fps || exportFps} FPS · ${plan.frames.toLocaleString()} frames<br>
             H.264 ${plan.format.toUpperCase()} · ${qualityText} · ${plan.music?.enabled ? 'generative AAC soundtrack' : 'no audio'} · current ${currentShader} shader<br>
             Duration ${formatDuration(plan.duration)} · ${estimateText} <strong>about ${formatBytes(plan.estimatedBytes)}</strong><br>
-            <small>Saved under <code>videos/</code>. ${checkpointText} ${plan.quality === 'master' ? 'Master has no bitrate ceiling; actual size follows visual complexity.' : 'Visual complexity can change the final file size.'}${plan.music?.enabled ? ` Soundtrack preparation temporarily uses about ${formatBytes(plan.duration * 48000 * 4 + 44)}.` : ''}${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
+            <small>Saved under <code>videos/</code>. ${checkpointText} ${plan.quality === 'master' ? 'Master has no bitrate ceiling; actual size follows visual complexity.' : plan.quality === 'capped' ? 'Matches Master until grain or detail would exceed the ceiling; simpler footage comes in smaller.' : 'Visual complexity can change the final file size.'}${plan.music?.enabled ? ` Soundtrack preparation replays the full loop (${formatDuration(loopTiming.frameCount / (plan.fps || exportFps))}) and needs at least ${formatBytes(loopTiming.frameCount / (plan.fps || exportFps) * 48000 * 8 + plan.duration * 48000 * 4 + 44)} for PCM, plus the audio graph.` : ''}${Number.isFinite(freeBytes) && freeBytes > 0 ? ` Server has ${formatBytes(freeBytes)} free.` : ''} Progress appears after Start.</small>`;
         summary.classList.remove('error');
     }
     confirm.disabled = videoExportRunning || videoExportDialog.dataset.serverAvailable !== 'yes' || !plan || Boolean(plan.error) || spaceError;
@@ -2352,12 +2406,16 @@ async function videoControlApi(path, options = {}) {
 }
 
 function dataUrlToBlob(dataUrl) {
+    return new Blob([dataUrlToBytes(dataUrl)], { type: 'image/png' });
+}
+
+function dataUrlToBytes(dataUrl) {
     const comma = dataUrl.indexOf(',');
     if (comma < 0) throw new Error('Could not capture the WebGL frame');
     const binary = atob(dataUrl.slice(comma + 1));
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return new Blob([bytes], { type: 'image/png' });
+    return bytes;
 }
 
 async function canvasPNG(canvas) {
@@ -2376,14 +2434,23 @@ async function canvasPNG(canvas) {
                 throw new Error('Offscreen PNG capture is unavailable');
             }
             videoCaptureContext.drawImage(canvas, 0, 0);
-            const blob = await Promise.race([
-                videoCaptureSurface.convertToBlob({ type: 'image/png' }),
+            const bytes = await Promise.race([
+                videoCaptureSurface.convertToBlob({ type: 'image/png' }).then(async blob => {
+                    if (!blob?.size) throw new Error('Offscreen PNG capture returned an empty frame');
+                    // Chromium can spill an encoder Blob to inaccessible backing
+                    // storage after many captures. size remains nonzero, while
+                    // reading/uploading it fails. Materialize bytes here so that
+                    // failure is caught before upload and activates sticky fallback.
+                    return new Uint8Array(await blob.arrayBuffer());
+                }),
                 new Promise((_, reject) => {
                     timeout = setTimeout(() => reject(new Error('Offscreen PNG capture timed out')), 30000);
                 })
             ]);
-            if (blob?.size) return blob;
-            throw new Error('Offscreen PNG capture returned an empty frame');
+            if (bytes.length < 24 || [137, 80, 78, 71, 13, 10, 26, 10].some((value, index) => bytes[index] !== value)) {
+                throw new Error('Offscreen PNG capture returned invalid PNG bytes');
+            }
+            return bytes;
         } catch (error) {
             // Never accumulate timed-out full-frame encodes or repeat the 30s
             // wait on every frame. Retry offscreen capture only in the next job.
@@ -2395,7 +2462,79 @@ async function canvasPNG(canvas) {
             clearTimeout(timeout);
         }
     }
-    return dataUrlToBlob(canvas.toDataURL('image/png'));
+    return dataUrlToBytes(canvas.toDataURL('image/png'));
+}
+
+// The soundtrack hears a small offscreen render, never the visible canvas, so
+// live playback and video exports analyze frames the same way. Only the frame's
+// shape matters (64 px wide, height from the aspect ratio), not its resolution.
+function soundAnalysisSize(aspect) {
+    const width = 64;
+    return { width, height: Math.max(24, Math.min(64, Math.round(width / aspect))) };
+}
+
+// Hidden ?soundframe= lets the live soundtrack hear the frame an export would,
+// e.g. 16:9 or 1080p, without changing what viewers see. Absent, it follows the window.
+const SOUND_FRAME_ALIASES = { square: 1, '720p': 16 / 9, '1080p': 16 / 9, '1440p': 16 / 9, '4k': 16 / 9 };
+function parseSoundFrame(search) {
+    const value = new URLSearchParams(search).get('soundframe')?.trim().toLowerCase();
+    if (!value) return null;
+    if (Object.hasOwn(SOUND_FRAME_ALIASES, value)) return SOUND_FRAME_ALIASES[value];
+    const ratio = value.match(/^(\d+(?:\.\d+)?)\s*[:x]\s*(\d+(?:\.\d+)?)$/);
+    return ratio && Number(ratio[1]) > 0 && Number(ratio[2]) > 0 ? Number(ratio[1]) / Number(ratio[2]) : null;
+}
+const soundFrameAspect = parseSoundFrame(location.search);
+let liveSoundTarget = null;
+let soundAnalysisMaterial = null;
+
+// The score always hears chrome with grain and aging enabled, regardless of
+// display toggles. Never mutate the live materials or saved viewer settings.
+function withSoundAnalysisMaterial(render) {
+    soundAnalysisMaterial ??= createShaderMaterial('chrome');
+    const uniforms = soundAnalysisMaterial.uniforms;
+    uniforms.envMap.value = envMap;
+    uniforms.surfaceGrain.value = 1;
+    uniforms.dirtyMirrors.value = 1;
+    uniforms.faceSides.value = currentShape === 'rectified-5-cell' ? 3 : 4;
+    uniforms.lightDistance.value = lightDistance;
+    uniforms.lightingType.value = currentLighting === 'topdown' ? 1 : currentLighting === 'quad' ? 2 : 0;
+    const previous = scene.overrideMaterial;
+    try {
+        scene.overrideMaterial = soundAnalysisMaterial;
+        return render();
+    } finally {
+        scene.overrideMaterial = previous;
+    }
+}
+
+function sampleLiveSoundFrame(frame) {
+    const aspect = soundFrameAspect ?? renderer.domElement.width / renderer.domElement.height;
+    const { width, height } = soundAnalysisSize(aspect);
+    if (liveSoundTarget?.width !== width || liveSoundTarget?.height !== height) {
+        liveSoundTarget?.dispose();
+        liveSoundTarget = new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false });
+    }
+    const previousTarget = renderer.getRenderTarget();
+    const previousAspect = camera.aspect;
+    const previousFrame = timelineFrame;
+    try {
+        // Render the exact analysis frame, not whichever frame is on screen.
+        setTimelineFrame(frame);
+        updateTesseractProjection();
+        camera.aspect = aspect;
+        camera.updateProjectionMatrix();
+        renderer.setRenderTarget(liveSoundTarget);
+        withSoundAnalysisMaterial(() => renderer.render(scene, camera));
+        const data = new Uint8Array(width * height * 4);
+        renderer.readRenderTargetPixels(liveSoundTarget, 0, 0, width, height, data);
+        return { data, width, height };
+    } finally {
+        renderer.setRenderTarget(previousTarget);
+        camera.aspect = previousAspect;
+        camera.updateProjectionMatrix();
+        setTimelineFrame(previousFrame);
+        updateTesseractProjection();
+    }
 }
 
 async function prepareMusicExport(plan, status) {
@@ -2403,8 +2542,7 @@ async function prepareMusicExport(plan, status) {
     const originalFrame = timelineFrame;
     const originalAspect = camera.aspect;
     const previousTarget = renderer.getRenderTarget();
-    const analysisWidth = 64;
-    const analysisHeight = Math.max(24, Math.min(64, Math.round(analysisWidth * plan.height / plan.width)));
+    const { width: analysisWidth, height: analysisHeight } = soundAnalysisSize(plan.width / plan.height);
     const target = new THREE.WebGLRenderTarget(analysisWidth, analysisHeight, {
         depthBuffer: true,
         stencilBuffer: false
@@ -2417,11 +2555,12 @@ async function prepareMusicExport(plan, status) {
             startFrame: plan.startFrame,
             frames: plan.frames,
             fps: exportFps,
+            timelineFrames: loopTiming.frameCount,
             signal: videoExportAbort.signal,
             samplePixels: async frame => {
                 setTimelineFrame(frame);
                 updateTesseractProjection();
-                renderer.render(scene, camera);
+                withSoundAnalysisMaterial(() => renderer.render(scene, camera));
                 const data = new Uint8Array(analysisWidth * analysisHeight * 4);
                 renderer.readRenderTargetPixels(target, 0, 0, analysisWidth, analysisHeight, data);
                 return {data, width: analysisWidth, height: analysisHeight};
@@ -2977,17 +3116,21 @@ function onKeyDown(event) {
 }
 
 // Create vertex and fragment shaders based on the selected type
-function createShaderMaterial() {
+function createShaderMaterial(shaderType = currentShader) {
     // Common vertex shader for all types
     const vertexShader = `
         varying vec3 vNormal;
         varying vec3 vPosition;
         varying vec3 vViewPosition;
         varying vec3 vWorldPosition;
+        // Face-local coordinates (xy) and per-face seed (z); vertex spheres lack it.
+        attribute vec3 surface;
+        varying vec3 vSurface;
         
         void main() {
             vNormal = normalize(normalMatrix * normal);
             vPosition = position;
+            vSurface = surface;
             
             vec4 worldPosition = modelMatrix * vec4(position, 1.0);
             vWorldPosition = worldPosition.xyz;
@@ -3002,7 +3145,7 @@ function createShaderMaterial() {
     let fragmentShader;
     
     // Select fragment shader based on current type
-    switch(currentShader) {
+    switch(shaderType) {
         case 'iridescent':
             fragmentShader = createIridescentShader();
             break;
@@ -3033,11 +3176,13 @@ function createShaderMaterial() {
     const uniforms = {
         lightingType: { value: lightingTypeInt },
         lightDistance: { value: lightDistance },
-        surfaceGrain: { value: surfaceGrain ? 1 : 0 }
+        surfaceGrain: { value: surfaceGrain ? 1 : 0 },
+        dirtyMirrors: { value: dirtyMirrors ? 1 : 0 },
+        faceSides: { value: currentShape === 'rectified-5-cell' ? 3 : 4 }
     };
     
     // Add environment map for chrome shader
-    if (currentShader === 'chrome') {
+    if (shaderType === 'chrome') {
         uniforms.envMap = { value: envMap };
     }
     
@@ -3056,6 +3201,18 @@ function shaderUtilities() {
         // Utility function for noise
         float random(vec2 st) {
             return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
+        }
+
+        // Triangular +/-1/255 dither, fixed in screen space so it adds no
+        // frame-to-frame noise. Breaks up the 8-bit steps that make dark
+        // gradients band, before video's limited-range conversion removes more.
+        float interleavedGradientNoise(vec2 p) {
+            return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+        }
+        vec3 outputDither(vec3 color) {
+            vec2 p = gl_FragCoord.xy;
+            float d = interleavedGradientNoise(p) + interleavedGradientNoise(p + vec2(37.0, 17.0)) - 1.0;
+            return color + d / 255.0;
         }
         
         // Utility to calculate fresnel effect
@@ -3151,7 +3308,7 @@ function createRoughShader() {
             lighting *= (1.0 - noise);
             
             // Black and white shader
-            gl_FragColor = vec4(lighting, 1.0);
+            gl_FragColor = vec4(outputDither(lighting), 1.0);
         }
     `;
 }
@@ -3191,7 +3348,7 @@ function createIridescentShader() {
             vec3 baseColor = mix(reflectionColor, iridescence, 0.7);
             vec3 final = baseColor * lighting;
             
-            gl_FragColor = vec4(final, 1.0);
+            gl_FragColor = vec4(outputDither(final), 1.0);
         }
     `;
 }
@@ -3202,13 +3359,79 @@ function createChromeShader() {
         uniform int lightingType;
         uniform float lightDistance;
         uniform float surfaceGrain;
+        uniform float dirtyMirrors;
+        uniform float faceSides;
         uniform samplerCube envMap;
+        varying vec3 vSurface;
         varying vec3 vNormal;
         varying vec3 vPosition;
         varying vec3 vViewPosition;
         varying vec3 vWorldPosition;
         
         ${shaderUtilities()}
+
+        // Dirty mirrors, fixed to each face (vSurface.xy: face coordinates,
+        // vSurface.z: per-face seed) so they move with the glass and stay put
+        // frame to frame. Fine dust is filtered out as faces become small.
+        float valueNoise(vec2 p) {
+            vec2 i = floor(p), f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(mix(random(i), random(i + vec2(1.0, 0.0)), f.x),
+                       mix(random(i + vec2(0.0, 1.0)), random(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
+        float fbm(vec2 p) {
+            float value = 0.0, amplitude = 0.5;
+            for (int octave = 0; octave < 4; octave++) {
+                value += amplitude * valueNoise(p);
+                p *= 2.03;
+                amplitude *= 0.5;
+            }
+            return value;
+        }
+        vec3 dirtyMirror(vec3 color, vec3 surface) {
+            vec2 uv = surface.xy;
+            vec2 seed = vec2(surface.z * 37.0, surface.z * 53.0);
+
+            // Distance to the actual polygon boundary, not the UV bounding box:
+            // square faces are diamonds here, and the other shape has triangles.
+            vec2 p = uv - 0.5;
+            float edgeDistance = 1.0;
+            float apothem = 0.5 * cos(3.14159265 / faceSides);
+            for (int k = 0; k < 4; k++) {
+                if (float(k) < faceSides) {
+                    float angle = (float(k) + 0.5) * 6.2831853 / faceSides;
+                    edgeDistance = min(edgeDistance, apothem - dot(p, vec2(cos(angle), sin(angle))));
+                }
+            }
+            edgeDistance = max(edgeDistance, 0.0);
+            float mottling = fbm(uv * 18.0 + seed);
+            float deposits = fbm(uv * 47.0 + seed + 9.3);
+            // Uneven soft buildup, rather than a uniform painted border.
+            float edgeWidth = mix(0.03, 0.13, mottling);
+            float edge = exp(-edgeDistance / edgeWidth);
+            float rim = exp(-edgeDistance / 0.018);
+            float grime = clamp(edge * (0.22 + 0.52 * mottling + 0.22 * deposits)
+                + rim * deposits * 0.22, 0.0, 0.9);
+            color = mix(color, color * vec3(0.52, 0.49, 0.44) + vec3(0.025, 0.023, 0.019), grime);
+
+            // Settled dusty film softens reflections without obscuring the center.
+            float haze = (0.05 + 0.10 * mottling + edge * 0.16) * (0.5 + deposits);
+            color = mix(color, color * 0.78 + vec3(0.085, 0.079, 0.067), haze);
+
+            // Tiny irregular dust flecks, denser near edges. Fade them out under
+            // minification instead of turning subpixel specks into bright dots.
+            vec2 dustUV = uv * 180.0 + seed;
+            vec2 cell = floor(dustUV);
+            vec2 center = cell + 0.25 + 0.5 * vec2(random(cell), random(cell + 3.1));
+            float radius = mix(0.015, 0.0425, random(cell + 7.7));
+            float distance_ = length(dustUV - center);
+            float footprint = max(length(fwidth(dustUV)), 0.0001);
+            float speck = (1.0 - smoothstep(radius, radius + footprint, distance_))
+                * step(0.97 - edge * 0.10, random(cell + 11.3))
+                * (1.0 - smoothstep(0.35, 1.2, footprint));
+            color = mix(color, color * 0.62 + vec3(0.085, 0.078, 0.063), speck * 0.42);
+            return color;
+        }
         
         void main() {
             // Normalized vectors
@@ -3250,8 +3473,9 @@ function createChromeShader() {
             
             // Apply lighting with less influence to preserve reflections
             vec3 final = chromeColor * (lighting * 0.7 + 0.3) - noisePattern;
+            if (dirtyMirrors > 0.5) final = dirtyMirror(final, vSurface);
             
-            gl_FragColor = vec4(final, 1.0);
+            gl_FragColor = vec4(outputDither(final), 1.0);
         }
     `;
 }
@@ -3341,6 +3565,19 @@ function setViewerShape(shape) {
     if (select) select.value = currentShape;
 }
 
+// Each corner sits on a unit regular polygon in the face's own coordinates, with a
+// per-face seed, fan-triangulated in the same order as facePositionArray.
+function faceSurfaceArray(indices, faceIndex) {
+    const seed = (faceIndex * 0.6180339887) % 1;
+    const corner = k => [0.5 + 0.5 * Math.cos(2 * Math.PI * k / indices.length),
+                         0.5 + 0.5 * Math.sin(2 * Math.PI * k / indices.length), seed];
+    const surface = [];
+    for (let i = 1; i + 1 < indices.length; i++) {
+        for (const k of [0, i, i + 1]) surface.push(...corner(k));
+    }
+    return new Float32Array(surface);
+}
+
 function facePositionArray(indices) {
     const positions = [];
     for (let i = 1; i + 1 < indices.length; i++) {
@@ -3389,10 +3626,12 @@ function createTesseract() {
     faces = [];
     for (const indices of topology.faces) {
         const geometry = new THREE.BufferGeometry();
+        const surface = faceSurfaceArray(indices, faces.length);
         geometry.setAttribute('position', new THREE.BufferAttribute(facePositionArray(indices), 3));
+        geometry.setAttribute('surface', new THREE.BufferAttribute(surface, 3));
         geometry.computeVertexNormals();
         const face = new THREE.Mesh(geometry, material);
-        face.userData = {vertices: indices};
+        face.userData = {vertices: indices, surface};
         tesseract.add(face);
         faces.push(face);
     }
@@ -3447,6 +3686,7 @@ function updateTesseractProjection() {
         const vertexArray = facePositionArray(faceVertices);
         
         geometry.setAttribute('position', new THREE.BufferAttribute(vertexArray, 3));
+        geometry.setAttribute('surface', new THREE.BufferAttribute(face.userData.surface, 3));
         geometry.computeVertexNormals();
         
         if (face.geometry) face.geometry.dispose();
@@ -3608,6 +3848,7 @@ function installViewerAPI() {
         rotationCoefficients: { axes: ['xw', 'yw', 'zw'], min: -1, max: 1, step: 0.05 },
         showVertices: { type: 'boolean' },
         surfaceGrain: { type: 'boolean', note: 'chrome shader only' },
+        dirtyMirrors: { type: 'boolean', note: 'chrome shader only' },
         exportFps: { values: [24, 25, 30, 50, 60] },
         animationPaused: { type: 'boolean' },
         timelineFrame: { type: 'integer', note: 'wraps around the loop length' },
@@ -3667,6 +3908,13 @@ function installViewerAPI() {
                 case 'surfaceGrain': {
                     require(typeof value === 'boolean', 'surfaceGrain must be true or false');
                     const checkbox = document.getElementById('grainToggle');
+                    checkbox.checked = value;
+                    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+                case 'dirtyMirrors': {
+                    require(typeof value === 'boolean', 'dirtyMirrors must be true or false');
+                    const checkbox = document.getElementById('dirtyMirrorsToggle');
                     checkbox.checked = value;
                     checkbox.dispatchEvent(new Event('change', { bubbles: true }));
                     break;

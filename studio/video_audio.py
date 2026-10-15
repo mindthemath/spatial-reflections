@@ -20,7 +20,8 @@ def validate_music_request(request):
     if music is None:
         return None
     if not isinstance(music, dict) or set(music) - {
-            'schema', 'enabled', 'sampleRate', 'channels', 'samples', 'settings', 'scoreHash'
+            'schema', 'enabled', 'sampleRate', 'channels', 'samples', 'settings', 'scoreHash',
+            'analysisRender', 'synthesis', 'loopCrossfadeSeconds'
     }:
         raise ValueError('Invalid music export settings')
     if not music.get('enabled'):
@@ -32,6 +33,13 @@ def validate_music_request(request):
             or music.get('sampleRate') != AUDIO_SAMPLE_RATE
             or music.get('channels') != AUDIO_CHANNELS
             or music.get('samples') != samples
+            or music.get('analysisRender', 'chrome-grain-aging-v1') != 'chrome-grain-aging-v1'
+            or music.get('synthesis', 'whole-timeline-v2') not in ('whole-timeline-v2', 'whole-timeline-v3')
+            or not isinstance(music.get('loopCrossfadeSeconds', 0), (int, float))
+            or not 0 <= music.get('loopCrossfadeSeconds', 0) <= 5
+            or (music.get('loopCrossfadeSeconds', 0) > 0
+                and (request.get('startFrame', 0) != 0
+                     or request.get('frames') != request.get('loopFrameCount')))
             or not isinstance(music.get('settings'), dict)
             or not isinstance(music.get('scoreHash'), str)
             or len(music['scoreHash']) != 64
