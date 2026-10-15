@@ -6,6 +6,7 @@ import { installVisualMusic } from './visual-music.js';
 
 // Main Three.js scene setup
 let scene, camera, renderer, controls;
+const physicalLights = [];
 let tesseract;
 let visualMusic;
 let restoredMusicSettings = null;
@@ -250,12 +251,37 @@ function clampCameraCoordinates() {
     camera.lookAt(controls.target);
 }
 
+function updatePhysicalLighting() {
+    const quad = currentLighting === 'quad';
+    const radius = lightDistance;
+    physicalLights.forEach((light, index) => {
+        light.intensity = quad ? Math.PI : index === 0 ? 4 * Math.PI : 0;
+        if (quad) {
+            light.position.set(index === 0 ? radius : index === 1 ? -radius : 0, 0,
+                index === 2 ? radius : index === 3 ? -radius : 0);
+        } else if (currentLighting === 'topdown') {
+            light.position.set(0, radius, 0);
+        } else {
+            light.position.setScalar(radius / Math.sqrt(3));
+        }
+        // scene.onBeforeRender runs after the renderer's matrix traversal.
+        light.updateMatrixWorld();
+    });
+}
+
 // Initialize the scene
 function init() {
     console.log("Initializing...");
     
     // Create scene
     scene = new THREE.Scene();
+    for (let i = 0; i < 4; i++) {
+        const light = new THREE.PointLight(0xffffff, 0, 0, 2);
+        physicalLights.push(light);
+        scene.add(light);
+    }
+    // Runs for live view, screenshots, soundtrack sampling, and video alike.
+    scene.onBeforeRender = updatePhysicalLighting;
     
     // Create camera
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
@@ -2496,6 +2522,7 @@ function withSoundAnalysisMaterial(render) {
     soundAnalysisMaterial ??= createShaderMaterial('chrome');
     const uniforms = soundAnalysisMaterial.uniforms;
     uniforms.envMap.value = envMap;
+    soundAnalysisMaterial.envMap = envMap;
     uniforms.surfaceGrain.value = 1;
     uniforms.dirtyMirrors.value = 1;
     uniforms.faceSides.value = currentShape === 'rectified-5-cell' ? 3 : 4;
@@ -3153,7 +3180,8 @@ function createShaderMaterial(shaderType = currentShader) {
             fragmentShader = createIridescentShader();
             break;
         case 'chrome':
-            fragmentShader = createChromeShader();
+            // Built-in PBR supplies the metal BRDF, filtered environment,
+            // energy accounting, world-space lights, and two-sided normals.
             break;
         case 'rough':
         default:
@@ -3187,6 +3215,7 @@ function createShaderMaterial(shaderType = currentShader) {
     // Add environment map for chrome shader
     if (shaderType === 'chrome') {
         uniforms.envMap = { value: envMap };
+        return createPhysicalChromeMaterial(uniforms);
     }
     
     return new THREE.ShaderMaterial({
@@ -3333,23 +3362,9 @@ function createIridescentShader() {
     `;
 }
 
-// Create reflective chrome shader
-function createChromeShader() {
+// Spatial masks only: dirt changes material parameters, never emitted light.
+function chromeSurfaceShader() {
     return `
-        uniform int lightingType;
-        uniform float lightDistance;
-        uniform float surfaceGrain;
-        uniform float dirtyMirrors;
-        uniform float faceSides;
-        uniform samplerCube envMap;
-        varying vec3 vSurface;
-        varying vec3 vNormal;
-        varying vec3 vPosition;
-        varying vec3 vViewPosition;
-        varying vec3 vWorldPosition;
-        
-        ${shaderUtilities()}
-
         // Dirty mirrors, fixed to each face (vSurface.xy: face coordinates,
         // vSurface.z: per-face seed) so they move with the glass and stay put
         // frame to frame. Fine dust is filtered out as faces become small.
@@ -3368,7 +3383,7 @@ function createChromeShader() {
             }
             return value;
         }
-        vec3 dirtyMirror(vec3 color, vec3 surface) {
+        float mirrorDirt(vec3 surface) {
             vec2 uv = surface.xy;
             vec2 seed = vec2(surface.z * 37.0, surface.z * 53.0);
 
@@ -3392,11 +3407,8 @@ function createChromeShader() {
             float rim = exp(-edgeDistance / 0.018);
             float grime = clamp(edge * (0.22 + 0.52 * mottling + 0.22 * deposits)
                 + rim * deposits * 0.22, 0.0, 0.9);
-            color = mix(color, color * vec3(0.52, 0.49, 0.44) + vec3(0.025, 0.023, 0.019), grime);
-
             // Settled dusty film softens reflections without obscuring the center.
             float haze = (0.05 + 0.10 * mottling + edge * 0.16) * (0.5 + deposits);
-            color = mix(color, color * 0.78 + vec3(0.085, 0.079, 0.067), haze);
 
             // Tiny irregular dust flecks, denser near edges. Fade them out under
             // minification instead of turning subpixel specks into bright dots.
@@ -3409,59 +3421,44 @@ function createChromeShader() {
             float speck = (1.0 - smoothstep(radius, radius + footprint, distance_))
                 * step(0.97 - edge * 0.10, random(cell + 11.3))
                 * (1.0 - smoothstep(0.35, 1.2, footprint));
-            color = mix(color, color * 0.62 + vec3(0.085, 0.078, 0.063), speck * 0.42);
-            return color;
-        }
-        
-        void main() {
-            // Orient both sides consistently for lighting and Fresnel.
-            // Reversing a normal leaves reflect(I, N) unchanged.
-            vec3 normal = visibleNormal(vNormal);
-            vec3 viewDir = normalize(vViewPosition);
-            
-            // World space reflection for environment mapping
-            // vNormal is in view space. Transform it back into world space
-            // before reflecting the world-space camera direction.
-            vec3 worldNormal = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
-            vec3 worldViewDir = normalize(cameraPosition - vWorldPosition);
-            vec3 worldReflection = reflect(-worldViewDir, worldNormal);
-            
-            // Environment map lookup
-            vec4 envColor = textureCube(envMap, worldReflection);
-            
-            // Get base lighting
-            vec3 lighting = calculateLighting(normal, vWorldPosition, lightDistance, lightingType);
-            
-            // Create chrome effect with high contrast and metallic feel
-            float fresnelFactor = fresnel(viewDir, normal, 5.0);
-            
-            // Add subtle noise for surface imperfection
-            float noisePattern = random(vPosition.xy * 20.0) * 0.05 * surfaceGrain;
-            
-            // Chrome color - mix environment map with base chrome color
-            vec3 chromeColor = mix(
-                vec3(0.9, 0.9, 0.9),      // Base silver-gray
-                envColor.rgb,              // Environment reflection
-                0.8                        // Higher reflection ratio
-            );
-            
-            // Enhance reflectivity at glancing angles (Fresnel effect)
-            chromeColor = mix(
-                chromeColor,
-                envColor.rgb,
-                fresnelFactor * 0.8
-            );
-            
-            // Apply lighting with less influence to preserve reflections
-            vec3 final = chromeColor * (lighting * 0.7 + 0.3) - noisePattern;
-            if (dirtyMirrors > 0.5) final = dirtyMirror(final, vSurface);
-            
-            gl_FragColor = vec4(final, 1.0);
-            #include <tonemapping_fragment>
-            #include <colorspace_fragment>
-            gl_FragColor.rgb = outputDither(gl_FragColor.rgb);
+            return clamp(grime + haze + speck * 0.42, 0.0, 1.0);
         }
     `;
+}
+
+function createPhysicalChromeMaterial(uniforms) {
+    const material = new THREE.MeshStandardMaterial({
+        // Approximate chromium normal-incidence reflectance, in linear RGB.
+        color: new THREE.Color().setRGB(0.55, 0.56, 0.58),
+        metalness: 1,
+        roughness: 0.06,
+        envMap: uniforms.envMap.value,
+        envMapIntensity: 1,
+        side: THREE.DoubleSide
+    });
+    // Preserve the existing UI and soundtrack's per-material controls.
+    material.uniforms = uniforms;
+    material.onBeforeCompile = shader => {
+        for (const name of ['surfaceGrain', 'dirtyMirrors', 'faceSides']) shader.uniforms[name] = uniforms[name];
+        shader.vertexShader = 'attribute vec3 surface; varying vec3 vSurface;\n' + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = surface;');
+        shader.fragmentShader = `uniform float surfaceGrain; uniform float dirtyMirrors; uniform float faceSides;
+            varying vec3 vSurface;
+            ${shaderUtilities()}
+            ${chromeSurfaceShader()}
+        ` + shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace('#include <roughnessmap_fragment>', `
+            #include <roughnessmap_fragment>
+            float coverage = dirtyMirrors * mirrorDirt(vSurface);
+            // A spatial mixture of polished metal and rough, nonmetallic dust.
+            roughnessFactor = mix(roughnessFactor + surfaceGrain * 0.04 * fbm(vSurface.xy * 120.0 + vSurface.z), 0.85, coverage);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.16, 0.13, 0.09), coverage);
+        `);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor *= 1.0 - coverage;');
+        shader.fragmentShader = shader.fragmentShader.replace('#include <dithering_fragment>', 'gl_FragColor.rgb = outputDither(gl_FragColor.rgb);');
+    };
+    material.customProgramCacheKey = () => 'physical-chrome-v1';
+    return material;
 }
 
 // Function to project 4D to 3D using simple projection
@@ -3821,8 +3818,14 @@ function updateMaterialsWithEnvMap() {
         materials.forEach(material => {
             if (material.uniforms && material.uniforms.envMap) {
                 material.uniforms.envMap.value = envMap;
+                material.envMap = envMap;
+                material.needsUpdate = true;
             }
         });
+    }
+    if (soundAnalysisMaterial) {
+        soundAnalysisMaterial.envMap = envMap;
+        soundAnalysisMaterial.needsUpdate = true;
     }
 }
 

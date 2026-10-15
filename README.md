@@ -43,9 +43,9 @@ Put original photographs in `raw/`. The server has no Python dependencies. Both 
 
 Lighting acts on the 3D projected surface, not in 4D. World-fixed white point lights use Lambert's cosine law and inverse-square falloff from each surface point. **Light Distance** is the radius from the origin for every preset; quad divides the same total intensity among four lights. Both sides of a face are lit independently. Very small radii can put the lights inside the shape.
 
-The diffuse reference has reflectance 0.9 and total source intensity 4π in scene-relative units, plus 0.02 uniform fill as an approximation to indirect light. There are no cast shadows or computed light bounces. Point-source singularities are regularized within 0.001 scene units. Values above display white currently clip; no photographic exposure/tone curve is applied by default.
+The diffuse reference has reflectance 0.9 and total source intensity 4π in scene-relative units, plus 0.02 uniform fill as an approximation to indirect light. There are no cast shadows or computed light bounces. Point-source singularities are regularized within 0.001 scene units. ACES filmic tone mapping compresses bright highlights before display encoding, at fixed exposure 1.
 
-Photographic cubemaps are decoded from sRGB; shader arithmetic is linear-light; display output is encoded to sRGB before dithering. Chrome and Iridescent retain their artistic material formulas. Chrome still reflects only the environment, not other faces; its lighting multiplier is not a physical metal model.
+Photographic cubemaps are decoded from sRGB; shader arithmetic is linear-light; display output is encoded to sRGB before dithering. Chrome uses Three.js's standard metal model (approximate chromium reflectance, GGX roughness and filtered environment lighting). Dirt changes material roughness and metal coverage; it emits no light. Reflected environment light is independent of local point-light intensity. Rough and Iridescent remain custom debug materials. Chrome still reflects only the environment, not other faces. Photographs are LDR appearance references, not calibrated HDR light measurements.
 
 GPU regression checks: `node studio/test_lighting.cjs` (requires installed Chromium).
 

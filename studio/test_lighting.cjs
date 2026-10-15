@@ -10,7 +10,7 @@ const source = fs.readFileSync(path.join(root, 'tesseract.js'), 'utf8');
 const helpers = source.slice(source.indexOf('function createShaderMaterial('), source.indexOf('// Function to project 4D to 3D'));
 const context = { THREE: { ShaderMaterial: class { constructor(options) { Object.assign(this, options); } }, DoubleSide: 2 }, currentLighting: 'diagonal', lightDistance: 3, surfaceGrain: false, dirtyMirrors: false, currentShape: 'tesseract', envMap: null };
 vm.runInNewContext(helpers, context);
-const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShaderMaterial(type));
+const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial(type));
 (async () => {
     const browser = await chromium.launch({ headless: true });
     try {
@@ -25,7 +25,7 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
             return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(root, name)) });
         });
         await page.goto('http://viewer.test/');
-        const result = await page.evaluate(async ({ shaders, utilities }) => {
+        const result = await page.evaluate(async ({ shaders, utilities, helpers }) => {
             const THREE = await import('/vendor/three.module.js');
             const renderer = new THREE.WebGLRenderer();
             renderer.setSize(32, 32);
@@ -36,9 +36,9 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
             const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial());
             scene.add(mesh);
             const canvas = document.createElement('canvas');
-            canvas.width = canvas.height = 4;
+            canvas.width = canvas.height = 32;
             const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 4, 4);
+            ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 32, 32);
             const cube = new THREE.CubeTexture(Array(6).fill(canvas));
             cube.colorSpace = THREE.SRGBColorSpace; cube.needsUpdate = true;
             const pixel = () => {
@@ -54,6 +54,28 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
             });
             renderer.render(scene, camera);
             const roundTrip = pixel();
+            // Exercise the actual material hook, not a serialized approximation.
+            mesh.geometry.setAttribute('surface', new THREE.BufferAttribute(new Float32Array(12).fill(0.5), 3));
+            const createMaterial = new Function('THREE', 'envMap', `
+                const currentLighting='diagonal', lightDistance=3, surfaceGrain=true, dirtyMirrors=true, currentShape='tesseract';
+                ${helpers}
+                return createShaderMaterial('chrome');
+            `);
+            const metal = createMaterial(THREE, cube);
+            mesh.material = metal;
+            renderer.render(scene, camera);
+            const metalPixel = pixel();
+            // Reflected environment must not be multiplied by local illumination.
+            const point = new THREE.PointLight(0xffffff, 0);
+            point.position.set(3, 3, 3); scene.add(point);
+            metal.uniforms.surfaceGrain.value = 0;
+            metal.uniforms.dirtyMirrors.value = 0;
+            renderer.render(scene, camera);
+            const unlitMetal = pixel();
+            point.intensity = 4 * Math.PI;
+            renderer.render(scene, camera);
+            const litMetal = pixel();
+            scene.remove(point);
             for (const shader of shaders) {
                 if (shader.uniforms.envMap) shader.uniforms.envMap.value = cube;
                 mesh.material = new THREE.ShaderMaterial(shader);
@@ -118,11 +140,14 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
             uniforms.worldNormal.value.set(0, 0, -2);
             const back = measure();
             renderer.dispose();
-            return { roundTrip, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
-        }, { shaders, utilities: context.shaderUtilities() });
+            return { roundTrip, metalPixel, unlitMetal, litMetal, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
+        }, { shaders, utilities: context.shaderUtilities(), helpers });
         assert.deepEqual(errors, [], 'all viewer shaders compile without WebGL errors');
         for (const channel of result.roundTrip.slice(0, 3)) assert(Math.abs(channel - 128) <= 1, 'sRGB texture → linear → sRGB preserves middle gray');
         assert(result.highlights[0] < result.highlights[1] && result.highlights[1] < result.highlights[2] && result.highlights[2] < 255, 'HDR highlights retain distinct levels instead of clipping to white');
+        assert(result.metalPixel[0] > 0 && result.metalPixel[0] < 255, 'physical aged metal renders');
+        assert(result.unlitMetal[0] > 0, 'metal reflects the environment without local lights');
+        assert(Math.abs(result.litMetal[0] - result.unlitMetal[0]) < 3, 'off-specular point light does not brighten the entire reflection');
         const close = (key, expected) => assert(Math.abs(result[key] - expected) <= 1.5 / 255, `${key}: ${result[key]} ≈ ${expected}`);
         close('near', 0.92); close('far', 0.245); // direct contribution falls by four
         close('oblique', 0.47); close('unlit', 0.02); // cosine law, no negative light
