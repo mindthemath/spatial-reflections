@@ -7,11 +7,33 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'tesseract.js'), 'utf8');
+const skyboxes = fs.readFileSync(path.join(root, 'viewer-skyboxes.js'), 'utf8');
+const textureHelper = skyboxes.slice(skyboxes.indexOf('function textureFromImages('), skyboxes.indexOf('function slugify('));
 const helpers = source.slice(source.indexOf('function createShaderMaterial('), source.indexOf('// Function to project 4D to 3D'));
 const context = { THREE: { ShaderMaterial: class { constructor(options) { Object.assign(this, options); } }, DoubleSide: 2 }, currentLighting: 'diagonal', lightDistance: 3, surfaceGrain: false, dirtyMirrors: false, currentShape: 'tesseract', envMap: null };
 vm.runInNewContext(helpers, context);
 const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial(type));
 (async () => {
+    const THREE = await import('three');
+    const lighting = vm.createContext({physicalLights: Array.from({length:4}, () => new THREE.PointLight()),
+        shadowState:'', renderer:{shadowMap:{needsUpdate:false}}, currentLighting:'diagonal', lightDistance:3,
+        time:0, currentShape:'tesseract', showVertices:false});
+    vm.runInContext(source.slice(source.indexOf('function updatePhysicalLighting('), source.indexOf('// Initialize the scene')), lighting);
+    lighting.updatePhysicalLighting();
+    assert(lighting.renderer.shadowMap.needsUpdate);
+    assert.equal(lighting.physicalLights.filter(light=>light.visible).length,1);
+    assert(Math.abs(lighting.physicalLights[0].position.length()-3)<1e-10);
+    assert.equal(lighting.physicalLights[0].matrixWorld.elements[12],lighting.physicalLights[0].position.x,'light matrices update in the same frame');
+    lighting.renderer.shadowMap.needsUpdate=false;
+    lighting.updatePhysicalLighting();
+    assert.equal(lighting.renderer.shadowMap.needsUpdate,false,'camera-only renders reuse shadows');
+    lighting.time=1;
+    lighting.updatePhysicalLighting();
+    assert(lighting.renderer.shadowMap.needsUpdate,'moving geometry invalidates shadows');
+    lighting.currentLighting='quad';
+    lighting.updatePhysicalLighting();
+    assert.equal(lighting.physicalLights.filter(light=>light.visible && light.castShadow).length,4);
+    assert.equal(lighting.physicalLights.reduce((sum,light)=>sum+light.intensity,0),4*Math.PI);
     const browser = await chromium.launch({ headless: true });
     try {
         const page = await browser.newPage();
@@ -25,7 +47,7 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(root, name)) });
         });
         await page.goto('http://viewer.test/');
-        const result = await page.evaluate(async ({ shaders, utilities, helpers }) => {
+        const result = await page.evaluate(async ({ shaders, utilities, helpers, textureHelper }) => {
             const THREE = await import('/vendor/three.module.js');
             const renderer = new THREE.WebGLRenderer();
             renderer.setSize(32, 32);
@@ -36,11 +58,12 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial());
             scene.add(mesh);
             const canvas = document.createElement('canvas');
-            canvas.width = canvas.height = 32;
+            canvas.width = canvas.height = 4;
             const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 32, 32);
-            const cube = new THREE.CubeTexture(Array(6).fill(canvas));
-            cube.colorSpace = THREE.SRGBColorSpace; cube.needsUpdate = true;
+            ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 4, 4);
+            const image = new Image(); image.src = canvas.toDataURL(); await image.decode();
+            const loadTexture = new Function('THREE', `${textureHelper}; return textureFromImages;`)(THREE);
+            const {texture:cube, displaySide} = loadTexture(Array(6).fill(image), renderer);
             const pixel = () => {
                 const data = new Uint8Array(4);
                 renderer.getContext().readPixels(16, 16, 1, 1, renderer.getContext().RGBA, renderer.getContext().UNSIGNED_BYTE, data);
@@ -75,6 +98,26 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             point.intensity = 4 * Math.PI;
             renderer.render(scene, camera);
             const litMetal = pixel();
+            // A blocker outside the center camera ray must still block the light.
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFShadowMap;
+            point.castShadow = true;
+            point.shadow.mapSize.set(256, 256);
+            point.shadow.camera.near = 0.01;
+            point.shadow.camera.far = 40;
+            point.shadow.bias = -0.00005;
+            point.position.set(2, 0, 2);
+            mesh.receiveShadow = true;
+            metal.metalness = 0; metal.roughness = 0.7; metal.envMapIntensity = 0;
+            metal.needsUpdate = true;
+            const blocker = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.2), new THREE.MeshBasicMaterial());
+            blocker.position.set(1, 0, 1); scene.add(blocker);
+            renderer.render(scene, camera);
+            const clearLight = pixel()[0];
+            blocker.castShadow = true;
+            renderer.render(scene, camera);
+            const blockedLight = pixel()[0];
+            scene.remove(blocker);
             scene.remove(point);
             for (const shader of shaders) {
                 if (shader.uniforms.envMap) shader.uniforms.envMap.value = cube;
@@ -140,11 +183,13 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             uniforms.worldNormal.value.set(0, 0, -2);
             const back = measure();
             renderer.dispose();
-            return { roundTrip, metalPixel, unlitMetal, litMetal, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
-        }, { shaders, utilities: context.shaderUtilities(), helpers });
+            return { displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
+        }, { shaders, utilities: context.shaderUtilities(), helpers, textureHelper });
         assert.deepEqual(errors, [], 'all viewer shaders compile without WebGL errors');
+        assert.equal(result.displaySide,16,'tiny source images are safely resized for physical environment filtering');
         for (const channel of result.roundTrip.slice(0, 3)) assert(Math.abs(channel - 128) <= 1, 'sRGB texture → linear → sRGB preserves middle gray');
         assert(result.highlights[0] < result.highlights[1] && result.highlights[1] < result.highlights[2] && result.highlights[2] < 255, 'HDR highlights retain distinct levels instead of clipping to white');
+        assert(result.clearLight > result.blockedLight + 20, `occlusion darkens illumination: ${result.clearLight} > ${result.blockedLight}`);
         assert(result.metalPixel[0] > 0 && result.metalPixel[0] < 255, 'physical aged metal renders');
         assert(result.unlitMetal[0] > 0, 'metal reflects the environment without local lights');
         assert(Math.abs(result.litMetal[0] - result.unlitMetal[0]) < 3, 'off-specular point light does not brighten the entire reflection');

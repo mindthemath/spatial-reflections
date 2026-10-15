@@ -125,7 +125,7 @@ finally:
   assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Play soundtrack');
   await autoplay.mouse.click(400,300);await autoplay.waitForFunction(()=>document.querySelector('.music-start').disabled);
   // Live analysis reads the offscreen sound frame (here forced to 16:9) and drives the score.
-  await autoplay.evaluate(()=>viewer.play());await autoplay.waitForFunction(()=>/frame drives \d+% motion/.test(document.querySelector('.music-status').textContent),null,{timeout:10000});
+  await autoplay.evaluate(()=>{viewer.setState({rotationCoefficients:{xw:0.5}});viewer.play();});await autoplay.waitForFunction(()=>/frame drives \d+% motion/.test(document.querySelector('.music-status').textContent),null,{timeout:10000}).catch(async error=>{throw new Error(`Live soundtrack stalled: ${await autoplay.locator('.music-status').textContent()}; page errors: ${errors.join('; ')}`,{cause:error});});
   assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Mute soundtrack');assert(await autoplay.locator('#sound-toggle').isVisible());
   await autoplay.locator('#sound-toggle').click();assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-pressed'),'false');assert(!(await autoplay.locator('.music-start').isDisabled()));
   await autoplay.locator('#sound-toggle').click();await autoplay.waitForFunction(()=>document.querySelector('#sound-toggle').getAttribute('aria-pressed')==='true');

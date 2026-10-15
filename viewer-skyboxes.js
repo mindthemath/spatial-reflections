@@ -37,7 +37,9 @@ function textureFromImages(images,renderer,expectedSize=null) {
     if(expectedSize!==null&&expectedSize!==side)throw new Error('Image dimensions do not match the export manifest');
     const gl=renderer.getContext(),gpuLimit=gl.getParameter(gl.MAX_CUBE_MAP_TEXTURE_SIZE);
     if(!gpuLimit)throw new Error('WebGL context is unavailable');
-    const displaySide=Math.min(side,gpuLimit);
+    // Three.js's filtered physical environment requires at least 16px per face.
+    // Only the GPU preview is resized; source files and hashes remain unchanged.
+    const displaySide=Math.min(Math.max(side,16),gpuLimit);
     const texture=new THREE.CubeTexture(images.map(image=>{
         if(side===displaySide)return image;
         const canvas=document.createElement('canvas');canvas.width=canvas.height=displaySide;

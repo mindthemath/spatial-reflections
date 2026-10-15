@@ -7,6 +7,7 @@ import { installVisualMusic } from './visual-music.js';
 // Main Three.js scene setup
 let scene, camera, renderer, controls;
 const physicalLights = [];
+let shadowState = '';
 let tesseract;
 let visualMusic;
 let restoredMusicSettings = null;
@@ -256,6 +257,7 @@ function updatePhysicalLighting() {
     const radius = lightDistance;
     physicalLights.forEach((light, index) => {
         light.intensity = quad ? Math.PI : index === 0 ? 4 * Math.PI : 0;
+        light.visible = light.castShadow = light.intensity > 0;
         if (quad) {
             light.position.set(index === 0 ? radius : index === 1 ? -radius : 0, 0,
                 index === 2 ? radius : index === 3 ? -radius : 0);
@@ -267,6 +269,12 @@ function updatePhysicalLighting() {
         // scene.onBeforeRender runs after the renderer's matrix traversal.
         light.updateMatrixWorld();
     });
+    // Camera movement alone does not invalidate world-space shadow maps.
+    const state = `${time}/${currentShape}/${currentLighting}/${lightDistance}/${showVertices}`;
+    if (state !== shadowState) {
+        renderer.shadowMap.needsUpdate = true;
+        shadowState = state;
+    }
 }
 
 // Initialize the scene
@@ -277,6 +285,11 @@ function init() {
     scene = new THREE.Scene();
     for (let i = 0; i < 4; i++) {
         const light = new THREE.PointLight(0xffffff, 0, 0, 2);
+        light.shadow.mapSize.set(256, 256);
+        light.shadow.camera.near = 0.01;
+        light.shadow.camera.far = 40;
+        light.shadow.bias = -0.00005;
+        light.shadow.normalBias = 0.001;
         physicalLights.push(light);
         scene.add(light);
     }
@@ -292,6 +305,9 @@ function init() {
     // Compress HDR highlights before sRGB encoding instead of clipping them flat.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.shadowMap.autoUpdate = false;
     renderer.setSize(window.innerWidth, window.innerHeight);
     document.body.appendChild(renderer.domElement);
     
@@ -3238,12 +3254,12 @@ function shaderUtilities() {
         // Triangular +/-1/255 dither, fixed in screen space so it adds no
         // frame-to-frame noise. Breaks up the 8-bit steps that make dark
         // gradients band, before video's limited-range conversion removes more.
-        float interleavedGradientNoise(vec2 p) {
+        float viewerDitherNoise(vec2 p) {
             return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
         }
         vec3 outputDither(vec3 color) {
             vec2 p = gl_FragCoord.xy;
-            float d = interleavedGradientNoise(p) + interleavedGradientNoise(p + vec2(37.0, 17.0)) - 1.0;
+            float d = viewerDitherNoise(p) + viewerDitherNoise(p + vec2(37.0, 17.0)) - 1.0;
             return color + d / 255.0;
         }
         
@@ -3449,9 +3465,13 @@ function createPhysicalChromeMaterial(uniforms) {
         ` + shader.fragmentShader;
         shader.fragmentShader = shader.fragmentShader.replace('#include <roughnessmap_fragment>', `
             #include <roughnessmap_fragment>
-            float coverage = dirtyMirrors * mirrorDirt(vSurface);
+            float coverage = 0.0;
+            if (dirtyMirrors > 0.5) coverage = mirrorDirt(vSurface);
+            // Uniform branches skip disabled effects across the entire draw.
+            float grain = 0.0;
+            if (surfaceGrain > 0.5) grain = 0.04 * valueNoise(vSurface.xy * 120.0 + vSurface.z);
             // A spatial mixture of polished metal and rough, nonmetallic dust.
-            roughnessFactor = mix(roughnessFactor + surfaceGrain * 0.04 * fbm(vSurface.xy * 120.0 + vSurface.z), 0.85, coverage);
+            roughnessFactor = mix(roughnessFactor + grain, 0.85, coverage);
             diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.16, 0.13, 0.09), coverage);
         `);
         shader.fragmentShader = shader.fragmentShader.replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor *= 1.0 - coverage;');
@@ -3590,6 +3610,7 @@ function createTesseract() {
         // Create a small sphere to visually represent the vertex
         const vertexGeometry = new THREE.SphereGeometry(0.03, 8, 8);
         const vertexMesh = new THREE.Mesh(vertexGeometry, material);
+        vertexMesh.castShadow = vertexMesh.receiveShadow = true;
         
         vertexMesh.position.set(vertex3D.x, vertex3D.y, vertex3D.z);
         vertexMesh.userData = { vertexIndex: i, vertex4D: {...vertices4D[i]} };
@@ -3612,10 +3633,23 @@ function createTesseract() {
         geometry.setAttribute('surface', new THREE.BufferAttribute(surface, 3));
         geometry.computeVertexNormals();
         const face = new THREE.Mesh(geometry, material);
+        face.receiveShadow = true;
         face.userData = {vertices: indices, surface};
         tesseract.add(face);
         faces.push(face);
     }
+    // One merged caster: six draws per point light, not six per face.
+    // It is never drawn in a color pass, including scene.overrideMaterial passes.
+    const shadowGeometry = new THREE.BufferGeometry();
+    const count = faces.reduce((sum, face) => sum + face.geometry.getAttribute('position').array.length, 0);
+    shadowGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count), 3));
+    const shadowMesh = new THREE.Mesh(shadowGeometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, colorWrite: false, depthWrite: false }));
+    shadowMesh.castShadow = true;
+    shadowMesh.onBeforeRender = () => shadowGeometry.setDrawRange(0, 0);
+    shadowMesh.onAfterRender = () => shadowGeometry.setDrawRange(0, Infinity);
+    tesseract.userData.shadowMesh = shadowMesh;
+    tesseract.add(shadowMesh);
+    updateTesseractProjection();
 }
 
 // Project the 4D tesseract to 3D dynamically
@@ -3678,6 +3712,18 @@ function updateTesseractProjection() {
         position.needsUpdate = true;
         geometry.computeVertexNormals();
         geometry.computeBoundingSphere();
+    }
+    const shadowMesh = tesseract?.userData.shadowMesh;
+    if (shadowMesh) {
+        const position = shadowMesh.geometry.getAttribute('position');
+        let offset = 0;
+        for (const face of faces) {
+            const array = face.geometry.getAttribute('position').array;
+            position.array.set(array, offset);
+            offset += array.length;
+        }
+        position.needsUpdate = true;
+        shadowMesh.geometry.computeBoundingSphere();
     }
 }
 

@@ -37,11 +37,14 @@ console.log('PASS: tesseract and all-triangular rectified 5-cell topology.');
    geometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array((indices.length-2)*9),3));
    return {geometry,userData:{vertices:indices}};
   });
-  const projection = vm.createContext({time:0,rotationCoefficients:{xw:0,yw:0,zw:0},vertices,faces,edges:[],
+  const shadowGeometry = new THREE.BufferGeometry();
+  shadowGeometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array(faces.reduce((n,face)=>n+face.geometry.getAttribute('position').array.length,0)),3));
+  const projection = vm.createContext({time:0,rotationCoefficients:{xw:0,yw:0,zw:0},vertices,faces,edges:[],tesseract:{userData:{shadowMesh:{geometry:shadowGeometry}}},
    rotate4D:point=>point, project4Dto3D:point=>({x:point.x/2,y:point.y/2,z:point.z/2})});
   vm.runInContext(source.slice(source.indexOf('function updateTesseractProjection('),source.indexOf('// 4D rotation functions')),projection);
   const buffers = faces.map(face=>face.geometry.getAttribute('position'));
   for (let frame=0;frame<100;frame++) vm.runInContext('updateTesseractProjection()',projection);
+  assert.deepEqual(Array.from(shadowGeometry.getAttribute('position').array),Array.from(faces).flatMap(face=>Array.from(face.geometry.getAttribute('position').array)),'merged shadow caster matches the visible faces');
   faces.forEach((face,i)=>{
    assert.equal(face.geometry.getAttribute('position'),buffers[i],'animation reuses position buffers');
    const expected=[];

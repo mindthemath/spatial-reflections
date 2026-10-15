@@ -43,7 +43,9 @@ Put original photographs in `raw/`. The server has no Python dependencies. Both 
 
 Lighting acts on the 3D projected surface, not in 4D. World-fixed white point lights use Lambert's cosine law and inverse-square falloff from each surface point. **Light Distance** is the radius from the origin for every preset; quad divides the same total intensity among four lights. Both sides of a face are lit independently. Very small radii can put the lights inside the shape.
 
-The diffuse reference has reflectance 0.9 and total source intensity 4π in scene-relative units, plus 0.02 uniform fill as an approximation to indirect light. There are no cast shadows or computed light bounces. Point-source singularities are regularized within 0.001 scene units. ACES filmic tone mapping compresses bright highlights before display encoding, at fixed exposure 1.
+The custom diffuse reference has reflectance 0.9 and total source intensity 4π in scene-relative units, plus 0.02 uniform fill as an approximation to indirect light. Chrome uses the same point-light intensity with its metal response, plus the photographic environment, without that artificial fill. Point-source singularities are regularized near zero distance. ACES filmic tone mapping compresses bright highlights before display encoding, at fixed exposure 1.
+
+Chrome receives filtered point-light shadows at 256px per cube face. A merged surface caster limits shadow draw calls; maps are reused when only the camera moves. Geometry buffers are reused during animation. Shadows block local lights, not the environment; there are no computed light bounces or face-to-face reflections. The debug materials do not receive shadow maps. These are real-time approximations, not a path-traced reference.
 
 Photographic cubemaps are decoded from sRGB; shader arithmetic is linear-light; display output is encoded to sRGB before dithering. Chrome uses Three.js's standard metal model (approximate chromium reflectance, GGX roughness and filtered environment lighting). Dirt changes material roughness and metal coverage; it emits no light. Reflected environment light is independent of local point-light intensity. Rough and Iridescent remain custom debug materials. Chrome still reflects only the environment, not other faces. Photographs are LDR appearance references, not calibrated HDR light measurements.
 
@@ -90,7 +92,7 @@ Publishing and video export are not in the API yet. Like the rest of the server,
 
 The viewer remembers the last successful skybox in this browser. An explicit `skybox` URL overrides the remembered selection. **Lineage JSON ↗** opens the active export's manifest.
 
-**Reflective Chrome** is the artistic viewing mode. Rough and Iridescent remain debug/orientation tools. When a debug shader is active, the menu offers **Switch to Chrome**; loading a skybox does not silently switch it.
+**Reflective Chrome** is the primary viewing mode. Rough and Iridescent remain debug/orientation tools. When a debug shader is active, the menu offers **Switch to Chrome**; loading a skybox does not silently switch it.
 
 Failed or incomplete loads retain the current environment and display an error. With no image environment yet, the viewer uses a simple diagnostic gradient cube—not an unrelated remote park scene. Only completed exports appear in the gallery.
 
