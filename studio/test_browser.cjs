@@ -125,7 +125,7 @@ finally:
   assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Play soundtrack');
   await autoplay.mouse.click(400,300);await autoplay.waitForFunction(()=>document.querySelector('.music-start').disabled);
   // Live analysis reads the offscreen sound frame (here forced to 16:9) and drives the score.
-  await autoplay.evaluate(()=>viewer.play());await autoplay.waitForFunction(()=>/frame drives \d+% motion/.test(document.querySelector('.music-status').textContent),null,{timeout:10000});
+  await autoplay.evaluate(()=>{viewer.setState({rotationCoefficients:{xw:0.5}});viewer.play();});await autoplay.waitForFunction(()=>/frame drives \d+% motion/.test(document.querySelector('.music-status').textContent),null,{timeout:10000}).catch(async error=>{throw new Error(`Live soundtrack stalled: ${await autoplay.locator('.music-status').textContent()}; page errors: ${errors.join('; ')}`,{cause:error});});
   assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-label'),'Mute soundtrack');assert(await autoplay.locator('#sound-toggle').isVisible());
   await autoplay.locator('#sound-toggle').click();assert.equal(await autoplay.locator('#sound-toggle').getAttribute('aria-pressed'),'false');assert(!(await autoplay.locator('.music-start').isDisabled()));
   await autoplay.locator('#sound-toggle').click();await autoplay.waitForFunction(()=>document.querySelector('#sound-toggle').getAttribute('aria-pressed')==='true');
@@ -133,9 +133,14 @@ finally:
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+  assert(!(await viewer.locator('#viewer-mirror-reflections').isChecked()),'experimental reflections start off');
+  await viewer.evaluate(()=>viewer.setState({mirrorReflections:true}));
+  assert(await viewer.locator('#viewer-mirror-reflections').isChecked());
   await viewer.locator('#viewer-shape').selectOption('rectified-5-cell');
   assert.equal(await viewer.evaluate(()=>JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1')).shape),'rectified-5-cell');
   await viewer.reload();await viewer.waitForSelector('#viewer-shape');assert.equal(await viewer.locator('#viewer-shape').inputValue(),'rectified-5-cell');
+  assert(await viewer.locator('#viewer-mirror-reflections').isChecked(),'reflection setting survives reload');
+  await viewer.evaluate(()=>viewer.setState({mirrorReflections:false}));
   await viewer.screenshot({path:path.join(os.tmpdir(),'rectified-5-cell.png')});
   await viewer.locator('#viewer-shape').selectOption('tesseract');
   const dragOverlay=await viewer.evaluate(()=>{

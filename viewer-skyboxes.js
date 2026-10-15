@@ -12,7 +12,7 @@ function diagnosticTexture() {
         const ctx=image.getContext('2d'),gradient=ctx.createLinearGradient(0,0,16,16);
         gradient.addColorStop(0,color);gradient.addColorStop(1,'#000');ctx.fillStyle=gradient;ctx.fillRect(0,0,16,16);return image;
     });
-    const texture=new THREE.CubeTexture(images);texture.needsUpdate=true;return texture;
+    const texture=new THREE.CubeTexture(images);texture.colorSpace=THREE.SRGBColorSpace;texture.needsUpdate=true;return texture;
 }
 async function loadImageAsset(url,{requireHash=true}={}) {
     // Published static works may run on plain HTTP (e.g. signage players).
@@ -37,13 +37,16 @@ function textureFromImages(images,renderer,expectedSize=null) {
     if(expectedSize!==null&&expectedSize!==side)throw new Error('Image dimensions do not match the export manifest');
     const gl=renderer.getContext(),gpuLimit=gl.getParameter(gl.MAX_CUBE_MAP_TEXTURE_SIZE);
     if(!gpuLimit)throw new Error('WebGL context is unavailable');
-    const displaySide=Math.min(side,gpuLimit);
+    // Three.js's filtered physical environment requires at least 16px per face.
+    // Only the GPU preview is resized; source files and hashes remain unchanged.
+    const displaySide=Math.min(Math.max(side,16),gpuLimit);
     const texture=new THREE.CubeTexture(images.map(image=>{
         if(side===displaySide)return image;
         const canvas=document.createElement('canvas');canvas.width=canvas.height=displaySide;
         const ctx=canvas.getContext('2d');if(!ctx)throw new Error('Could not allocate preview textures');ctx.drawImage(image,0,0,displaySide,displaySide);return canvas;
     }));
     if(!renderer.capabilities.isWebGL2&&!THREE.MathUtils.isPowerOfTwo(displaySide)){texture.generateMipmaps=false;texture.minFilter=THREE.LinearFilter;}
+    texture.colorSpace=THREE.SRGBColorSpace;
     texture.needsUpdate=true;
     return {texture,side,displaySide};
 }

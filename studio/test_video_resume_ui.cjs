@@ -39,7 +39,7 @@ function compatibility(value,current=signature()){context.job=value;context.curr
  // Restored video fields must be reflected in the visible selects.
  elements.set('video-export-resolution',{value:'1920x1080'});elements.set('video-export-quality',{value:'draft'});
  Object.assign(context,{motionStepSlider:null,motionStepLabel:null,rotationSpeed:.005,
-  currentShader:'chrome',currentLighting:'quad',lightDistance:5,showVertices:false,
+  currentShader:'chrome',currentLighting:'quad',lightDistance:5,showVertices:false,mirrorReflections:true,
   exportFpsSelect:null,videoExportWidth:1280,videoExportHeight:720,videoExportQuality:'high'});
  vm.runInContext(source.slice(source.indexOf('function syncViewerControlsFromState()'),source.indexOf('const COEFFICIENT_SCALE')),context);
  vm.runInContext('syncViewerControlsFromState()',context);

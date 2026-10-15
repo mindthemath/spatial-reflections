@@ -6,6 +6,8 @@ import { installVisualMusic } from './visual-music.js';
 
 // Main Three.js scene setup
 let scene, camera, renderer, controls;
+const physicalLights = [];
+let shadowState = '';
 let tesseract;
 let visualMusic;
 let restoredMusicSettings = null;
@@ -56,6 +58,8 @@ let surfaceGrain = true;
 // Aged edge grime and dust fixed to each face: texture that moves with the
 // glass, so it compresses far better than per-frame grain.
 let dirtyMirrors = false;
+let mirrorReflections = false;
+let mirrorTraceState = null;
 let showOverlay = true;
 let cameraInfoDisplay;
 let motionStepSlider;
@@ -103,6 +107,7 @@ function viewerSettings() {
         showVertices,
         surfaceGrain,
         dirtyMirrors,
+        mirrorReflections,
         animationPaused,
         exportFps,
         videoExportWidth,
@@ -130,6 +135,7 @@ function defaultViewerSettings() {
         showVertices: false,
         surfaceGrain: true,
         dirtyMirrors: false,
+        mirrorReflections: false,
         animationPaused: true,
         exportFps: 60,
         videoExportWidth: 1920,
@@ -171,6 +177,7 @@ function applyViewerSettings(saved) {
     if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
     if (typeof saved.surfaceGrain === 'boolean') surfaceGrain = saved.surfaceGrain;
     if (typeof saved.dirtyMirrors === 'boolean') dirtyMirrors = saved.dirtyMirrors;
+    if (typeof saved.mirrorReflections === 'boolean') mirrorReflections = saved.mirrorReflections;
     if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
     if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
     if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
@@ -250,12 +257,49 @@ function clampCameraCoordinates() {
     camera.lookAt(controls.target);
 }
 
+function updatePhysicalLighting() {
+    const quad = currentLighting === 'quad';
+    const radius = lightDistance;
+    physicalLights.forEach((light, index) => {
+        light.intensity = quad ? Math.PI : index === 0 ? 4 * Math.PI : 0;
+        light.visible = light.castShadow = light.intensity > 0;
+        if (quad) {
+            light.position.set(index === 0 ? radius : index === 1 ? -radius : 0, 0,
+                index === 2 ? radius : index === 3 ? -radius : 0);
+        } else if (currentLighting === 'topdown') {
+            light.position.set(0, radius, 0);
+        } else {
+            light.position.setScalar(radius / Math.sqrt(3));
+        }
+        // scene.onBeforeRender runs after the renderer's matrix traversal.
+        light.updateMatrixWorld();
+    });
+    // Camera movement alone does not invalidate world-space shadow maps.
+    const state = `${time}/${currentShape}/${currentLighting}/${lightDistance}/${showVertices}`;
+    if (state !== shadowState) {
+        renderer.shadowMap.needsUpdate = true;
+        shadowState = state;
+    }
+}
+
 // Initialize the scene
 function init() {
     console.log("Initializing...");
     
     // Create scene
     scene = new THREE.Scene();
+    for (let i = 0; i < 4; i++) {
+        const light = new THREE.PointLight(0xffffff, 0, 0, 2);
+        light.shadow.mapSize.set(256, 256);
+        light.shadow.camera.near = 0.01;
+        light.shadow.camera.far = 40;
+        light.shadow.bias = -0.00005;
+        light.shadow.normalBias = 0; // Receiver-plane correction handles either side without a normal offset.
+        physicalLights.push(light);
+        scene.add(light);
+    }
+    // Runs for live view, screenshots, soundtrack sampling, and video alike.
+    scene.onBeforeRender = updatePhysicalLighting;
     
     // Create camera
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
@@ -263,6 +307,12 @@ function init() {
     
     // Create renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
+    // Compress HDR highlights before sRGB encoding instead of clipping them flat.
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.shadowMap.autoUpdate = false;
     renderer.setSize(window.innerWidth, window.innerHeight);
     document.body.appendChild(renderer.domElement);
     
@@ -754,6 +804,9 @@ function applyViewSettings(metadata) {
                 if (material.uniforms.dirtyMirrors) {
                     material.uniforms.dirtyMirrors.value = dirtyMirrors ? 1 : 0;
                 }
+                if (material.uniforms.mirrorReflections) {
+                    material.uniforms.mirrorReflections.value = mirrorReflections ? 1 : 0;
+                }
             }
         });
         
@@ -984,6 +1037,23 @@ function createControls() {
     dirtyToggle.appendChild(dirtyCheckbox);
     dirtyToggle.appendChild(dirtyLabel);
     controlPanel.appendChild(dirtyToggle);
+
+    const reflectionToggle = document.createElement('label');
+    reflectionToggle.style.cssText = 'display:block;margin-bottom:10px';
+    const reflectionCheckbox = document.createElement('input');
+    reflectionCheckbox.type = 'checkbox';
+    reflectionCheckbox.id = 'viewer-mirror-reflections';
+    reflectionCheckbox.checked = mirrorReflections;
+    reflectionCheckbox.addEventListener('change', () => {
+        mirrorReflections = reflectionCheckbox.checked;
+        for (const object of [...faces, ...vertices]) {
+            if (object.material?.uniforms?.mirrorReflections) object.material.uniforms.mirrorReflections.value = mirrorReflections ? 1 : 0;
+        }
+        persistViewerSettings();
+    });
+    reflectionToggle.append(reflectionCheckbox, ' Face-to-face reflections · 1 bounce');
+    reflectionToggle.title = 'Experimental: trace one additional reflection against faces, then the skybox. Turn off to compare performance.';
+    controlPanel.appendChild(reflectionToggle);
     
     const shapeLabel = document.createElement('label');
     shapeLabel.textContent = '4D shape: ';
@@ -1660,6 +1730,8 @@ function syncViewerControlsFromState() {
     if (grainToggle) grainToggle.checked = surfaceGrain;
     const dirtyToggle = document.getElementById('dirtyMirrorsToggle');
     if (dirtyToggle) dirtyToggle.checked = dirtyMirrors;
+    const reflectionToggle = document.getElementById('viewer-mirror-reflections');
+    if (reflectionToggle) reflectionToggle.checked = mirrorReflections;
     if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
     const resolution = document.getElementById('video-export-resolution');
     if (resolution) resolution.value = `${videoExportWidth}x${videoExportHeight}`;
@@ -1867,6 +1939,7 @@ function videoRenderSignature() {
         ...(surfaceGrain ? {} : {surfaceGrain}),
         // Omitted when off so signatures from before dirty mirrors stay valid.
         ...(dirtyMirrors ? {dirtyMirrors} : {}),
+        ...(mirrorReflections ? {mirrorReflections: 1} : {}),
         camera: {
             position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
@@ -2493,8 +2566,10 @@ function withSoundAnalysisMaterial(render) {
     soundAnalysisMaterial ??= createShaderMaterial('chrome');
     const uniforms = soundAnalysisMaterial.uniforms;
     uniforms.envMap.value = envMap;
+    soundAnalysisMaterial.envMap = envMap;
     uniforms.surfaceGrain.value = 1;
     uniforms.dirtyMirrors.value = 1;
+    if (uniforms.mirrorReflections) uniforms.mirrorReflections.value = mirrorReflections ? 1 : 0;
     uniforms.faceSides.value = currentShape === 'rectified-5-cell' ? 3 : 4;
     uniforms.lightDistance.value = lightDistance;
     uniforms.lightingType.value = currentLighting === 'topdown' ? 1 : currentLighting === 'quad' ? 2 : 0;
@@ -3150,7 +3225,8 @@ function createShaderMaterial(shaderType = currentShader) {
             fragmentShader = createIridescentShader();
             break;
         case 'chrome':
-            fragmentShader = createChromeShader();
+            // Built-in PBR supplies the metal BRDF, filtered environment,
+            // energy accounting, world-space lights, and two-sided normals.
             break;
         case 'rough':
         default:
@@ -3178,12 +3254,14 @@ function createShaderMaterial(shaderType = currentShader) {
         lightDistance: { value: lightDistance },
         surfaceGrain: { value: surfaceGrain ? 1 : 0 },
         dirtyMirrors: { value: dirtyMirrors ? 1 : 0 },
+        mirrorReflections: { value: mirrorReflections ? 1 : 0 },
         faceSides: { value: currentShape === 'rectified-5-cell' ? 3 : 4 }
     };
     
     // Add environment map for chrome shader
     if (shaderType === 'chrome') {
         uniforms.envMap = { value: envMap };
+        return createPhysicalChromeMaterial(uniforms);
     }
     
     return new THREE.ShaderMaterial({
@@ -3206,12 +3284,12 @@ function shaderUtilities() {
         // Triangular +/-1/255 dither, fixed in screen space so it adds no
         // frame-to-frame noise. Breaks up the 8-bit steps that make dark
         // gradients band, before video's limited-range conversion removes more.
-        float interleavedGradientNoise(vec2 p) {
+        float viewerDitherNoise(vec2 p) {
             return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
         }
         vec3 outputDither(vec3 color) {
             vec2 p = gl_FragCoord.xy;
-            float d = interleavedGradientNoise(p) + interleavedGradientNoise(p + vec2(37.0, 17.0)) - 1.0;
+            float d = viewerDitherNoise(p) + viewerDitherNoise(p + vec2(37.0, 17.0)) - 1.0;
             return color + d / 255.0;
         }
         
@@ -3220,66 +3298,38 @@ function shaderUtilities() {
             return pow(1.0 - clamp(dot(viewDirection, normal), 0.0, 1.0), power);
         }
         
-        // Light contribution calculation
-        vec3 calculateLighting(vec3 normal, vec3 viewDir, float lightDist, int lightingType) {
-            vec3 lightDir;
-            float diffuse = 0.0;
-            float specular = 0.0;
-            float ambient = 0.1; // Base ambient light
-            
-            // Apply distance attenuation (inverse square law simplified)
-            float distanceAttenuation = 1.0 / (1.0 + 0.1 * lightDist * lightDist);
-            
-            // Diagonal light (original)
-            if (lightingType == 0) {
-                // For diagonal light, apply the distance to the light position
-                vec3 lightPos = vec3(lightDist, lightDist, lightDist);
-                lightDir = normalize(lightPos);
-                
-                diffuse = max(0.0, dot(normal, lightDir));
-                vec3 halfwayDir = normalize(lightDir + viewDir);
-                specular = pow(max(0.0, dot(normal, halfwayDir)), 32.0);
-                
-                return vec3(ambient + (diffuse * 0.99 + specular * 0.01) * distanceAttenuation);
+        // An opaque sheet has two independently lit sides. Orient the normal
+        // toward the visible side, not toward a particular light.
+        vec3 visibleNormal(vec3 interpolatedNormal) {
+            return normalize(interpolatedNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+        }
+
+        // Lambertian reflection: rho / pi * I / r^2 * cos(theta).
+        // Intensity is in scene-relative units; total I = 4*pi, rho = 0.9.
+        // The epsilon only regularizes the point-source singularity.
+        float pointIllumination(vec3 worldNormal, vec3 worldPosition, vec3 lightPosition, float share) {
+            vec3 delta = lightPosition - worldPosition;
+            float distanceSquared = max(dot(delta, delta), 0.000001);
+            vec3 lightDirection = delta * inversesqrt(distanceSquared);
+            float cosine = max(dot(worldNormal, lightDirection), 0.0);
+            return 0.9 * 4.0 * share * cosine / distanceSquared;
+        }
+
+        vec3 calculateLighting(vec3 normal, vec3 worldPosition, float lightDist, int lightingType) {
+            // normalMatrix supplies view-space normals; undo the camera rotation.
+            vec3 worldNormal = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
+            // Approximate uniform indirect illumination, not computed light bounce.
+            float illumination = 0.02;
+            if (lightingType == 2) {
+                illumination += pointIllumination(worldNormal, worldPosition, vec3(lightDist, 0.0, 0.0), 0.25);
+                illumination += pointIllumination(worldNormal, worldPosition, vec3(-lightDist, 0.0, 0.0), 0.25);
+                illumination += pointIllumination(worldNormal, worldPosition, vec3(0.0, 0.0, lightDist), 0.25);
+                illumination += pointIllumination(worldNormal, worldPosition, vec3(0.0, 0.0, -lightDist), 0.25);
+            } else {
+                vec3 direction = lightingType == 1 ? vec3(0.0, 1.0, 0.0) : normalize(vec3(1.0));
+                illumination += pointIllumination(worldNormal, worldPosition, direction * lightDist, 1.0);
             }
-            
-            // Top-down light
-            else if (lightingType == 1) {
-                // Position the light directly above at the specified distance
-                vec3 lightPos = vec3(0.0, lightDist, 0.0);
-                lightDir = normalize(lightPos);
-                
-                diffuse = max(0.0, dot(normal, lightDir));
-                vec3 halfwayDir = normalize(lightDir + viewDir);
-                specular = pow(max(0.0, dot(normal, halfwayDir)), 32.0);
-                
-                return vec3(ambient + (diffuse * 0.75 + specular * 0.35) * distanceAttenuation);
-            }
-            
-            // Quad lights from unit dimensions
-            else if (lightingType == 2) {
-                vec3 lightPositions[4];
-                lightPositions[0] = vec3(lightDist, 0.0, 0.0);
-                lightPositions[1] = vec3(0.0, 0.0, lightDist);
-                lightPositions[2] = vec3(-lightDist, 0.0, 0.0);
-                lightPositions[3] = vec3(0.0, 0.0, -lightDist);
-                
-                vec3 totalLight = vec3(ambient);
-                
-                for (int i = 0; i < 4; i++) {
-                    vec3 lightDir = normalize(lightPositions[i]);
-                    float diff = max(0.0, dot(normal, lightDir)) * 0.25; // Divide by number of lights
-                    vec3 halfwayDir = normalize(lightDir + viewDir);
-                    float spec = pow(max(0.0, dot(normal, halfwayDir)), 32.0) * 0.25;
-                    
-                    totalLight += vec3(diff * 0.75 + spec * 0.35) * distanceAttenuation;
-                }
-                
-                return totalLight;
-            }
-            
-            // Fallback
-            return vec3(1.0);
+            return vec3(illumination);
         }
     `;
 }
@@ -3292,23 +3342,25 @@ function createRoughShader() {
         varying vec3 vNormal;
         varying vec3 vPosition;
         varying vec3 vViewPosition;
+        varying vec3 vWorldPosition;
         
         ${shaderUtilities()}
         
         void main() {
-            // Normalized vectors
-            vec3 normal = normalize(vNormal);
-            vec3 viewDir = normalize(vViewPosition);
+            vec3 normal = visibleNormal(vNormal);
             
-            // Calculate lighting using common function
-            vec3 lighting = calculateLighting(normal, viewDir, lightDistance, lightingType);
+            // Lighting is evaluated at the actual world-space surface point.
+            vec3 lighting = calculateLighting(normal, vWorldPosition, lightDistance, lightingType);
             
             // Add rough texture
             float noise = random(vPosition.xy * 10.0) * 0.15;
             lighting *= (1.0 - noise);
             
             // Black and white shader
-            gl_FragColor = vec4(outputDither(lighting), 1.0);
+            gl_FragColor = vec4(lighting, 1.0);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+            gl_FragColor.rgb = outputDither(gl_FragColor.rgb);
         }
     `;
 }
@@ -3321,17 +3373,17 @@ function createIridescentShader() {
         varying vec3 vNormal;
         varying vec3 vPosition;
         varying vec3 vViewPosition;
+        varying vec3 vWorldPosition;
         
         ${shaderUtilities()}
         
         void main() {
-            // Normalized vectors
-            vec3 normal = normalize(vNormal);
+            vec3 normal = visibleNormal(vNormal);
             vec3 viewDir = normalize(vViewPosition);
             vec3 reflection = reflect(-viewDir, normal);
             
             // Calculate base lighting
-            vec3 lighting = calculateLighting(normal, viewDir, lightDistance, lightingType);
+            vec3 lighting = calculateLighting(normal, vWorldPosition, lightDistance, lightingType);
             
             // Create iridescent color effect
             vec3 reflectionColor = normalize(reflection) * 0.5 + 0.5;
@@ -3348,28 +3400,17 @@ function createIridescentShader() {
             vec3 baseColor = mix(reflectionColor, iridescence, 0.7);
             vec3 final = baseColor * lighting;
             
-            gl_FragColor = vec4(outputDither(final), 1.0);
+            gl_FragColor = vec4(final, 1.0);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+            gl_FragColor.rgb = outputDither(gl_FragColor.rgb);
         }
     `;
 }
 
-// Create reflective chrome shader
-function createChromeShader() {
+// Spatial masks only: dirt changes material parameters, never emitted light.
+function chromeSurfaceShader() {
     return `
-        uniform int lightingType;
-        uniform float lightDistance;
-        uniform float surfaceGrain;
-        uniform float dirtyMirrors;
-        uniform float faceSides;
-        uniform samplerCube envMap;
-        varying vec3 vSurface;
-        varying vec3 vNormal;
-        varying vec3 vPosition;
-        varying vec3 vViewPosition;
-        varying vec3 vWorldPosition;
-        
-        ${shaderUtilities()}
-
         // Dirty mirrors, fixed to each face (vSurface.xy: face coordinates,
         // vSurface.z: per-face seed) so they move with the glass and stay put
         // frame to frame. Fine dust is filtered out as faces become small.
@@ -3388,7 +3429,7 @@ function createChromeShader() {
             }
             return value;
         }
-        vec3 dirtyMirror(vec3 color, vec3 surface) {
+        float mirrorDirt(vec3 surface) {
             vec2 uv = surface.xy;
             vec2 seed = vec2(surface.z * 37.0, surface.z * 53.0);
 
@@ -3412,11 +3453,8 @@ function createChromeShader() {
             float rim = exp(-edgeDistance / 0.018);
             float grime = clamp(edge * (0.22 + 0.52 * mottling + 0.22 * deposits)
                 + rim * deposits * 0.22, 0.0, 0.9);
-            color = mix(color, color * vec3(0.52, 0.49, 0.44) + vec3(0.025, 0.023, 0.019), grime);
-
             // Settled dusty film softens reflections without obscuring the center.
             float haze = (0.05 + 0.10 * mottling + edge * 0.16) * (0.5 + deposits);
-            color = mix(color, color * 0.78 + vec3(0.085, 0.079, 0.067), haze);
 
             // Tiny irregular dust flecks, denser near edges. Fade them out under
             // minification instead of turning subpixel specks into bright dots.
@@ -3429,55 +3467,242 @@ function createChromeShader() {
             float speck = (1.0 - smoothstep(radius, radius + footprint, distance_))
                 * step(0.97 - edge * 0.10, random(cell + 11.3))
                 * (1.0 - smoothstep(0.35, 1.2, footprint));
-            color = mix(color, color * 0.62 + vec3(0.085, 0.078, 0.063), speck * 0.42);
-            return color;
-        }
-        
-        void main() {
-            // Normalized vectors
-            vec3 normal = normalize(vNormal);
-            vec3 viewDir = normalize(vViewPosition);
-            
-            // World space reflection for environment mapping
-            // vNormal is in view space. Transform it back into world space
-            // before reflecting the world-space camera direction.
-            vec3 worldNormal = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
-            vec3 worldViewDir = normalize(cameraPosition - vWorldPosition);
-            vec3 worldReflection = reflect(-worldViewDir, worldNormal);
-            
-            // Environment map lookup
-            vec4 envColor = textureCube(envMap, worldReflection);
-            
-            // Get base lighting
-            vec3 lighting = calculateLighting(normal, viewDir, lightDistance, lightingType);
-            
-            // Create chrome effect with high contrast and metallic feel
-            float fresnelFactor = fresnel(viewDir, normal, 5.0);
-            
-            // Add subtle noise for surface imperfection
-            float noisePattern = random(vPosition.xy * 20.0) * 0.05 * surfaceGrain;
-            
-            // Chrome color - mix environment map with base chrome color
-            vec3 chromeColor = mix(
-                vec3(0.9, 0.9, 0.9),      // Base silver-gray
-                envColor.rgb,              // Environment reflection
-                0.8                        // Higher reflection ratio
-            );
-            
-            // Enhance reflectivity at glancing angles (Fresnel effect)
-            chromeColor = mix(
-                chromeColor,
-                envColor.rgb,
-                fresnelFactor * 0.8
-            );
-            
-            // Apply lighting with less influence to preserve reflections
-            vec3 final = chromeColor * (lighting * 0.7 + 0.3) - noisePattern;
-            if (dirtyMirrors > 0.5) final = dirtyMirror(final, vSurface);
-            
-            gl_FragColor = vec4(outputDither(final), 1.0);
+            return clamp(grime + haze + speck * 0.42, 0.0, 1.0);
         }
     `;
+}
+
+// Sample shadow-map texel centers, comparing against the receiving plane at
+// each center. A single depth comparison at the fragment's position otherwise
+// makes a sloping face shadow itself in bands (especially with coarse maps).
+function receiverPlaneShadowShader() {
+    return `
+    #if defined(USE_SHADOWMAP) && NUM_POINT_LIGHT_SHADOWS > 0 && defined(SHADOWMAP_TYPE_PCF)
+        vec3 shadowTexelDirection(vec3 d, float size) {
+            vec3 a = abs(d);
+            vec2 uv;
+            if (a.x >= a.y && a.x >= a.z) uv = vec2(d.x > 0.0 ? -d.z : d.z, -d.y) / a.x;
+            else if (a.y >= a.z) uv = vec2(d.x, d.y > 0.0 ? d.z : -d.z) / a.y;
+            else uv = vec2(d.z > 0.0 ? d.x : -d.x, -d.y) / a.z;
+            uv = (floor(clamp(uv * 0.5 + 0.5, 0.0, 0.999999) * size) + 0.5) / size * 2.0 - 1.0;
+            if (a.x >= a.y && a.x >= a.z) return vec3(sign(d.x), -uv.y, d.x > 0.0 ? -uv.x : uv.x);
+            if (a.y >= a.z) return vec3(uv.x, sign(d.y), d.y > 0.0 ? uv.y : -uv.y);
+            return vec3(d.z > 0.0 ? uv.x : -uv.x, -uv.y, sign(d.z));
+        }
+        float viewerPointShadow(samplerCubeShadow map, vec2 size, float intensity, float bias,
+                float radius, vec4 coord, float nearPlane, float farPlane, vec3 worldNormal) {
+            vec3 p = coord.xyz;
+            float z = max(max(abs(p.x), abs(p.y)), abs(p.z));
+            if (z < nearPlane || z > farPlane) return 1.0;
+            vec3 direction = normalize(p);
+            vec3 tangent = normalize(cross(direction, abs(direction.x) > abs(direction.z) ? vec3(0.0,1.0,0.0) : vec3(1.0,0.0,0.0)));
+            vec3 bitangent = cross(direction,tangent);
+            float angle = viewerDitherNoise(gl_FragCoord.xy) * 6.28318530718;
+            float planeDistance = dot(worldNormal,p);
+            float visibility = 0.0;
+            for (int i = 0; i < 5; i++) {
+                vec2 offset = vogelDiskSample(i,5,angle) * radius / size.x;
+                vec3 ray = shadowTexelDirection(direction + tangent * offset.x + bitangent * offset.y, size.x);
+                float denominator = dot(worldNormal,ray);
+                // A neighboring ray beyond the plane's horizon cannot occlude this point.
+                if (abs(denominator) < 0.000001 || planeDistance * denominator <= 0.0) {
+                    visibility += 1.0;
+                    continue;
+                }
+                float depth = planeDistance / denominator;
+                if (depth < nearPlane || depth > farPlane) { visibility += 1.0; continue; }
+                float reference = farPlane * (depth - nearPlane) / (depth * (farPlane - nearPlane));
+                #ifdef USE_REVERSED_DEPTH_BUFFER
+                    reference = 1.0 - reference;
+                    reference -= bias;
+                #else
+                    reference += bias;
+                #endif
+                visibility += texture(map,vec4(ray,reference));
+            }
+            return mix(1.0,visibility * 0.2,intensity);
+        }
+    #endif
+    `;
+}
+
+// Current polytopes have at most 48 triangles. A small shared float texture
+// avoids fragment-uniform limits and is updated in place with the animation.
+function createMirrorTraceState() {
+    const data = new Float32Array(6 * 48 * 4);
+    const texture = new THREE.DataTexture(data, 6, 48, THREE.RGBAFormat, THREE.FloatType);
+    texture.minFilter = texture.magFilter = THREE.NearestFilter;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+    return {data, texture, count:{value:0}, frame:null};
+}
+
+function mirrorTraceShader() {
+    return `
+    #ifdef ENVMAP_TYPE_CUBE_UV
+        vec4 mirrorData(int triangle, int column) {
+            return texelFetch(mirrorTriangles,ivec2(column,triangle),0);
+        }
+        vec3 mirrorSource(vec3 direction, float roughness, vec3 dx, vec3 dy) {
+            direction = envMapRotation * direction;
+            if (roughness <= 0.06) {
+                direction.x = -direction.x;
+                dx=envMapRotation*dx; dy=envMapRotation*dy;
+                dx.x=-dx.x; dy.x=-dy.x;
+                // Never infer texture detail from neighboring rays that may
+                // have hit completely different mirrors. That makes dotted seams.
+                return textureGrad(mirrorEnvironment,direction,dx,dy).rgb;
+            }
+            return textureCubeUV(envMap,direction,roughness).rgb;
+        }
+        vec3 traceMirrorRay(vec3 origin, vec3 direction, float roughness, vec3 dx, vec3 dy, out float hitId) {
+            hitId = -1.0;
+            float nearest = 1.0e20;
+            int closest = -1;
+            vec2 barycentric = vec2(0.0);
+            vec3 hitNormal = vec3(0.0);
+            for(int i=0;i<48;i++) {
+                if(i>=mirrorTriangleCount)break;
+                // Exclude the originating polygon explicitly, not a finite
+                // distance strip around every intersection with another sheet.
+                int faceIndex = faceSides > 3.5 ? i/2 : i;
+                if(vMirrorFace >= 0.0 && faceIndex == int(vMirrorFace+0.5))continue;
+                vec4 av=mirrorData(i,0),bv=mirrorData(i,1),cv=mirrorData(i,2);
+                vec3 n=vec3(av.w,bv.w,cv.w);
+                float denominator=dot(n,direction);
+                if(abs(denominator)<0.0000001)continue;
+                float planeDistance=dot(n,av.xyz-origin);
+                float distance_=planeDistance/denominator;
+                // Other sheets may genuinely meet this one at zero distance.
+                // A large near-hit epsilon punches bright seams into those joints.
+                if(distance_<=0.0000001 || distance_>=nearest)continue;
+                vec3 a=av.xyz;
+                vec3 e1=bv.xyz-a;
+                vec3 e2=cv.xyz-a;
+                vec3 p = cross(direction,e2);
+                float determinant = dot(e1,p);
+                if (abs(determinant) < 0.0000001) continue;
+                float inverse = 1.0 / determinant;
+                vec3 s = origin - a;
+                float u = dot(s,p) * inverse;
+                // A shared edge must not fall through both triangles due to
+                // opposite roundoff signs in their barycentric coordinates.
+                if (u < -0.000001 || u > 1.000001) continue;
+                vec3 q = cross(s,e1);
+                float v = dot(direction,q) * inverse;
+                if (v < -0.000001 || u+v > 1.000001) continue;
+                nearest = distance_;
+                closest = i;
+                barycentric = vec2(u,v);
+                hitNormal = n;
+            }
+            if (closest < 0) return mirrorSource(direction,roughness,dx,dy);
+            hitId = float(closest);
+            if (dot(hitNormal,direction) > 0.0) hitNormal = -hitNormal;
+            float w = 1.0-barycentric.x-barycentric.y;
+            vec3 surface = mirrorData(closest,3).xyz*w + mirrorData(closest,4).xyz*barycentric.x + mirrorData(closest,5).xyz*barycentric.y;
+            float coverage = dirtyMirrors > 0.5 ? 0.45 * mirrorDirt(surface) : 0.0;
+            vec3 tint = mix(vec3(0.55,0.56,0.58),vec3(0.22,0.19,0.14),coverage);
+            float metal = 1.0 - 0.2*coverage;
+            vec3 f0 = mix(vec3(0.04),tint,metal);
+            vec3 fresnel_ = f0 + (1.0-f0)*pow(1.0-max(dot(-direction,hitNormal),0.0),5.0);
+            float secondaryRoughness = mix(0.005,0.12,coverage);
+            // Bounded transport: secondary reflection ends at the environment.
+            vec3 reflected = mirrorSource(reflect(direction,hitNormal),max(roughness,secondaryRoughness),reflect(dx,hitNormal),reflect(dy,hitNormal));
+            vec3 diffuse = textureCubeUV(envMap,envMapRotation*hitNormal,1.0).rgb * tint * (1.0-metal) * (1.0-fresnel_);
+            return fresnel_*reflected + diffuse;
+        }
+        vec3 reflectedScene(vec3 direction, float roughness) {
+            // Derivatives are evaluated before any divergent tracing branches.
+            vec3 dx=dFdx(direction),dy=dFdy(direction);
+            if (mirrorReflections < 0.5 || mirrorTriangleCount == 0) return mirrorSource(direction,roughness,dx,dy);
+            vec3 origin = vMirrorWorldPosition;
+            vec3 ox=dFdx(origin),oy=dFdy(origin);
+            float hitId;
+            vec3 color=traceMirrorRay(origin,direction,roughness,dx,dy,hitId);
+            // Adjacent rays hit different sheets (or the environment): integrate
+            // four subpixel rays only along those reflected boundaries.
+            if (fwidth(hitId)>0.5) {
+                float ignored;
+                color = traceMirrorRay(origin-0.25*ox-0.25*oy,normalize(direction-0.25*dx-0.25*dy),roughness,dx,dy,ignored);
+                color += traceMirrorRay(origin+0.25*ox-0.25*oy,normalize(direction+0.25*dx-0.25*dy),roughness,dx,dy,ignored);
+                color += traceMirrorRay(origin-0.25*ox+0.25*oy,normalize(direction-0.25*dx+0.25*dy),roughness,dx,dy,ignored);
+                color += traceMirrorRay(origin+0.25*ox+0.25*oy,normalize(direction+0.25*dx+0.25*dy),roughness,dx,dy,ignored);
+                color *= 0.25;
+            }
+            return color;
+        }
+    #endif
+    `;
+}
+
+function createPhysicalChromeMaterial(uniforms) {
+    const material = new THREE.MeshStandardMaterial({
+        // Approximate chromium normal-incidence reflectance, in linear RGB.
+        color: new THREE.Color().setRGB(0.55, 0.56, 0.58),
+        metalness: 1,
+        roughness: 0.005,
+        envMap: uniforms.envMap.value,
+        envMapIntensity: 1,
+        side: THREE.DoubleSide
+    });
+    // Preserve the existing UI and soundtrack's per-material controls.
+    material.uniforms = uniforms;
+    mirrorTraceState ??= createMirrorTraceState();
+    material.userData.mirrorTraceState = mirrorTraceState;
+    material.onBeforeCompile = shader => {
+        for (const name of ['surfaceGrain', 'dirtyMirrors', 'faceSides', 'mirrorReflections']) shader.uniforms[name] = uniforms[name];
+        shader.uniforms.mirrorEnvironment = uniforms.envMap;
+        shader.uniforms.mirrorTriangles = {value: mirrorTraceState.texture};
+        shader.uniforms.mirrorTriangleCount = mirrorTraceState.count;
+        // MSAA shades covered samples even when the pixel center is outside
+        // the triangle. Centroid interpolation keeps ray origins on the sheet.
+        shader.vertexShader = 'attribute vec3 surface; attribute float mirrorFace; centroid varying float vMirrorFace; centroid varying vec3 vSurface; centroid varying vec3 vGrainPosition; centroid varying vec3 vMirrorWorldPosition;\n' + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = surface; vMirrorFace = mirrorFace; vGrainPosition = position; vMirrorWorldPosition = (modelMatrix * vec4(position,1.0)).xyz;');
+        shader.fragmentShader = `uniform samplerCube mirrorEnvironment;
+            uniform sampler2D mirrorTriangles; uniform int mirrorTriangleCount;
+            uniform float mirrorReflections;
+            centroid varying vec3 vMirrorWorldPosition;
+            centroid varying float vMirrorFace;
+            uniform float surfaceGrain; uniform float dirtyMirrors; uniform float faceSides;
+            centroid varying vec3 vSurface;
+            centroid varying vec3 vGrainPosition;
+            ${shaderUtilities()}
+            ${chromeSurfaceShader()}
+        ` + shader.fragmentShader;
+        // Standard PBR clamps roughness to 0.0525 and uses a prefiltered map.
+        // For polished surfaces, retain source resolution instead. Dust still
+        // uses the filtered map; the BRDF/Fresnel and direct lights stay standard.
+        const environmentShader = THREE.ShaderChunk.envmap_physical_pars_fragment.replace(
+            'vec4 envMapColor = textureCubeUV( envMap, envMapRotation * reflectVec, roughness );',
+            'vec4 envMapColor = vec4(reflectedScene(reflectVec,roughness),1.0);'
+        );
+        shader.fragmentShader = shader.fragmentShader.replace('#include <envmap_physical_pars_fragment>', mirrorTraceShader() + environmentShader);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <shadowmap_pars_fragment>', '#include <shadowmap_pars_fragment>\n' + receiverPlaneShadowShader());
+        const shadowLighting = THREE.ShaderChunk.lights_fragment_begin
+            .replace('getPointShadow( pointShadowMap[ i ],', 'viewerPointShadow( pointShadowMap[ i ],')
+            .replace('pointLightShadow.shadowCameraFar )', 'pointLightShadow.shadowCameraFar, transformDirectionByInverseViewMatrix(geometryNormal,viewMatrix) )');
+        shader.fragmentShader = shader.fragmentShader.replace('#include <lights_fragment_begin>', shadowLighting);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <roughnessmap_fragment>', `
+            #include <roughnessmap_fragment>
+            float coverage = 0.0;
+            if (dirtyMirrors > 0.5) coverage = 0.45 * mirrorDirt(vSurface);
+            // Thin deposits tint/attenuate the reflection without replacing the
+            // mirror with matte dust. Grain is a separate artistic image effect.
+            roughnessFactor = mix(roughnessFactor, 0.12, coverage);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.22, 0.19, 0.14), coverage);
+        `);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor *= 1.0 - 0.2 * coverage;');
+        // Restore the original deterministic, face-position grain. Both the
+        // visible render and forced-on music analysis use this exact treatment.
+        shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', `
+            #include <opaque_fragment>
+            if (surfaceGrain > 0.5) gl_FragColor.rgb = max(vec3(0.0), gl_FragColor.rgb - vec3(random(vGrainPosition.xy * 20.0) * 0.05));
+        `);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <dithering_fragment>', 'gl_FragColor.rgb = outputDither(gl_FragColor.rgb);');
+    };
+    material.customProgramCacheKey = () => 'physical-chrome-v9-one-bounce-explicit-gradients';
+    return material;
 }
 
 // Function to project 4D to 3D using simple projection
@@ -3608,7 +3833,9 @@ function createTesseract() {
         
         // Create a small sphere to visually represent the vertex
         const vertexGeometry = new THREE.SphereGeometry(0.03, 8, 8);
+        vertexGeometry.setAttribute('mirrorFace', new THREE.BufferAttribute(new Float32Array(vertexGeometry.getAttribute('position').count).fill(-1), 1));
         const vertexMesh = new THREE.Mesh(vertexGeometry, material);
+        vertexMesh.castShadow = vertexMesh.receiveShadow = true;
         
         vertexMesh.position.set(vertex3D.x, vertex3D.y, vertex3D.z);
         vertexMesh.userData = { vertexIndex: i, vertex4D: {...vertices4D[i]} };
@@ -3629,12 +3856,26 @@ function createTesseract() {
         const surface = faceSurfaceArray(indices, faces.length);
         geometry.setAttribute('position', new THREE.BufferAttribute(facePositionArray(indices), 3));
         geometry.setAttribute('surface', new THREE.BufferAttribute(surface, 3));
+        geometry.setAttribute('mirrorFace', new THREE.BufferAttribute(new Float32Array(geometry.getAttribute('position').count).fill(faces.length), 1));
         geometry.computeVertexNormals();
         const face = new THREE.Mesh(geometry, material);
+        face.receiveShadow = true;
         face.userData = {vertices: indices, surface};
         tesseract.add(face);
         faces.push(face);
     }
+    // One merged caster: six draws per point light, not six per face.
+    // It is never drawn in a color pass, including scene.overrideMaterial passes.
+    const shadowGeometry = new THREE.BufferGeometry();
+    const count = faces.reduce((sum, face) => sum + face.geometry.getAttribute('position').array.length, 0);
+    shadowGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count), 3));
+    const shadowMesh = new THREE.Mesh(shadowGeometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, colorWrite: false, depthWrite: false }));
+    shadowMesh.castShadow = true;
+    shadowMesh.onBeforeRender = () => shadowGeometry.setDrawRange(0, 0);
+    shadowMesh.onAfterRender = () => shadowGeometry.setDrawRange(0, Infinity);
+    tesseract.userData.shadowMesh = shadowMesh;
+    tesseract.add(shadowMesh);
+    updateTesseractProjection();
 }
 
 // Project the 4D tesseract to 3D dynamically
@@ -3681,16 +3922,69 @@ function updateTesseractProjection() {
         const face = faces[i];
         const faceVertices = face.userData.vertices;
         
-        // Update the face geometry
-        const geometry = new THREE.BufferGeometry();
-        const vertexArray = facePositionArray(faceVertices);
-        
-        geometry.setAttribute('position', new THREE.BufferAttribute(vertexArray, 3));
-        geometry.setAttribute('surface', new THREE.BufferAttribute(face.userData.surface, 3));
+        // Topology is fixed during animation. Reuse GPU buffers rather than
+        // disposing/reallocating every face on every displayed/exported frame.
+        const geometry = face.geometry;
+        const position = geometry.getAttribute('position');
+        let offset = 0;
+        for (let triangle = 1; triangle < faceVertices.length - 1; triangle++) {
+            for (const index of [faceVertices[0], faceVertices[triangle], faceVertices[triangle + 1]]) {
+                const point = vertices[index].position;
+                position.array[offset++] = point.x;
+                position.array[offset++] = point.y;
+                position.array[offset++] = point.z;
+            }
+        }
+        position.needsUpdate = true;
         geometry.computeVertexNormals();
-        
-        if (face.geometry) face.geometry.dispose();
-        face.geometry = geometry;
+        geometry.computeBoundingSphere();
+    }
+    const shadowMesh = tesseract?.userData.shadowMesh;
+    if (shadowMesh) {
+        const position = shadowMesh.geometry.getAttribute('position');
+        let offset = 0;
+        for (const face of faces) {
+            const array = face.geometry.getAttribute('position').array;
+            position.array.set(array, offset);
+            offset += array.length;
+        }
+        position.needsUpdate = true;
+        shadowMesh.geometry.computeBoundingSphere();
+    }
+    if (mirrorTraceState) {
+        const frame = `${currentShape}/${time}`;
+        if (mirrorTraceState.frame !== frame) {
+            let triangle = 0;
+            for (const face of faces) {
+                const position = face.geometry.getAttribute('position').array;
+                const surface = face.geometry.getAttribute('surface').array;
+                // Faces store projected world coordinates (their mesh/group
+                // transforms are identity), as does the merged shadow caster.
+                for (let offset=0; offset<position.length; offset+=9) {
+                    if (triangle >= 48) throw new Error('Mirror triangle capacity exceeded');
+                    const ax=position[offset+3]-position[offset],ay=position[offset+4]-position[offset+1],az=position[offset+5]-position[offset+2];
+                    const bx=position[offset+6]-position[offset],by=position[offset+7]-position[offset+1],bz=position[offset+8]-position[offset+2];
+                    const nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+                    const length=Math.hypot(nx,ny,nz);
+                    for (let corner=0; corner<3; corner++) {
+                        const src = offset + corner*3;
+                        const dst = (triangle*6 + corner)*4;
+                        mirrorTraceState.data[dst] = position[src];
+                        mirrorTraceState.data[dst+1] = position[src+1];
+                        mirrorTraceState.data[dst+2] = position[src+2];
+                        mirrorTraceState.data[dst+3] = length>0.0000001 ? (corner===0 ? nx : corner===1 ? ny : nz)/length : 0;
+                        const uv = dst+12;
+                        mirrorTraceState.data[uv] = surface[src];
+                        mirrorTraceState.data[uv+1] = surface[src+1];
+                        mirrorTraceState.data[uv+2] = surface[src+2];
+                    }
+                    triangle++;
+                }
+            }
+            mirrorTraceState.count.value = triangle;
+            mirrorTraceState.texture.needsUpdate = true;
+            mirrorTraceState.frame = frame;
+        }
     }
 }
 
@@ -3831,8 +4125,14 @@ function updateMaterialsWithEnvMap() {
         materials.forEach(material => {
             if (material.uniforms && material.uniforms.envMap) {
                 material.uniforms.envMap.value = envMap;
+                material.envMap = envMap;
+                material.needsUpdate = true;
             }
         });
+    }
+    if (soundAnalysisMaterial) {
+        soundAnalysisMaterial.envMap = envMap;
+        soundAnalysisMaterial.needsUpdate = true;
     }
 }
 
@@ -3849,6 +4149,7 @@ function installViewerAPI() {
         showVertices: { type: 'boolean' },
         surfaceGrain: { type: 'boolean', note: 'chrome shader only' },
         dirtyMirrors: { type: 'boolean', note: 'chrome shader only' },
+        mirrorReflections: { type: 'boolean', note: 'chrome: one additional face reflection; disable for performance comparison' },
         exportFps: { values: [24, 25, 30, 50, 60] },
         animationPaused: { type: 'boolean' },
         timelineFrame: { type: 'integer', note: 'wraps around the loop length' },
@@ -3915,6 +4216,13 @@ function installViewerAPI() {
                 case 'dirtyMirrors': {
                     require(typeof value === 'boolean', 'dirtyMirrors must be true or false');
                     const checkbox = document.getElementById('dirtyMirrorsToggle');
+                    checkbox.checked = value;
+                    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+                case 'mirrorReflections': {
+                    require(typeof value === 'boolean', 'mirrorReflections must be true or false');
+                    const checkbox = document.getElementById('viewer-mirror-reflections');
                     checkbox.checked = value;
                     checkbox.dispatchEvent(new Event('change', { bubbles: true }));
                     break;
