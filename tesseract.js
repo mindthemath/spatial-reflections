@@ -258,7 +258,7 @@ function init() {
     scene = new THREE.Scene();
     
     // Create camera
-    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
     camera.position.set(savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z);
     
     // Create renderer
@@ -270,6 +270,7 @@ function init() {
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
+    controls.minDistance = 0.01; // Hard stop for scroll/pinch zoom toward the target.
     controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
     controls.addEventListener('change', clampCameraCoordinates);
     clampCameraCoordinates();
