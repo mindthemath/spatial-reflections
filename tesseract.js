@@ -58,6 +58,8 @@ let surfaceGrain = true;
 // Aged edge grime and dust fixed to each face: texture that moves with the
 // glass, so it compresses far better than per-frame grain.
 let dirtyMirrors = false;
+let mirrorReflections = false;
+let mirrorTraceState = null;
 let showOverlay = true;
 let cameraInfoDisplay;
 let motionStepSlider;
@@ -105,6 +107,7 @@ function viewerSettings() {
         showVertices,
         surfaceGrain,
         dirtyMirrors,
+        mirrorReflections,
         animationPaused,
         exportFps,
         videoExportWidth,
@@ -132,6 +135,7 @@ function defaultViewerSettings() {
         showVertices: false,
         surfaceGrain: true,
         dirtyMirrors: false,
+        mirrorReflections: false,
         animationPaused: true,
         exportFps: 60,
         videoExportWidth: 1920,
@@ -173,6 +177,7 @@ function applyViewerSettings(saved) {
     if (typeof saved.showVertices === 'boolean') showVertices = saved.showVertices;
     if (typeof saved.surfaceGrain === 'boolean') surfaceGrain = saved.surfaceGrain;
     if (typeof saved.dirtyMirrors === 'boolean') dirtyMirrors = saved.dirtyMirrors;
+    if (typeof saved.mirrorReflections === 'boolean') mirrorReflections = saved.mirrorReflections;
     if (typeof saved.animationPaused === 'boolean') animationPaused = saved.animationPaused;
     if (typeof saved.panelExpanded === 'boolean') panelExpanded = saved.panelExpanded;
     if (typeof saved.videoTimingExpanded === 'boolean') videoTimingExpanded = saved.videoTimingExpanded;
@@ -799,6 +804,9 @@ function applyViewSettings(metadata) {
                 if (material.uniforms.dirtyMirrors) {
                     material.uniforms.dirtyMirrors.value = dirtyMirrors ? 1 : 0;
                 }
+                if (material.uniforms.mirrorReflections) {
+                    material.uniforms.mirrorReflections.value = mirrorReflections ? 1 : 0;
+                }
             }
         });
         
@@ -1029,6 +1037,23 @@ function createControls() {
     dirtyToggle.appendChild(dirtyCheckbox);
     dirtyToggle.appendChild(dirtyLabel);
     controlPanel.appendChild(dirtyToggle);
+
+    const reflectionToggle = document.createElement('label');
+    reflectionToggle.style.cssText = 'display:block;margin-bottom:10px';
+    const reflectionCheckbox = document.createElement('input');
+    reflectionCheckbox.type = 'checkbox';
+    reflectionCheckbox.id = 'viewer-mirror-reflections';
+    reflectionCheckbox.checked = mirrorReflections;
+    reflectionCheckbox.addEventListener('change', () => {
+        mirrorReflections = reflectionCheckbox.checked;
+        for (const object of [...faces, ...vertices]) {
+            if (object.material?.uniforms?.mirrorReflections) object.material.uniforms.mirrorReflections.value = mirrorReflections ? 1 : 0;
+        }
+        persistViewerSettings();
+    });
+    reflectionToggle.append(reflectionCheckbox, ' Face-to-face reflections · 1 bounce');
+    reflectionToggle.title = 'Experimental: trace one additional reflection against faces, then the skybox. Turn off to compare performance.';
+    controlPanel.appendChild(reflectionToggle);
     
     const shapeLabel = document.createElement('label');
     shapeLabel.textContent = '4D shape: ';
@@ -1705,6 +1730,8 @@ function syncViewerControlsFromState() {
     if (grainToggle) grainToggle.checked = surfaceGrain;
     const dirtyToggle = document.getElementById('dirtyMirrorsToggle');
     if (dirtyToggle) dirtyToggle.checked = dirtyMirrors;
+    const reflectionToggle = document.getElementById('viewer-mirror-reflections');
+    if (reflectionToggle) reflectionToggle.checked = mirrorReflections;
     if (exportFpsSelect) exportFpsSelect.value = String(exportFps);
     const resolution = document.getElementById('video-export-resolution');
     if (resolution) resolution.value = `${videoExportWidth}x${videoExportHeight}`;
@@ -1912,6 +1939,7 @@ function videoRenderSignature() {
         ...(surfaceGrain ? {} : {surfaceGrain}),
         // Omitted when off so signatures from before dirty mirrors stay valid.
         ...(dirtyMirrors ? {dirtyMirrors} : {}),
+        ...(mirrorReflections ? {mirrorReflections: 1} : {}),
         camera: {
             position: ['x', 'y', 'z'].map(axis => Number(camera.position[axis].toFixed(9))),
             target: ['x', 'y', 'z'].map(axis => Number(controls.target[axis].toFixed(9)))
@@ -2541,6 +2569,7 @@ function withSoundAnalysisMaterial(render) {
     soundAnalysisMaterial.envMap = envMap;
     uniforms.surfaceGrain.value = 1;
     uniforms.dirtyMirrors.value = 1;
+    if (uniforms.mirrorReflections) uniforms.mirrorReflections.value = mirrorReflections ? 1 : 0;
     uniforms.faceSides.value = currentShape === 'rectified-5-cell' ? 3 : 4;
     uniforms.lightDistance.value = lightDistance;
     uniforms.lightingType.value = currentLighting === 'topdown' ? 1 : currentLighting === 'quad' ? 2 : 0;
@@ -3225,6 +3254,7 @@ function createShaderMaterial(shaderType = currentShader) {
         lightDistance: { value: lightDistance },
         surfaceGrain: { value: surfaceGrain ? 1 : 0 },
         dirtyMirrors: { value: dirtyMirrors ? 1 : 0 },
+        mirrorReflections: { value: mirrorReflections ? 1 : 0 },
         faceSides: { value: currentShape === 'rectified-5-cell' ? 3 : 4 }
     };
     
@@ -3496,6 +3526,116 @@ function receiverPlaneShadowShader() {
     `;
 }
 
+// Current polytopes have at most 48 triangles. A small shared float texture
+// avoids fragment-uniform limits and is updated in place with the animation.
+function createMirrorTraceState() {
+    const data = new Float32Array(6 * 48 * 4);
+    const texture = new THREE.DataTexture(data, 6, 48, THREE.RGBAFormat, THREE.FloatType);
+    texture.minFilter = texture.magFilter = THREE.NearestFilter;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+    return {data, texture, count:{value:0}, frame:null};
+}
+
+function mirrorTraceShader() {
+    return `
+    #ifdef ENVMAP_TYPE_CUBE_UV
+        vec4 mirrorData(int triangle, int column) {
+            return texelFetch(mirrorTriangles,ivec2(column,triangle),0);
+        }
+        vec3 mirrorSource(vec3 direction, float roughness, vec3 dx, vec3 dy) {
+            direction = envMapRotation * direction;
+            if (roughness <= 0.06) {
+                direction.x = -direction.x;
+                dx=envMapRotation*dx; dy=envMapRotation*dy;
+                dx.x=-dx.x; dy.x=-dy.x;
+                // Never infer texture detail from neighboring rays that may
+                // have hit completely different mirrors. That makes dotted seams.
+                return textureGrad(mirrorEnvironment,direction,dx,dy).rgb;
+            }
+            return textureCubeUV(envMap,direction,roughness).rgb;
+        }
+        vec3 traceMirrorRay(vec3 origin, vec3 direction, float roughness, vec3 dx, vec3 dy, out float hitId) {
+            hitId = -1.0;
+            float nearest = 1.0e20;
+            int closest = -1;
+            vec2 barycentric = vec2(0.0);
+            vec3 hitNormal = vec3(0.0);
+            for(int i=0;i<48;i++) {
+                if(i>=mirrorTriangleCount)break;
+                // Exclude the originating polygon explicitly, not a finite
+                // distance strip around every intersection with another sheet.
+                int faceIndex = faceSides > 3.5 ? i/2 : i;
+                if(vMirrorFace >= 0.0 && faceIndex == int(vMirrorFace+0.5))continue;
+                vec4 av=mirrorData(i,0),bv=mirrorData(i,1),cv=mirrorData(i,2);
+                vec3 n=vec3(av.w,bv.w,cv.w);
+                float denominator=dot(n,direction);
+                if(abs(denominator)<0.0000001)continue;
+                float planeDistance=dot(n,av.xyz-origin);
+                float distance_=planeDistance/denominator;
+                // Other sheets may genuinely meet this one at zero distance.
+                // A large near-hit epsilon punches bright seams into those joints.
+                if(distance_<=0.0000001 || distance_>=nearest)continue;
+                vec3 a=av.xyz;
+                vec3 e1=bv.xyz-a;
+                vec3 e2=cv.xyz-a;
+                vec3 p = cross(direction,e2);
+                float determinant = dot(e1,p);
+                if (abs(determinant) < 0.0000001) continue;
+                float inverse = 1.0 / determinant;
+                vec3 s = origin - a;
+                float u = dot(s,p) * inverse;
+                // A shared edge must not fall through both triangles due to
+                // opposite roundoff signs in their barycentric coordinates.
+                if (u < -0.000001 || u > 1.000001) continue;
+                vec3 q = cross(s,e1);
+                float v = dot(direction,q) * inverse;
+                if (v < -0.000001 || u+v > 1.000001) continue;
+                nearest = distance_;
+                closest = i;
+                barycentric = vec2(u,v);
+                hitNormal = n;
+            }
+            if (closest < 0) return mirrorSource(direction,roughness,dx,dy);
+            hitId = float(closest);
+            if (dot(hitNormal,direction) > 0.0) hitNormal = -hitNormal;
+            float w = 1.0-barycentric.x-barycentric.y;
+            vec3 surface = mirrorData(closest,3).xyz*w + mirrorData(closest,4).xyz*barycentric.x + mirrorData(closest,5).xyz*barycentric.y;
+            float coverage = dirtyMirrors > 0.5 ? 0.45 * mirrorDirt(surface) : 0.0;
+            vec3 tint = mix(vec3(0.55,0.56,0.58),vec3(0.22,0.19,0.14),coverage);
+            float metal = 1.0 - 0.2*coverage;
+            vec3 f0 = mix(vec3(0.04),tint,metal);
+            vec3 fresnel_ = f0 + (1.0-f0)*pow(1.0-max(dot(-direction,hitNormal),0.0),5.0);
+            float secondaryRoughness = mix(0.005,0.12,coverage);
+            // Bounded transport: secondary reflection ends at the environment.
+            vec3 reflected = mirrorSource(reflect(direction,hitNormal),max(roughness,secondaryRoughness),reflect(dx,hitNormal),reflect(dy,hitNormal));
+            vec3 diffuse = textureCubeUV(envMap,envMapRotation*hitNormal,1.0).rgb * tint * (1.0-metal) * (1.0-fresnel_);
+            return fresnel_*reflected + diffuse;
+        }
+        vec3 reflectedScene(vec3 direction, float roughness) {
+            // Derivatives are evaluated before any divergent tracing branches.
+            vec3 dx=dFdx(direction),dy=dFdy(direction);
+            if (mirrorReflections < 0.5 || mirrorTriangleCount == 0) return mirrorSource(direction,roughness,dx,dy);
+            vec3 origin = vMirrorWorldPosition;
+            vec3 ox=dFdx(origin),oy=dFdy(origin);
+            float hitId;
+            vec3 color=traceMirrorRay(origin,direction,roughness,dx,dy,hitId);
+            // Adjacent rays hit different sheets (or the environment): integrate
+            // four subpixel rays only along those reflected boundaries.
+            if (fwidth(hitId)>0.5) {
+                float ignored;
+                color = traceMirrorRay(origin-0.25*ox-0.25*oy,normalize(direction-0.25*dx-0.25*dy),roughness,dx,dy,ignored);
+                color += traceMirrorRay(origin+0.25*ox-0.25*oy,normalize(direction+0.25*dx-0.25*dy),roughness,dx,dy,ignored);
+                color += traceMirrorRay(origin-0.25*ox+0.25*oy,normalize(direction-0.25*dx+0.25*dy),roughness,dx,dy,ignored);
+                color += traceMirrorRay(origin+0.25*ox+0.25*oy,normalize(direction+0.25*dx+0.25*dy),roughness,dx,dy,ignored);
+                color *= 0.25;
+            }
+            return color;
+        }
+    #endif
+    `;
+}
+
 function createPhysicalChromeMaterial(uniforms) {
     const material = new THREE.MeshStandardMaterial({
         // Approximate chromium normal-incidence reflectance, in linear RGB.
@@ -3508,15 +3648,25 @@ function createPhysicalChromeMaterial(uniforms) {
     });
     // Preserve the existing UI and soundtrack's per-material controls.
     material.uniforms = uniforms;
+    mirrorTraceState ??= createMirrorTraceState();
+    material.userData.mirrorTraceState = mirrorTraceState;
     material.onBeforeCompile = shader => {
-        for (const name of ['surfaceGrain', 'dirtyMirrors', 'faceSides']) shader.uniforms[name] = uniforms[name];
+        for (const name of ['surfaceGrain', 'dirtyMirrors', 'faceSides', 'mirrorReflections']) shader.uniforms[name] = uniforms[name];
         shader.uniforms.mirrorEnvironment = uniforms.envMap;
-        shader.vertexShader = 'attribute vec3 surface; varying vec3 vSurface; varying vec3 vGrainPosition;\n' + shader.vertexShader;
-        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = surface; vGrainPosition = position;');
+        shader.uniforms.mirrorTriangles = {value: mirrorTraceState.texture};
+        shader.uniforms.mirrorTriangleCount = mirrorTraceState.count;
+        // MSAA shades covered samples even when the pixel center is outside
+        // the triangle. Centroid interpolation keeps ray origins on the sheet.
+        shader.vertexShader = 'attribute vec3 surface; attribute float mirrorFace; centroid varying float vMirrorFace; centroid varying vec3 vSurface; centroid varying vec3 vGrainPosition; centroid varying vec3 vMirrorWorldPosition;\n' + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = surface; vMirrorFace = mirrorFace; vGrainPosition = position; vMirrorWorldPosition = (modelMatrix * vec4(position,1.0)).xyz;');
         shader.fragmentShader = `uniform samplerCube mirrorEnvironment;
+            uniform sampler2D mirrorTriangles; uniform int mirrorTriangleCount;
+            uniform float mirrorReflections;
+            centroid varying vec3 vMirrorWorldPosition;
+            centroid varying float vMirrorFace;
             uniform float surfaceGrain; uniform float dirtyMirrors; uniform float faceSides;
-            varying vec3 vSurface;
-            varying vec3 vGrainPosition;
+            centroid varying vec3 vSurface;
+            centroid varying vec3 vGrainPosition;
             ${shaderUtilities()}
             ${chromeSurfaceShader()}
         ` + shader.fragmentShader;
@@ -3525,17 +3675,9 @@ function createPhysicalChromeMaterial(uniforms) {
         // uses the filtered map; the BRDF/Fresnel and direct lights stay standard.
         const environmentShader = THREE.ShaderChunk.envmap_physical_pars_fragment.replace(
             'vec4 envMapColor = textureCubeUV( envMap, envMapRotation * reflectVec, roughness );',
-            `vec4 envMapColor;
-            if (roughness <= 0.06) {
-                vec3 direction = envMapRotation * reflectVec;
-                // Match Three.js's image-cubemap orientation during PMREM creation.
-                direction.x = -direction.x;
-                envMapColor = textureCube(mirrorEnvironment, direction);
-            } else {
-                envMapColor = textureCubeUV(envMap, envMapRotation * reflectVec, roughness);
-            }`
+            'vec4 envMapColor = vec4(reflectedScene(reflectVec,roughness),1.0);'
         );
-        shader.fragmentShader = shader.fragmentShader.replace('#include <envmap_physical_pars_fragment>', environmentShader);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <envmap_physical_pars_fragment>', mirrorTraceShader() + environmentShader);
         shader.fragmentShader = shader.fragmentShader.replace('#include <shadowmap_pars_fragment>', '#include <shadowmap_pars_fragment>\n' + receiverPlaneShadowShader());
         const shadowLighting = THREE.ShaderChunk.lights_fragment_begin
             .replace('getPointShadow( pointShadowMap[ i ],', 'viewerPointShadow( pointShadowMap[ i ],')
@@ -3559,7 +3701,7 @@ function createPhysicalChromeMaterial(uniforms) {
         `);
         shader.fragmentShader = shader.fragmentShader.replace('#include <dithering_fragment>', 'gl_FragColor.rgb = outputDither(gl_FragColor.rgb);');
     };
-    material.customProgramCacheKey = () => 'physical-chrome-v4';
+    material.customProgramCacheKey = () => 'physical-chrome-v9-one-bounce-explicit-gradients';
     return material;
 }
 
@@ -3691,6 +3833,7 @@ function createTesseract() {
         
         // Create a small sphere to visually represent the vertex
         const vertexGeometry = new THREE.SphereGeometry(0.03, 8, 8);
+        vertexGeometry.setAttribute('mirrorFace', new THREE.BufferAttribute(new Float32Array(vertexGeometry.getAttribute('position').count).fill(-1), 1));
         const vertexMesh = new THREE.Mesh(vertexGeometry, material);
         vertexMesh.castShadow = vertexMesh.receiveShadow = true;
         
@@ -3713,6 +3856,7 @@ function createTesseract() {
         const surface = faceSurfaceArray(indices, faces.length);
         geometry.setAttribute('position', new THREE.BufferAttribute(facePositionArray(indices), 3));
         geometry.setAttribute('surface', new THREE.BufferAttribute(surface, 3));
+        geometry.setAttribute('mirrorFace', new THREE.BufferAttribute(new Float32Array(geometry.getAttribute('position').count).fill(faces.length), 1));
         geometry.computeVertexNormals();
         const face = new THREE.Mesh(geometry, material);
         face.receiveShadow = true;
@@ -3806,6 +3950,41 @@ function updateTesseractProjection() {
         }
         position.needsUpdate = true;
         shadowMesh.geometry.computeBoundingSphere();
+    }
+    if (mirrorTraceState) {
+        const frame = `${currentShape}/${time}`;
+        if (mirrorTraceState.frame !== frame) {
+            let triangle = 0;
+            for (const face of faces) {
+                const position = face.geometry.getAttribute('position').array;
+                const surface = face.geometry.getAttribute('surface').array;
+                // Faces store projected world coordinates (their mesh/group
+                // transforms are identity), as does the merged shadow caster.
+                for (let offset=0; offset<position.length; offset+=9) {
+                    if (triangle >= 48) throw new Error('Mirror triangle capacity exceeded');
+                    const ax=position[offset+3]-position[offset],ay=position[offset+4]-position[offset+1],az=position[offset+5]-position[offset+2];
+                    const bx=position[offset+6]-position[offset],by=position[offset+7]-position[offset+1],bz=position[offset+8]-position[offset+2];
+                    const nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+                    const length=Math.hypot(nx,ny,nz);
+                    for (let corner=0; corner<3; corner++) {
+                        const src = offset + corner*3;
+                        const dst = (triangle*6 + corner)*4;
+                        mirrorTraceState.data[dst] = position[src];
+                        mirrorTraceState.data[dst+1] = position[src+1];
+                        mirrorTraceState.data[dst+2] = position[src+2];
+                        mirrorTraceState.data[dst+3] = length>0.0000001 ? (corner===0 ? nx : corner===1 ? ny : nz)/length : 0;
+                        const uv = dst+12;
+                        mirrorTraceState.data[uv] = surface[src];
+                        mirrorTraceState.data[uv+1] = surface[src+1];
+                        mirrorTraceState.data[uv+2] = surface[src+2];
+                    }
+                    triangle++;
+                }
+            }
+            mirrorTraceState.count.value = triangle;
+            mirrorTraceState.texture.needsUpdate = true;
+            mirrorTraceState.frame = frame;
+        }
     }
 }
 
@@ -3970,6 +4149,7 @@ function installViewerAPI() {
         showVertices: { type: 'boolean' },
         surfaceGrain: { type: 'boolean', note: 'chrome shader only' },
         dirtyMirrors: { type: 'boolean', note: 'chrome shader only' },
+        mirrorReflections: { type: 'boolean', note: 'chrome: one additional face reflection; disable for performance comparison' },
         exportFps: { values: [24, 25, 30, 50, 60] },
         animationPaused: { type: 'boolean' },
         timelineFrame: { type: 'integer', note: 'wraps around the loop length' },
@@ -4036,6 +4216,13 @@ function installViewerAPI() {
                 case 'dirtyMirrors': {
                     require(typeof value === 'boolean', 'dirtyMirrors must be true or false');
                     const checkbox = document.getElementById('dirtyMirrorsToggle');
+                    checkbox.checked = value;
+                    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+                case 'mirrorReflections': {
+                    require(typeof value === 'boolean', 'mirrorReflections must be true or false');
+                    const checkbox = document.getElementById('viewer-mirror-reflections');
                     checkbox.checked = value;
                     checkbox.dispatchEvent(new Event('change', { bubbles: true }));
                     break;

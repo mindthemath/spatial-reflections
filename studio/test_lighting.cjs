@@ -10,9 +10,11 @@ const source = fs.readFileSync(path.join(root, 'tesseract.js'), 'utf8');
 const skyboxes = fs.readFileSync(path.join(root, 'viewer-skyboxes.js'), 'utf8');
 const textureHelper = skyboxes.slice(skyboxes.indexOf('function textureFromImages('), skyboxes.indexOf('function slugify('));
 const helpers = source.slice(source.indexOf('function createShaderMaterial('), source.indexOf('// Function to project 4D to 3D'));
-const context = { THREE: { ShaderMaterial: class { constructor(options) { Object.assign(this, options); } }, DoubleSide: 2 }, currentLighting: 'diagonal', lightDistance: 3, surfaceGrain: false, dirtyMirrors: false, currentShape: 'tesseract', envMap: null };
+const context = { THREE: { ShaderMaterial: class { constructor(options) { Object.assign(this, options); } }, DoubleSide: 2 }, currentLighting: 'diagonal', lightDistance: 3, surfaceGrain: false, dirtyMirrors: false, mirrorReflections: true, currentShape: 'tesseract', envMap: null };
 vm.runInNewContext(helpers, context);
 const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial(type));
+const topologyHelpers = source.slice(source.indexOf('function project4Dto3D('),source.indexOf('function setViewerShape('));
+const rotationHelpers = source.slice(source.indexOf('function rotate4D('),source.indexOf('// Function to handle window resize'));
 (async () => {
     const THREE = await import('three');
     const lighting = vm.createContext({physicalLights: Array.from({length:4}, () => new THREE.PointLight()),
@@ -47,7 +49,7 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(root, name)) });
         });
         await page.goto('http://viewer.test/');
-        const result = await page.evaluate(async ({ shaders, utilities, helpers, textureHelper }) => {
+        const result = await page.evaluate(async ({ shaders, utilities, helpers, textureHelper, topologyHelpers, rotationHelpers }) => {
             const THREE = await import('/vendor/three.module.js');
             const renderer = new THREE.WebGLRenderer();
             renderer.setSize(32, 32);
@@ -79,8 +81,10 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             const roundTrip = pixel();
             // Exercise the actual material hook, not a serialized approximation.
             mesh.geometry.setAttribute('surface', new THREE.BufferAttribute(new Float32Array(12).fill(0.5), 3));
+            mesh.geometry.setAttribute('mirrorFace',new THREE.BufferAttribute(new Float32Array(4).fill(-1),1));
             const createMaterial = new Function('THREE', 'envMap', `
-                const currentLighting='diagonal', lightDistance=3, surfaceGrain=true, dirtyMirrors=true, currentShape='tesseract';
+                let mirrorTraceState=null;
+                const mirrorReflections=true, currentLighting='diagonal', lightDistance=3, surfaceGrain=true, dirtyMirrors=true, currentShape='tesseract';
                 ${helpers}
                 return createShaderMaterial('chrome');
             `);
@@ -242,10 +246,89 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
                 return sum;
             };
             const sharpContrast=contrast(sharpMetal),filteredContrast=contrast(filteredMetal);
+            // +Z is blue; -X is red. A 45-degree secondary sheet turns a
+            // +Z reflected ray toward +X (image cubemaps flip the lookup X).
+            const colorFaces=['#00ff00','#ff0000','#444444','#444444','#0000ff','#444444'].map(color=>{
+                const face=document.createElement('canvas');face.width=face.height=32;
+                const ctx=face.getContext('2d');ctx.fillStyle=color;ctx.fillRect(0,0,32,32);return face;
+            });
+            const colorCube=new THREE.CubeTexture(colorFaces);colorCube.colorSpace=THREE.SRGBColorSpace;colorCube.needsUpdate=true;
+            const tracedMetal=createMaterial(THREE,colorCube);
+            tracedMetal.uniforms.surfaceGrain.value=0;tracedMetal.uniforms.dirtyMirrors.value=0;
+            const trace=tracedMetal.userData.mirrorTraceState;
+            const setTriangle=(index,points)=>{
+                const a=new THREE.Vector3(...points[0]),b=new THREE.Vector3(...points[1]),c=new THREE.Vector3(...points[2]);
+                const normal=b.sub(a).cross(c.sub(a)).normalize();
+                for(let corner=0;corner<3;corner++){
+                    trace.data.set(points[corner],(index*6+corner)*4);
+                    trace.data[(index*6+corner)*4+3]=normal.getComponent(corner);
+                    trace.data.set([0.5,0.5,0.17],(index*6+corner+3)*4);
+                }
+                trace.texture.needsUpdate=true;
+            };
+            renderer.setSize(32,32);mesh.material=tracedMetal;
+            const reflectionPixel=()=>{renderer.render(scene,camera);return pixel();};
+            const emptyReflection=reflectionPixel();
+            const angled=[[-2,-2,-1],[2,-2,3],[0,2,1]];
+            setTriangle(0,angled);trace.count.value=1;
+            const faceReflection=reflectionPixel();
+            tracedMetal.uniforms.mirrorReflections.value=0;
+            const disabledReflection=reflectionPixel();
+            tracedMetal.uniforms.mirrorReflections.value=1;
+            setTriangle(0,[angled[2],angled[1],angled[0]]);
+            const reverseReflection=reflectionPixel();
+            setTriangle(1,[[-4,-4,2],[4,-4,2],[0,4,2]]);trace.count.value=2;
+            const nearestReflection=reflectionPixel();
+            trace.count.value=1;
+            setTriangle(0,[[-2,-2,0],[2,-2,0],[0,2,0]]);
+            const selfReflection=reflectionPixel();
+            setTriangle(0,[[100,0,1],[101,0,1],[100,1,1]]);
+            const missedReflection=reflectionPixel();
+            // Informational microbenchmark on an actual rotated tesseract.
+            // Readback awaits GPU completion; no universal FPS assertion.
+            const topology=new Function(`${topologyHelpers};return polytopeTopology('tesseract');`)();
+            const project=new Function(`${topologyHelpers};${rotationHelpers};return point=>project4Dto3D(rotate4D(point,0.7,1.2,0.9));`)();
+            const projected=topology.vertices.map(project),positions=[];
+            let triangle=0;
+            for(const face of topology.faces)for(let k=1;k<face.length-1;k++){
+                const points=[face[0],face[k],face[k+1]].map(index=>projected[index]);
+                const coords=points.map(p=>[p.x,p.y,p.z]);
+                setTriangle(triangle++,coords);positions.push(...coords.flat());
+            }
+            trace.count.value=triangle;
+            mesh.geometry.dispose();mesh.geometry=new THREE.BufferGeometry();
+            mesh.geometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array(positions),3));
+            mesh.geometry.setAttribute('surface',new THREE.BufferAttribute(new Float32Array(positions.length).fill(0.5),3));
+            mesh.geometry.setAttribute('mirrorFace',new THREE.BufferAttribute(Float32Array.from({length:positions.length/3},(_,i)=>Math.floor(i/6)),1));
+            mesh.geometry.computeVertexNormals();
+            renderer.setSize(640,360);
+            const gl=renderer.getContext();
+            const completedPixel=new Uint8Array(4);
+            const completedRender=()=>{renderer.render(scene,camera);gl.readPixels(16,16,1,1,gl.RGBA,gl.UNSIGNED_BYTE,completedPixel);};
+            const benchmark=(enabled,material=tracedMetal)=>{
+                mesh.material=material;
+                material.uniforms.mirrorReflections.value=enabled;
+                completedRender();
+                const samples=[];
+                for(let i=0;i<6;i++){
+                    const start=performance.now();completedRender();samples.push(performance.now()-start);
+                }
+                samples.sort((a,b)=>a-b);return samples[3];
+            };
+            const programs=renderer.info.programs.length;
+            const reflectionOffMs=benchmark(0),reflectionOnMs=benchmark(1);
+            const reflectionRecompiled=renderer.info.programs.length!==programs;
             renderer.dispose();
-            return { selfShadowErrors, grainDifference, dirtyDifference, cleanEnergy, dirtyEnergy, sharpContrast, filteredContrast, displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
-        }, { shaders, utilities: context.shaderUtilities(), helpers, textureHelper });
+            return { reflectionOffMs, reflectionOnMs, reflectionRecompiled, emptyReflection, faceReflection, disabledReflection, reverseReflection, nearestReflection, selfReflection, missedReflection, selfShadowErrors, grainDifference, dirtyDifference, cleanEnergy, dirtyEnergy, sharpContrast, filteredContrast, displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
+        }, { shaders, utilities: context.shaderUtilities(), helpers, textureHelper, topologyHelpers, rotationHelpers });
         assert.deepEqual(errors, [], 'all viewer shaders compile without WebGL errors');
+        assert.equal(result.reflectionRecompiled,false,'toggling reflections does not recompile shaders');
+        console.log(`Reflection microbenchmark (640×360, rotated tesseract, this test GPU): off ${result.reflectionOffMs.toFixed(1)} ms, on ${result.reflectionOnMs.toFixed(1)} ms`);
+        assert(result.emptyReflection[2]>result.emptyReflection[0]+40,'unobstructed mirror reflects blue environment');
+        assert(result.faceReflection[0]>result.faceReflection[2]+40,'secondary mirror redirects the reflection to the red environment');
+        for(const key of ['disabledReflection','selfReflection','missedReflection'])assert.deepEqual(result[key],result.emptyReflection,`${key} preserves the original reflection`);
+        assert.deepEqual(result.reverseReflection,result.faceReflection,'secondary sheets reflect on either side');
+        assert.deepEqual(result.nearestReflection,result.faceReflection,'only the nearest secondary face is used');
         for (const sample of result.selfShadowErrors) assert(sample.error <= 32, `a lone sheet cannot shadow itself: side=${sample.side}, light height=${sample.height}, error=${sample.error}`);
         assert(result.grainDifference > 32*32*2,'grain has a visible pixel-level effect, not just sub-threshold roughness');
         assert(result.dirtyDifference > 32*32*0.1,'dirt remains visible');
@@ -265,7 +348,7 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
         close('orbited', 0.92); // rotating the camera does not move lights
         close('diagonal', 0.92); close('quad', 0.245); // radius and total intensity
         close('front', 0.9); close('back', 0.9); // symmetric two-sided illumination
-        console.log('PASS: shader compilation, sRGB round-trip, lighting laws, polished detail, grain/dirt, real shadows without planar self-shadow bands');
+        console.log('PASS: shader compilation, sRGB round-trip, lighting laws, polished detail, grain/dirt, real shadows without planar self-shadow bands, bounded face reflections');
     } finally {
         await browser.close();
     }

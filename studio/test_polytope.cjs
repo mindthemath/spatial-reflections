@@ -35,15 +35,34 @@ console.log('PASS: tesseract and all-triangular rectified 5-cell topology.');
   const faces = topology.faces.map(indices => {
    const geometry = new THREE.BufferGeometry();
    geometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array((indices.length-2)*9),3));
+   geometry.setAttribute('surface',new THREE.BufferAttribute(new Float32Array((indices.length-2)*9).fill(0.5),3));
    return {geometry,userData:{vertices:indices}};
   });
   const shadowGeometry = new THREE.BufferGeometry();
   shadowGeometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array(faces.reduce((n,face)=>n+face.geometry.getAttribute('position').array.length,0)),3));
-  const projection = vm.createContext({time:0,rotationCoefficients:{xw:0,yw:0,zw:0},vertices,faces,edges:[],tesseract:{userData:{shadowMesh:{geometry:shadowGeometry}}},
+  const traceSource = source.slice(source.indexOf('function createMirrorTraceState('),source.indexOf('function mirrorTraceShader('));
+  const mirrorTraceState = new Function('THREE',`${traceSource};return createMirrorTraceState();`)(THREE);
+  const projection = vm.createContext({time:0,currentShape:shape,rotationCoefficients:{xw:0,yw:0,zw:0},vertices,faces,edges:[],mirrorTraceState,tesseract:{userData:{shadowMesh:{geometry:shadowGeometry}}},
    rotate4D:point=>point, project4Dto3D:point=>({x:point.x/2,y:point.y/2,z:point.z/2})});
   vm.runInContext(source.slice(source.indexOf('function updateTesseractProjection('),source.indexOf('// 4D rotation functions')),projection);
   const buffers = faces.map(face=>face.geometry.getAttribute('position'));
   for (let frame=0;frame<100;frame++) vm.runInContext('updateTesseractProjection()',projection);
+  assert.equal(mirrorTraceState.count.value,shape==='tesseract'?48:30);
+  assert.equal(mirrorTraceState.texture.version,2,'unchanged frames reuse the packed triangle texture');
+  let triangle=0;
+  for(const face of faces){
+   const positions=face.geometry.getAttribute('position').array,surfaces=face.geometry.getAttribute('surface').array;
+   for(let offset=0;offset<positions.length;offset+=9){
+    for(let corner=0;corner<3;corner++){
+     assert.deepEqual(Array.from(mirrorTraceState.data.slice((triangle*6+corner)*4,(triangle*6+corner)*4+3)),Array.from(positions.slice(offset+corner*3,offset+corner*3+3)));
+     assert.deepEqual(Array.from(mirrorTraceState.data.slice((triangle*6+corner+3)*4,(triangle*6+corner+3)*4+3)),Array.from(surfaces.slice(offset+corner*3,offset+corner*3+3)));
+    }
+    triangle++;
+   }
+  }
+  projection.time=1;
+  vm.runInContext('updateTesseractProjection()',projection);
+  assert.equal(mirrorTraceState.texture.version,3,'new animation frames update the same texture');
   assert.deepEqual(Array.from(shadowGeometry.getAttribute('position').array),Array.from(faces).flatMap(face=>Array.from(face.geometry.getAttribute('position').array)),'merged shadow caster matches the visible faces');
   faces.forEach((face,i)=>{
    assert.equal(face.geometry.getAttribute('position'),buffers[i],'animation reuses position buffers');

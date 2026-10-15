@@ -133,9 +133,14 @@ finally:
   const viewer=await page.context().newPage();viewer.on('pageerror',e=>errors.push(e.message));await viewer.goto(await page.locator('#view-export').getAttribute('href'));
   await viewer.waitForFunction(()=>document.querySelector('#skybox-status')?.textContent.includes('512 × 512px'));
   assert.equal(await viewer.locator('#active-skybox').innerText(),'untitled');assert.equal(await viewer.locator('#viewer-shader').inputValue(),'chrome');
+  assert(!(await viewer.locator('#viewer-mirror-reflections').isChecked()),'experimental reflections start off');
+  await viewer.evaluate(()=>viewer.setState({mirrorReflections:true}));
+  assert(await viewer.locator('#viewer-mirror-reflections').isChecked());
   await viewer.locator('#viewer-shape').selectOption('rectified-5-cell');
   assert.equal(await viewer.evaluate(()=>JSON.parse(localStorage.getItem('tesseract.viewer-settings.v1')).shape),'rectified-5-cell');
   await viewer.reload();await viewer.waitForSelector('#viewer-shape');assert.equal(await viewer.locator('#viewer-shape').inputValue(),'rectified-5-cell');
+  assert(await viewer.locator('#viewer-mirror-reflections').isChecked(),'reflection setting survives reload');
+  await viewer.evaluate(()=>viewer.setState({mirrorReflections:false}));
   await viewer.screenshot({path:path.join(os.tmpdir(),'rectified-5-cell.png')});
   await viewer.locator('#viewer-shape').selectOption('tesseract');
   const dragOverlay=await viewer.evaluate(()=>{
