@@ -98,6 +98,27 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             point.intensity = 4 * Math.PI;
             renderer.render(scene, camera);
             const litMetal = pixel();
+            const framePixels = () => {
+                renderer.render(scene,camera);
+                const values=new Uint8Array(32*32*4),gl=renderer.getContext();
+                gl.readPixels(0,0,32,32,gl.RGBA,gl.UNSIGNED_BYTE,values);
+                return values;
+            };
+            point.intensity=0;
+            const cleanFrame=framePixels();
+            metal.uniforms.surfaceGrain.value=1;
+            const grainFrame=framePixels();
+            metal.uniforms.surfaceGrain.value=0;
+            metal.uniforms.dirtyMirrors.value=1;
+            const dirtyFrame=framePixels();
+            let grainDifference=0,dirtyDifference=0,cleanEnergy=0,dirtyEnergy=0;
+            for(let i=0;i<cleanFrame.length;i+=4){
+                grainDifference+=Math.abs(grainFrame[i]-cleanFrame[i]);
+                dirtyDifference+=Math.abs(dirtyFrame[i]-cleanFrame[i]);
+                cleanEnergy+=cleanFrame[i];dirtyEnergy+=dirtyFrame[i];
+            }
+            metal.uniforms.dirtyMirrors.value=0;
+            point.intensity=4*Math.PI;
             // A blocker outside the center camera ray must still block the light.
             renderer.shadowMap.enabled = true;
             renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -118,6 +139,21 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             renderer.render(scene, camera);
             const blockedLight = pixel()[0];
             scene.remove(blocker);
+            const selfShadowErrors=[];
+            point.shadow.normalBias=0;
+            for(const side of [1,-1])for(const height of [0.02,0.1,0.5,2]) {
+                camera.position.z=side*2; camera.lookAt(0,0,0);
+                point.position.set(2,0,side*height);
+                mesh.castShadow=false;
+                const reference=framePixels();
+                mesh.castShadow=true;
+                const shadowed=framePixels();
+                let error=0;
+                for(let i=0;i<reference.length;i+=4)error+=Math.abs(reference[i]-shadowed[i]);
+                selfShadowErrors.push({side,height,error});
+            }
+            mesh.castShadow=false;
+            camera.position.z=2; camera.lookAt(0,0,0);
             scene.remove(point);
             for (const shader of shaders) {
                 if (shader.uniforms.envMap) shader.uniforms.envMap.value = cube;
@@ -207,9 +243,13 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
             };
             const sharpContrast=contrast(sharpMetal),filteredContrast=contrast(filteredMetal);
             renderer.dispose();
-            return { sharpContrast, filteredContrast, displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
+            return { selfShadowErrors, grainDifference, dirtyDifference, cleanEnergy, dirtyEnergy, sharpContrast, filteredContrast, displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
         }, { shaders, utilities: context.shaderUtilities(), helpers, textureHelper });
         assert.deepEqual(errors, [], 'all viewer shaders compile without WebGL errors');
+        for (const sample of result.selfShadowErrors) assert(sample.error <= 32, `a lone sheet cannot shadow itself: side=${sample.side}, light height=${sample.height}, error=${sample.error}`);
+        assert(result.grainDifference > 32*32*2,'grain has a visible pixel-level effect, not just sub-threshold roughness');
+        assert(result.dirtyDifference > 32*32*0.1,'dirt remains visible');
+        assert(result.dirtyEnergy > result.cleanEnergy*0.5,'dirt retains most reflected light instead of making the surface matte');
         assert(result.sharpContrast > result.filteredContrast * 1.2, `polished reflections retain detail: ${result.sharpContrast} > ${result.filteredContrast}`);
         assert.equal(result.displaySide,16,'tiny source images are safely resized for physical environment filtering');
         for (const channel of result.roundTrip.slice(0, 3)) assert(Math.abs(channel - 128) <= 1, 'sRGB texture → linear → sRGB preserves middle gray');
@@ -225,7 +265,7 @@ const shaders = ['rough', 'iridescent'].map(type => context.createShaderMaterial
         close('orbited', 0.92); // rotating the camera does not move lights
         close('diagonal', 0.92); close('quad', 0.245); // radius and total intensity
         close('front', 0.9); close('back', 0.9); // symmetric two-sided illumination
-        console.log('PASS: shader compilation, sRGB round-trip, inverse-square/cosine laws, world-fixed lights, two-sided normals');
+        console.log('PASS: shader compilation, sRGB round-trip, lighting laws, polished detail, grain/dirt, real shadows without planar self-shadow bands');
     } finally {
         await browser.close();
     }

@@ -289,7 +289,7 @@ function init() {
         light.shadow.camera.near = 0.01;
         light.shadow.camera.far = 40;
         light.shadow.bias = -0.00005;
-        light.shadow.normalBias = 0.001;
+        light.shadow.normalBias = 0; // Receiver-plane correction handles either side without a normal offset.
         physicalLights.push(light);
         scene.add(light);
     }
@@ -3442,6 +3442,60 @@ function chromeSurfaceShader() {
     `;
 }
 
+// Sample shadow-map texel centers, comparing against the receiving plane at
+// each center. A single depth comparison at the fragment's position otherwise
+// makes a sloping face shadow itself in bands (especially with coarse maps).
+function receiverPlaneShadowShader() {
+    return `
+    #if defined(USE_SHADOWMAP) && NUM_POINT_LIGHT_SHADOWS > 0 && defined(SHADOWMAP_TYPE_PCF)
+        vec3 shadowTexelDirection(vec3 d, float size) {
+            vec3 a = abs(d);
+            vec2 uv;
+            if (a.x >= a.y && a.x >= a.z) uv = vec2(d.x > 0.0 ? -d.z : d.z, -d.y) / a.x;
+            else if (a.y >= a.z) uv = vec2(d.x, d.y > 0.0 ? d.z : -d.z) / a.y;
+            else uv = vec2(d.z > 0.0 ? d.x : -d.x, -d.y) / a.z;
+            uv = (floor(clamp(uv * 0.5 + 0.5, 0.0, 0.999999) * size) + 0.5) / size * 2.0 - 1.0;
+            if (a.x >= a.y && a.x >= a.z) return vec3(sign(d.x), -uv.y, d.x > 0.0 ? -uv.x : uv.x);
+            if (a.y >= a.z) return vec3(uv.x, sign(d.y), d.y > 0.0 ? uv.y : -uv.y);
+            return vec3(d.z > 0.0 ? uv.x : -uv.x, -uv.y, sign(d.z));
+        }
+        float viewerPointShadow(samplerCubeShadow map, vec2 size, float intensity, float bias,
+                float radius, vec4 coord, float nearPlane, float farPlane, vec3 worldNormal) {
+            vec3 p = coord.xyz;
+            float z = max(max(abs(p.x), abs(p.y)), abs(p.z));
+            if (z < nearPlane || z > farPlane) return 1.0;
+            vec3 direction = normalize(p);
+            vec3 tangent = normalize(cross(direction, abs(direction.x) > abs(direction.z) ? vec3(0.0,1.0,0.0) : vec3(1.0,0.0,0.0)));
+            vec3 bitangent = cross(direction,tangent);
+            float angle = viewerDitherNoise(gl_FragCoord.xy) * 6.28318530718;
+            float planeDistance = dot(worldNormal,p);
+            float visibility = 0.0;
+            for (int i = 0; i < 5; i++) {
+                vec2 offset = vogelDiskSample(i,5,angle) * radius / size.x;
+                vec3 ray = shadowTexelDirection(direction + tangent * offset.x + bitangent * offset.y, size.x);
+                float denominator = dot(worldNormal,ray);
+                // A neighboring ray beyond the plane's horizon cannot occlude this point.
+                if (abs(denominator) < 0.000001 || planeDistance * denominator <= 0.0) {
+                    visibility += 1.0;
+                    continue;
+                }
+                float depth = planeDistance / denominator;
+                if (depth < nearPlane || depth > farPlane) { visibility += 1.0; continue; }
+                float reference = farPlane * (depth - nearPlane) / (depth * (farPlane - nearPlane));
+                #ifdef USE_REVERSED_DEPTH_BUFFER
+                    reference = 1.0 - reference;
+                    reference -= bias;
+                #else
+                    reference += bias;
+                #endif
+                visibility += texture(map,vec4(ray,reference));
+            }
+            return mix(1.0,visibility * 0.2,intensity);
+        }
+    #endif
+    `;
+}
+
 function createPhysicalChromeMaterial(uniforms) {
     const material = new THREE.MeshStandardMaterial({
         // Approximate chromium normal-incidence reflectance, in linear RGB.
@@ -3457,11 +3511,12 @@ function createPhysicalChromeMaterial(uniforms) {
     material.onBeforeCompile = shader => {
         for (const name of ['surfaceGrain', 'dirtyMirrors', 'faceSides']) shader.uniforms[name] = uniforms[name];
         shader.uniforms.mirrorEnvironment = uniforms.envMap;
-        shader.vertexShader = 'attribute vec3 surface; varying vec3 vSurface;\n' + shader.vertexShader;
-        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = surface;');
+        shader.vertexShader = 'attribute vec3 surface; varying vec3 vSurface; varying vec3 vGrainPosition;\n' + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = surface; vGrainPosition = position;');
         shader.fragmentShader = `uniform samplerCube mirrorEnvironment;
             uniform float surfaceGrain; uniform float dirtyMirrors; uniform float faceSides;
             varying vec3 vSurface;
+            varying vec3 vGrainPosition;
             ${shaderUtilities()}
             ${chromeSurfaceShader()}
         ` + shader.fragmentShader;
@@ -3481,21 +3536,30 @@ function createPhysicalChromeMaterial(uniforms) {
             }`
         );
         shader.fragmentShader = shader.fragmentShader.replace('#include <envmap_physical_pars_fragment>', environmentShader);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <shadowmap_pars_fragment>', '#include <shadowmap_pars_fragment>\n' + receiverPlaneShadowShader());
+        const shadowLighting = THREE.ShaderChunk.lights_fragment_begin
+            .replace('getPointShadow( pointShadowMap[ i ],', 'viewerPointShadow( pointShadowMap[ i ],')
+            .replace('pointLightShadow.shadowCameraFar )', 'pointLightShadow.shadowCameraFar, transformDirectionByInverseViewMatrix(geometryNormal,viewMatrix) )');
+        shader.fragmentShader = shader.fragmentShader.replace('#include <lights_fragment_begin>', shadowLighting);
         shader.fragmentShader = shader.fragmentShader.replace('#include <roughnessmap_fragment>', `
             #include <roughnessmap_fragment>
             float coverage = 0.0;
-            if (dirtyMirrors > 0.5) coverage = mirrorDirt(vSurface);
-            // Uniform branches skip disabled effects across the entire draw.
-            float grain = 0.0;
-            if (surfaceGrain > 0.5) grain = 0.005 * valueNoise(vSurface.xy * 120.0 + vSurface.z);
-            // A spatial mixture of polished metal and rough, nonmetallic dust.
-            roughnessFactor = mix(roughnessFactor + grain, 0.85, coverage);
-            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.16, 0.13, 0.09), coverage);
+            if (dirtyMirrors > 0.5) coverage = 0.45 * mirrorDirt(vSurface);
+            // Thin deposits tint/attenuate the reflection without replacing the
+            // mirror with matte dust. Grain is a separate artistic image effect.
+            roughnessFactor = mix(roughnessFactor, 0.12, coverage);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.22, 0.19, 0.14), coverage);
         `);
-        shader.fragmentShader = shader.fragmentShader.replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor *= 1.0 - coverage;');
+        shader.fragmentShader = shader.fragmentShader.replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor *= 1.0 - 0.2 * coverage;');
+        // Restore the original deterministic, face-position grain. Both the
+        // visible render and forced-on music analysis use this exact treatment.
+        shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', `
+            #include <opaque_fragment>
+            if (surfaceGrain > 0.5) gl_FragColor.rgb = max(vec3(0.0), gl_FragColor.rgb - vec3(random(vGrainPosition.xy * 20.0) * 0.05));
+        `);
         shader.fragmentShader = shader.fragmentShader.replace('#include <dithering_fragment>', 'gl_FragColor.rgb = outputDither(gl_FragColor.rgb);');
     };
-    material.customProgramCacheKey = () => 'physical-chrome-v2';
+    material.customProgramCacheKey = () => 'physical-chrome-v4';
     return material;
 }
 
