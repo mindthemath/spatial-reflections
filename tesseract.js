@@ -3665,16 +3665,22 @@ function updateTesseractProjection() {
         const face = faces[i];
         const faceVertices = face.userData.vertices;
         
-        // Update the face geometry
-        const geometry = new THREE.BufferGeometry();
-        const vertexArray = facePositionArray(faceVertices);
-        
-        geometry.setAttribute('position', new THREE.BufferAttribute(vertexArray, 3));
-        geometry.setAttribute('surface', new THREE.BufferAttribute(face.userData.surface, 3));
+        // Topology is fixed during animation. Reuse GPU buffers rather than
+        // disposing/reallocating every face on every displayed/exported frame.
+        const geometry = face.geometry;
+        const position = geometry.getAttribute('position');
+        let offset = 0;
+        for (let triangle = 1; triangle < faceVertices.length - 1; triangle++) {
+            for (const index of [faceVertices[0], faceVertices[triangle], faceVertices[triangle + 1]]) {
+                const point = vertices[index].position;
+                position.array[offset++] = point.x;
+                position.array[offset++] = point.y;
+                position.array[offset++] = point.z;
+            }
+        }
+        position.needsUpdate = true;
         geometry.computeVertexNormals();
-        
-        if (face.geometry) face.geometry.dispose();
-        face.geometry = geometry;
+        geometry.computeBoundingSphere();
     }
 }
 

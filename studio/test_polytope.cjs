@@ -26,3 +26,30 @@ vm.runInContext(source.slice(source.indexOf('function facePositionArray('),sourc
 assert.equal(vm.runInContext('facePositionArray([0,1,2]).length',context),9);
 assert.equal(vm.runInContext('facePositionArray([0,1,2,3]).length',context),18);
 console.log('PASS: tesseract and all-triangular rectified 5-cell topology.');
+
+(async () => {
+ const THREE = await import('three');
+ for (const shape of ['tesseract','rectified-5-cell']) {
+  const topology = vm.runInContext(`polytopeTopology('${shape}')`,context);
+  const vertices = topology.vertices.map(point => ({position:new THREE.Vector3(), userData:{vertex4D:point}}));
+  const faces = topology.faces.map(indices => {
+   const geometry = new THREE.BufferGeometry();
+   geometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array((indices.length-2)*9),3));
+   return {geometry,userData:{vertices:indices}};
+  });
+  const projection = vm.createContext({time:0,rotationCoefficients:{xw:0,yw:0,zw:0},vertices,faces,edges:[],
+   rotate4D:point=>point, project4Dto3D:point=>({x:point.x/2,y:point.y/2,z:point.z/2})});
+  vm.runInContext(source.slice(source.indexOf('function updateTesseractProjection('),source.indexOf('// 4D rotation functions')),projection);
+  const buffers = faces.map(face=>face.geometry.getAttribute('position'));
+  for (let frame=0;frame<100;frame++) vm.runInContext('updateTesseractProjection()',projection);
+  faces.forEach((face,i)=>{
+   assert.equal(face.geometry.getAttribute('position'),buffers[i],'animation reuses position buffers');
+   const expected=[];
+   const indices=face.userData.vertices;
+   for(let k=1;k<indices.length-1;k++)for(const index of [indices[0],indices[k],indices[k+1]])expected.push(...vertices[index].position.toArray());
+   assert.deepEqual(Array.from(buffers[i].array),Array.from(new Float32Array(expected)));
+   assert(face.geometry.boundingSphere.radius>0);
+  });
+ }
+ console.log('PASS: animation reuses face buffers, with correct triangles and current bounds.');
+})().catch(error=>{console.error(error);process.exitCode=1;});
