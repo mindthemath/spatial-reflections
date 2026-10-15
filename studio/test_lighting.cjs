@@ -29,6 +29,7 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
             const THREE = await import('/vendor/three.module.js');
             const renderer = new THREE.WebGLRenderer();
             renderer.setSize(32, 32);
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
             const scene = new THREE.Scene();
             const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 100);
             camera.position.z = 2;
@@ -46,6 +47,7 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
                 return Array.from(data);
             };
             mesh.material = new THREE.ShaderMaterial({
+                toneMapped: false,
                 uniforms: { envMap: { value: cube } },
                 vertexShader: 'void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
                 fragmentShader: 'uniform samplerCube envMap; void main(){gl_FragColor=textureCube(envMap,vec3(1.0,0.0,0.0));\n#include <colorspace_fragment>\n}'
@@ -57,6 +59,17 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
                 mesh.material = new THREE.ShaderMaterial(shader);
                 renderer.render(scene, camera);
             }
+            const hdrUniforms = { radiance: { value: 1 } };
+            mesh.material = new THREE.ShaderMaterial({
+                uniforms: hdrUniforms,
+                vertexShader: 'void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+                fragmentShader: 'uniform float radiance; void main(){gl_FragColor=vec4(vec3(radiance),1.0);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'
+            });
+            const highlights = [1, 2, 4].map(value => {
+                hdrUniforms.radiance.value = value;
+                renderer.render(scene, camera);
+                return pixel()[0];
+            });
             // Read linear shader values directly, bypassing display encoding.
             const uniforms = {
                 worldNormal: { value: new THREE.Vector3(0, 1, 0) },
@@ -65,7 +78,7 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
                 winding: { value: 1 }, backFaceTest: { value: false }
             };
             mesh.material = new THREE.ShaderMaterial({
-                side: THREE.DoubleSide, uniforms,
+                side: THREE.DoubleSide, toneMapped: false, uniforms,
                 vertexShader: 'uniform float winding; void main(){gl_Position=vec4(position.x*winding,position.y,0.0,1.0);}',
                 fragmentShader: `uniform vec3 worldNormal; uniform vec3 worldPosition;
                     uniform float radius; uniform int preset; uniform bool backFaceTest;
@@ -105,10 +118,11 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
             uniforms.worldNormal.value.set(0, 0, -2);
             const back = measure();
             renderer.dispose();
-            return { roundTrip, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
+            return { roundTrip, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
         }, { shaders, utilities: context.shaderUtilities() });
         assert.deepEqual(errors, [], 'all viewer shaders compile without WebGL errors');
         for (const channel of result.roundTrip.slice(0, 3)) assert(Math.abs(channel - 128) <= 1, 'sRGB texture → linear → sRGB preserves middle gray');
+        assert(result.highlights[0] < result.highlights[1] && result.highlights[1] < result.highlights[2] && result.highlights[2] < 255, 'HDR highlights retain distinct levels instead of clipping to white');
         const close = (key, expected) => assert(Math.abs(result[key] - expected) <= 1.5 / 255, `${key}: ${result[key]} ≈ ${expected}`);
         close('near', 0.92); close('far', 0.245); // direct contribution falls by four
         close('oblique', 0.47); close('unlit', 0.02); // cosine law, no negative light

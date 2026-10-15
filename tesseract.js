@@ -263,6 +263,9 @@ function init() {
     
     // Create renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
+    // Compress HDR highlights before sRGB encoding instead of clipping them flat.
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1;
     renderer.setSize(window.innerWidth, window.innerHeight);
     document.body.appendChild(renderer.domElement);
     
