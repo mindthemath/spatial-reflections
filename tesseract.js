@@ -3308,7 +3308,10 @@ function createRoughShader() {
             lighting *= (1.0 - noise);
             
             // Black and white shader
-            gl_FragColor = vec4(outputDither(lighting), 1.0);
+            gl_FragColor = vec4(lighting, 1.0);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+            gl_FragColor.rgb = outputDither(gl_FragColor.rgb);
         }
     `;
 }
@@ -3348,7 +3351,10 @@ function createIridescentShader() {
             vec3 baseColor = mix(reflectionColor, iridescence, 0.7);
             vec3 final = baseColor * lighting;
             
-            gl_FragColor = vec4(outputDither(final), 1.0);
+            gl_FragColor = vec4(final, 1.0);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+            gl_FragColor.rgb = outputDither(gl_FragColor.rgb);
         }
     `;
 }
@@ -3475,7 +3481,10 @@ function createChromeShader() {
             vec3 final = chromeColor * (lighting * 0.7 + 0.3) - noisePattern;
             if (dirtyMirrors > 0.5) final = dirtyMirror(final, vSurface);
             
-            gl_FragColor = vec4(outputDither(final), 1.0);
+            gl_FragColor = vec4(final, 1.0);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+            gl_FragColor.rgb = outputDither(gl_FragColor.rgb);
         }
     `;
 }

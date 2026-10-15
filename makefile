@@ -120,6 +120,7 @@ test-agent-api:
 	$(TEST_GUARD) --network --timeout 180 -- node studio/test_agent_api.cjs
 
 _test-browser:
+	node studio/test_lighting.cjs
 	$(MAKE) test-video-capture
 	node studio/test_browser.cjs
 	$(MAKE) test-agent-api

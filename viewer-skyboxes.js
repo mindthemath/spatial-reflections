@@ -12,7 +12,7 @@ function diagnosticTexture() {
         const ctx=image.getContext('2d'),gradient=ctx.createLinearGradient(0,0,16,16);
         gradient.addColorStop(0,color);gradient.addColorStop(1,'#000');ctx.fillStyle=gradient;ctx.fillRect(0,0,16,16);return image;
     });
-    const texture=new THREE.CubeTexture(images);texture.needsUpdate=true;return texture;
+    const texture=new THREE.CubeTexture(images);texture.colorSpace=THREE.SRGBColorSpace;texture.needsUpdate=true;return texture;
 }
 async function loadImageAsset(url,{requireHash=true}={}) {
     // Published static works may run on plain HTTP (e.g. signage players).
@@ -44,6 +44,7 @@ function textureFromImages(images,renderer,expectedSize=null) {
         const ctx=canvas.getContext('2d');if(!ctx)throw new Error('Could not allocate preview textures');ctx.drawImage(image,0,0,displaySide,displaySide);return canvas;
     }));
     if(!renderer.capabilities.isWebGL2&&!THREE.MathUtils.isPowerOfTwo(displaySide)){texture.generateMipmaps=false;texture.minFilter=THREE.LinearFilter;}
+    texture.colorSpace=THREE.SRGBColorSpace;
     texture.needsUpdate=true;
     return {texture,side,displaySide};
 }
