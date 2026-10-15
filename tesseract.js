@@ -243,6 +243,13 @@ let dropZoneVisible = false;
 let envMap;
 let skyboxLibrary;
 
+// Bound both ends of the view, including restored and programmatic camera changes.
+function clampCameraCoordinates() {
+    camera.position.clampScalar(-3, 3);
+    controls.target.clampScalar(-3, 3);
+    camera.lookAt(controls.target);
+}
+
 // Initialize the scene
 function init() {
     console.log("Initializing...");
@@ -264,6 +271,8 @@ function init() {
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
     controls.target.set(savedCameraTarget.x, savedCameraTarget.y, savedCameraTarget.z);
+    controls.addEventListener('change', clampCameraCoordinates);
+    clampCameraCoordinates();
     controls.addEventListener('end', persistViewerSettings);
     
     // Create the tesseract
