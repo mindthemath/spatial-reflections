@@ -3220,66 +3220,38 @@ function shaderUtilities() {
             return pow(1.0 - clamp(dot(viewDirection, normal), 0.0, 1.0), power);
         }
         
-        // Light contribution calculation
-        vec3 calculateLighting(vec3 normal, vec3 viewDir, float lightDist, int lightingType) {
-            vec3 lightDir;
-            float diffuse = 0.0;
-            float specular = 0.0;
-            float ambient = 0.1; // Base ambient light
-            
-            // Apply distance attenuation (inverse square law simplified)
-            float distanceAttenuation = 1.0 / (1.0 + 0.1 * lightDist * lightDist);
-            
-            // Diagonal light (original)
-            if (lightingType == 0) {
-                // For diagonal light, apply the distance to the light position
-                vec3 lightPos = vec3(lightDist, lightDist, lightDist);
-                lightDir = normalize(lightPos);
-                
-                diffuse = max(0.0, dot(normal, lightDir));
-                vec3 halfwayDir = normalize(lightDir + viewDir);
-                specular = pow(max(0.0, dot(normal, halfwayDir)), 32.0);
-                
-                return vec3(ambient + (diffuse * 0.99 + specular * 0.01) * distanceAttenuation);
+        // An opaque sheet has two independently lit sides. Orient the normal
+        // toward the visible side, not toward a particular light.
+        vec3 visibleNormal(vec3 interpolatedNormal) {
+            return normalize(interpolatedNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+        }
+
+        // Lambertian reflection: rho / pi * I / r^2 * cos(theta).
+        // Intensity is in scene-relative units; total I = 4*pi, rho = 0.9.
+        // The epsilon only regularizes the point-source singularity.
+        float pointIllumination(vec3 worldNormal, vec3 worldPosition, vec3 lightPosition, float share) {
+            vec3 delta = lightPosition - worldPosition;
+            float distanceSquared = max(dot(delta, delta), 0.000001);
+            vec3 lightDirection = delta * inversesqrt(distanceSquared);
+            float cosine = max(dot(worldNormal, lightDirection), 0.0);
+            return 0.9 * 4.0 * share * cosine / distanceSquared;
+        }
+
+        vec3 calculateLighting(vec3 normal, vec3 worldPosition, float lightDist, int lightingType) {
+            // normalMatrix supplies view-space normals; undo the camera rotation.
+            vec3 worldNormal = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
+            // Approximate uniform indirect illumination, not computed light bounce.
+            float illumination = 0.02;
+            if (lightingType == 2) {
+                illumination += pointIllumination(worldNormal, worldPosition, vec3(lightDist, 0.0, 0.0), 0.25);
+                illumination += pointIllumination(worldNormal, worldPosition, vec3(-lightDist, 0.0, 0.0), 0.25);
+                illumination += pointIllumination(worldNormal, worldPosition, vec3(0.0, 0.0, lightDist), 0.25);
+                illumination += pointIllumination(worldNormal, worldPosition, vec3(0.0, 0.0, -lightDist), 0.25);
+            } else {
+                vec3 direction = lightingType == 1 ? vec3(0.0, 1.0, 0.0) : normalize(vec3(1.0));
+                illumination += pointIllumination(worldNormal, worldPosition, direction * lightDist, 1.0);
             }
-            
-            // Top-down light
-            else if (lightingType == 1) {
-                // Position the light directly above at the specified distance
-                vec3 lightPos = vec3(0.0, lightDist, 0.0);
-                lightDir = normalize(lightPos);
-                
-                diffuse = max(0.0, dot(normal, lightDir));
-                vec3 halfwayDir = normalize(lightDir + viewDir);
-                specular = pow(max(0.0, dot(normal, halfwayDir)), 32.0);
-                
-                return vec3(ambient + (diffuse * 0.75 + specular * 0.35) * distanceAttenuation);
-            }
-            
-            // Quad lights from unit dimensions
-            else if (lightingType == 2) {
-                vec3 lightPositions[4];
-                lightPositions[0] = vec3(lightDist, 0.0, 0.0);
-                lightPositions[1] = vec3(0.0, 0.0, lightDist);
-                lightPositions[2] = vec3(-lightDist, 0.0, 0.0);
-                lightPositions[3] = vec3(0.0, 0.0, -lightDist);
-                
-                vec3 totalLight = vec3(ambient);
-                
-                for (int i = 0; i < 4; i++) {
-                    vec3 lightDir = normalize(lightPositions[i]);
-                    float diff = max(0.0, dot(normal, lightDir)) * 0.25; // Divide by number of lights
-                    vec3 halfwayDir = normalize(lightDir + viewDir);
-                    float spec = pow(max(0.0, dot(normal, halfwayDir)), 32.0) * 0.25;
-                    
-                    totalLight += vec3(diff * 0.75 + spec * 0.35) * distanceAttenuation;
-                }
-                
-                return totalLight;
-            }
-            
-            // Fallback
-            return vec3(1.0);
+            return vec3(illumination);
         }
     `;
 }
@@ -3292,16 +3264,15 @@ function createRoughShader() {
         varying vec3 vNormal;
         varying vec3 vPosition;
         varying vec3 vViewPosition;
+        varying vec3 vWorldPosition;
         
         ${shaderUtilities()}
         
         void main() {
-            // Normalized vectors
-            vec3 normal = normalize(vNormal);
-            vec3 viewDir = normalize(vViewPosition);
+            vec3 normal = visibleNormal(vNormal);
             
-            // Calculate lighting using common function
-            vec3 lighting = calculateLighting(normal, viewDir, lightDistance, lightingType);
+            // Lighting is evaluated at the actual world-space surface point.
+            vec3 lighting = calculateLighting(normal, vWorldPosition, lightDistance, lightingType);
             
             // Add rough texture
             float noise = random(vPosition.xy * 10.0) * 0.15;
@@ -3324,17 +3295,17 @@ function createIridescentShader() {
         varying vec3 vNormal;
         varying vec3 vPosition;
         varying vec3 vViewPosition;
+        varying vec3 vWorldPosition;
         
         ${shaderUtilities()}
         
         void main() {
-            // Normalized vectors
-            vec3 normal = normalize(vNormal);
+            vec3 normal = visibleNormal(vNormal);
             vec3 viewDir = normalize(vViewPosition);
             vec3 reflection = reflect(-viewDir, normal);
             
             // Calculate base lighting
-            vec3 lighting = calculateLighting(normal, viewDir, lightDistance, lightingType);
+            vec3 lighting = calculateLighting(normal, vWorldPosition, lightDistance, lightingType);
             
             // Create iridescent color effect
             vec3 reflectionColor = normalize(reflection) * 0.5 + 0.5;
@@ -3440,8 +3411,9 @@ function createChromeShader() {
         }
         
         void main() {
-            // Normalized vectors
-            vec3 normal = normalize(vNormal);
+            // Orient both sides consistently for lighting and Fresnel.
+            // Reversing a normal leaves reflect(I, N) unchanged.
+            vec3 normal = visibleNormal(vNormal);
             vec3 viewDir = normalize(vViewPosition);
             
             // World space reflection for environment mapping
@@ -3455,7 +3427,7 @@ function createChromeShader() {
             vec4 envColor = textureCube(envMap, worldReflection);
             
             // Get base lighting
-            vec3 lighting = calculateLighting(normal, viewDir, lightDistance, lightingType);
+            vec3 lighting = calculateLighting(normal, vWorldPosition, lightDistance, lightingType);
             
             // Create chrome effect with high contrast and metallic feel
             float fresnelFactor = fresnel(viewDir, normal, 5.0);

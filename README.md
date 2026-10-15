@@ -39,6 +39,16 @@ Both serve at **http://localhost:8000/**. The image includes ffmpeg with `libx26
 
 Put original photographs in `raw/`. The server has no Python dependencies. Both the viewer and Studio use the pinned Three.js runtime under `vendor/`, so the complete local design, image export and viewer workflow requires no internet connection. This is a trusted local workstation app, not a public production service.
 
+## Viewer lighting model
+
+Lighting acts on the 3D projected surface, not in 4D. World-fixed white point lights use Lambert's cosine law and inverse-square falloff from each surface point. **Light Distance** is the radius from the origin for every preset; quad divides the same total intensity among four lights. Both sides of a face are lit independently. Very small radii can put the lights inside the shape.
+
+The diffuse reference has reflectance 0.9 and total source intensity 4π in scene-relative units, plus 0.02 uniform fill as an approximation to indirect light. There are no cast shadows or computed light bounces. Point-source singularities are regularized within 0.001 scene units. Values above display white currently clip; no photographic exposure/tone curve is applied by default.
+
+Photographic cubemaps are decoded from sRGB; shader arithmetic is linear-light; display output is encoded to sRGB before dithering. Chrome and Iridescent retain their artistic material formulas. Chrome still reflects only the environment, not other faces; its lighting multiplier is not a physical metal model.
+
+GPU regression checks: `node studio/test_lighting.cjs` (requires installed Chromium).
+
 ## Agent API
 
 Each page announces its API in a hidden one-line note, so telling an agent "use the page's agent API" is usually enough. `describe()` lists the methods, setting ranges and ground rules.

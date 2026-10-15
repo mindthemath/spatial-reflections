@@ -25,7 +25,7 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
             return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(root, name)) });
         });
         await page.goto('http://viewer.test/');
-        const result = await page.evaluate(async shaders => {
+        const result = await page.evaluate(async ({ shaders, utilities }) => {
             const THREE = await import('/vendor/three.module.js');
             const renderer = new THREE.WebGLRenderer();
             renderer.setSize(32, 32);
@@ -57,12 +57,66 @@ const shaders = ['rough', 'iridescent', 'chrome'].map(type => context.createShad
                 mesh.material = new THREE.ShaderMaterial(shader);
                 renderer.render(scene, camera);
             }
+            // Read linear shader values directly, bypassing display encoding.
+            const uniforms = {
+                worldNormal: { value: new THREE.Vector3(0, 1, 0) },
+                worldPosition: { value: new THREE.Vector3() },
+                radius: { value: 2 }, preset: { value: 1 },
+                winding: { value: 1 }, backFaceTest: { value: false }
+            };
+            mesh.material = new THREE.ShaderMaterial({
+                side: THREE.DoubleSide, uniforms,
+                vertexShader: 'uniform float winding; void main(){gl_Position=vec4(position.x*winding,position.y,0.0,1.0);}',
+                fragmentShader: `uniform vec3 worldNormal; uniform vec3 worldPosition;
+                    uniform float radius; uniform int preset; uniform bool backFaceTest;
+                    ${utilities}
+                    void main(){
+                        vec3 viewNormal = normalize((viewMatrix * vec4(worldNormal,0.0)).xyz);
+                        vec3 value = calculateLighting(viewNormal,worldPosition,radius,preset);
+                        if(backFaceTest) value=vec3(pointIllumination(visibleNormal(vec3(0.0,0.0,1.0)),vec3(0.0),worldNormal,1.0));
+                        gl_FragColor=vec4(value,1.0);
+                    }`
+            });
+            const measure = () => { renderer.render(scene, camera); return pixel()[0] / 255; };
+            const near = measure();
+            uniforms.radius.value = 4;
+            const far = measure();
+            uniforms.radius.value = 2;
+            uniforms.worldNormal.value.set(Math.sqrt(3)/2, 0.5, 0);
+            const oblique = measure();
+            uniforms.worldNormal.value.set(0, -1, 0);
+            const unlit = measure();
+            uniforms.worldNormal.value.set(0, 1, 0);
+            uniforms.worldPosition.value.set(0, -2, 0);
+            const translated = measure();
+            uniforms.worldPosition.value.set(0, 0, 0);
+            camera.position.set(2, 1, 3); camera.lookAt(0, 0, 0);
+            const orbited = measure();
+            uniforms.preset.value = 0;
+            uniforms.worldNormal.value.set(1, 1, 1).normalize();
+            const diagonal = measure();
+            uniforms.preset.value = 2;
+            uniforms.worldNormal.value.set(1, 0, 0);
+            const quad = measure();
+            uniforms.backFaceTest.value = true;
+            uniforms.worldNormal.value.set(0, 0, 2);
+            const front = measure();
+            uniforms.winding.value = -1;
+            uniforms.worldNormal.value.set(0, 0, -2);
+            const back = measure();
             renderer.dispose();
-            return { roundTrip };
-        }, shaders);
+            return { roundTrip, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
+        }, { shaders, utilities: context.shaderUtilities() });
         assert.deepEqual(errors, [], 'all viewer shaders compile without WebGL errors');
         for (const channel of result.roundTrip.slice(0, 3)) assert(Math.abs(channel - 128) <= 1, 'sRGB texture → linear → sRGB preserves middle gray');
-        console.log('PASS: shader compilation and GPU sRGB round-trip');
+        const close = (key, expected) => assert(Math.abs(result[key] - expected) <= 1.5 / 255, `${key}: ${result[key]} ≈ ${expected}`);
+        close('near', 0.92); close('far', 0.245); // direct contribution falls by four
+        close('oblique', 0.47); close('unlit', 0.02); // cosine law, no negative light
+        close('translated', 0.245); // actual surface position, not distance to origin
+        close('orbited', 0.92); // rotating the camera does not move lights
+        close('diagonal', 0.92); close('quad', 0.245); // radius and total intensity
+        close('front', 0.9); close('back', 0.9); // symmetric two-sided illumination
+        console.log('PASS: shader compilation, sRGB round-trip, inverse-square/cosine laws, world-fixed lights, two-sided normals');
     } finally {
         await browser.close();
     }
