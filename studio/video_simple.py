@@ -19,10 +19,12 @@ if __package__:
     from .video_audio import mux_audio_args
     from .video_color import COLOR_PROFILE, browser_video_color_args
     from .video_encoding import h264_encoding_args
+    from .video_naming import settings_hash
 else:
     from video_audio import mux_audio_args
     from video_color import COLOR_PROFILE, browser_video_color_args
     from video_encoding import h264_encoding_args
+    from video_naming import settings_hash
 
 
 class SimpleVideoBackend:
@@ -72,7 +74,7 @@ class SimpleVideoBackend:
             job_id = uuid.uuid4().hex
             label = re.sub(r'[^a-zA-Z0-9_-]+', '-', str(request.get('name', 'tesseract'))).strip('-')[:60] or 'tesseract'
             stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-            filename = f"{label}-{stamp}-{job_id[:8]}.{request['format']}"
+            filename = f"{label}-{stamp}-{settings_hash({**request, 'colorProfile': COLOR_PROFILE})}.{request['format']}"
             directory = Path(tempfile.mkdtemp(prefix=f'.simple-{job_id}-', dir=self.videos))
             job = {'id': job_id, 'lease': uuid.uuid4().hex,
                    'request': {**request, 'colorProfile': COLOR_PROFILE},

@@ -155,15 +155,15 @@ Only completed exports appear in the gallery; `.pending.json` folders stay hidde
 node --check studio/studio.js
 node --check studio/pipeline.js
 node studio/test_resolution.cjs
-python3 -m unittest discover -s studio -p 'test_*.py'
+make test-studio  # resolution and Studio API only; no video backend
 ```
 
 Browser integration test (using the Bun-managed Playwright and Chromium installation):
 
 ```sh
-make test-browser
+make test-studio-browser
 ```
 
-Run the complete syntax, unit/API and browser suite with `make test`. You may set `CHROMIUM_EXECUTABLE` to select a different browser executable. The browser test uses a temporary project/library/export folder and synthetic photos; it never changes your real artwork. It covers graph gestures, endpoint rewiring, undo/redo, shortcuts, resizing, lighting calculations, statistics, schema migration, JSON round-trip, PNG export, publishing, the viewer gallery/handoff, Chrome switching, camera preservation, load failure retention and refresh after reopening an export in Studio.
+`make test` gives fast unit feedback. Run the complete syntax, unit/API and browser suite with `make test-all`. You may set `CHROMIUM_EXECUTABLE` to select a different browser executable. The browser test uses a temporary project/library/export folder and synthetic photos; it never changes your real artwork. It covers graph gestures, endpoint rewiring, undo/redo, shortcuts, resizing, lighting calculations, statistics, schema migration, JSON round-trip, PNG export, the viewer handoff and refresh after reopening an export in Studio. App/gallery/publication checks live in `make test-app-browser`; video checks have separate `test-video*` targets (see the project README).
 
 Use `make sync` to recursively copy the locked Three.js entry points, their relative imports and the license from `node_modules/` into `vendor/`. Use `make update` to update Bun packages and Chromium, synchronize the vendored runtime, and run the complete suite. The update fails on a missing/stale vendor module or browser regression. Review visual output after Three.js updates; previously published work retains its snapshotted runtime.

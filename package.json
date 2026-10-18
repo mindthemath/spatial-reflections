@@ -5,9 +5,13 @@
   "scripts": {
     "test": "make test",
     "test:fast": "make test-fast",
+    "test:all": "make test-all",
+    "test:app": "make test-app",
+    "test:studio": "make test-studio",
+    "test:video": "make test-video",
     "test:vendor": "node scripts/sync-vendor.mjs --check",
-    "test:syntax": "node --check tesseract.js && node --check viewer-skyboxes.js && node --check visual-music-core.js && node --check visual-music.js && node --check studio/studio.js && node --check studio/pipeline.js && node --check studio/test_browser.cjs && node --check studio/test_video_capture.cjs && node --check studio/test_lifecycle.cjs",
-    "test:unit": "node studio/test_resolution.cjs && node studio/test_visual_music.mjs && make test-python",
+    "test:syntax": "node --check tesseract.js && node --check viewer-skyboxes.js && node --check visual-music-core.js && node --check visual-music.js && node --check studio/studio.js && node --check studio/pipeline.js && for file in studio/test_*.cjs studio/test_*.mjs; do node --check \"$file\" || exit; done",
+    "test:unit": "make test-fast",
     "test:browser": "make test-browser",
     "sync:vendor": "node scripts/sync-vendor.mjs"
   },

@@ -39,6 +39,18 @@ Both serve at **http://localhost:8000/**. The image includes ffmpeg with `libx26
 
 Put original photographs in `raw/`. The server has no Python dependencies. Both the viewer and Studio use the pinned Three.js runtime under `vendor/`, so the complete local design, image export and viewer workflow requires no internet connection. This is a trusted local workstation app, not a public production service.
 
+## Viewer lighting model
+
+Lighting acts on the 3D projected surface, not in 4D. World-fixed white point lights use Lambert's cosine law and inverse-square falloff from each surface point. **Light Distance** is the radius from the origin for every preset; quad divides the same total intensity among four lights. Both sides of a face are lit independently. Very small radii can put the lights inside the shape.
+
+The custom diffuse reference has reflectance 0.9 and total source intensity 4π in scene-relative units, plus 0.02 uniform fill as an approximation to indirect light. Chrome uses the same point-light intensity with its metal response, plus the photographic environment, without that artificial fill. Point-source singularities are regularized near zero distance. ACES filmic tone mapping compresses bright highlights before display encoding, at fixed exposure 1.
+
+Chrome receives filtered point-light shadows at 256px per cube face. A merged surface caster limits shadow draw calls; maps are reused when only the camera moves. Geometry buffers are reused during animation. Shadows block local lights, not the environment; there are no computed light bounces or face-to-face reflections. The debug materials do not receive shadow maps. These are real-time approximations, not a path-traced reference.
+
+Photographic cubemaps are decoded from sRGB; shader arithmetic is linear-light; display output is encoded to sRGB before dithering. Chrome uses Three.js's standard metal model (approximate chromium reflectance, GGX roughness and filtered environment lighting). Dirt is a light deposit that tints reflections and modestly changes roughness/metal coverage; it emits no light. Surface Grain retains the original deterministic position-based dark speckling as an artistic image effect, separate from physical roughness. Music analysis still forces both grain and dirt on, independently of display toggles. Reflected environment light is independent of local point-light intensity. Rough and Iridescent remain custom debug materials. Chrome still reflects only the environment, not other faces. Photographs are LDR appearance references, not calibrated HDR light measurements.
+
+GPU regression checks: `node studio/test_lighting.cjs` (requires installed Chromium).
+
 ## Agent API
 
 Each page announces its API in a hidden one-line note, so telling an agent "use the page's agent API" is usually enough. `describe()` lists the methods, setting ranges and ground rules.
@@ -80,7 +92,7 @@ Publishing and video export are not in the API yet. Like the rest of the server,
 
 The viewer remembers the last successful skybox in this browser. An explicit `skybox` URL overrides the remembered selection. **Lineage JSON ↗** opens the active export's manifest.
 
-**Reflective Chrome** is the artistic viewing mode. Rough and Iridescent remain debug/orientation tools. When a debug shader is active, the menu offers **Switch to Chrome**; loading a skybox does not silently switch it.
+**Reflective Chrome** is the primary viewing mode. Rough and Iridescent remain debug/orientation tools. When a debug shader is active, the menu offers **Switch to Chrome**; loading a skybox does not silently switch it.
 
 Failed or incomplete loads retain the current environment and display an error. With no image environment yet, the viewer uses a simple diagnostic gradient cube—not an unrelated remote park scene. Only completed exports appear in the gallery.
 
@@ -120,7 +132,8 @@ Bun owns JavaScript dependencies through `package.json` and `bun.lock`. Playwrig
 ```sh
 make sync      # copy Three.js entry points, relative imports and license into vendor/
 make update    # update packages/Chromium, sync vendor/, then run the full suite
-make test      # vendor integrity, syntax, unit/API and Playwright browser tests
+make test      # quick editing feedback: syntax, vendor integrity and unit tests
+make test-all  # full validation, including API, Chromium, audio and real encoders
 ```
 
 `make update` deliberately moves Three.js and Playwright to their current releases. Vendor synchronization recursively follows relative module imports because newer Three.js releases may split the runtime across additional files. The update target fails unless vendor integrity and the complete browser suite pass. Still review visual output before committing `package.json`, `bun.lock`, and `vendor/`. Existing published work remains unchanged because each `site/work/<slug>/` contains its own runtime snapshot.
@@ -142,13 +155,13 @@ Large exports remain untouched on disk. If an image exceeds the viewer GPU's max
 
 The viewer drives animation from an integer frame index rather than repeatedly adding to a floating-point time value. For the current decimal 4D rotation coefficients, it finds a common full-rotation period, rounds the requested motion step to an integer loop length, and derives the exact time step needed to return seamlessly to frame zero.
 
-The collapsed **Video timing** section provides export FPS, loop frame count, duration, exact time step, a frame scrubber and single-frame controls. FPS controls preview cadence and reported movie duration. Screenshots preserve the current frame and FPS while remaining backward-compatible with previously saved `time` metadata.
+The collapsed **Video timing** section provides export FPS, loop frame count, duration, exact time step, a frame scrubber and single-frame controls. FPS controls preview cadence and reported movie duration. Frames are zero-based everywhere, including the scrubber, frame-jump input, screenshots and video provenance. Screenshots preserve the current frame and FPS while remaining backward-compatible with previously saved `time` metadata.
 
-The optional **Generative soundtrack** analyzes the final rendered pixels at deterministic points on that same timeline. Luminance, chroma, contrast, edge energy, motion and spatial balance influence a layered drone, harmonic field, undertow, FM bells, inharmonic metal, shimmer and filtered texture. Start it explicitly to satisfy browser autoplay policy. Character, macro, layer and variation settings persist with the viewer, screenshots and published works; restoring never starts audio without a click. **Abyss drive** preserves the high-activity configuration developed for this work.
+The optional **Generative soundtrack** analyzes a canonical chrome render with surface grain and mirror aging enabled at deterministic points on that same timeline, regardless of the visible shader/grain/aging toggles. Luminance, chroma, contrast, edge energy, motion and spatial balance influence a layered drone, harmonic field, undertow, FM bells, inharmonic metal, shimmer and filtered texture. Start it explicitly to satisfy browser autoplay policy. Character, macro, layer and variation settings persist with the viewer, screenshots and published works; restoring never starts audio without a click. **Abyss drive** preserves the high-activity configuration developed for this work.
 
-**Export video…** opens a confirmation dialog for MP4 or MKV container, resolution, quality and range. The default is a 30-second MP4 clip starting at the current frame, shortened to fit when the loop is shorter than 30 seconds. Whole-loop export remains available. A clip window uses a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a size estimate before any work begins. If that file name already labels a clip in `videos/`, the viewer asks before adding another. **Master · dark detail** is a compilation/intermediate profile: libx264 CRF 12, slow preset, grain tuning and dark-scene adaptive quantization (`aq-mode=3`, strength 1.1), with no bitrate ceiling. It retains compatible 8-bit H.264 `yuv420p` output while giving near-black photographic texture substantially more data. Its displayed size is a conservative disk allowance because constant-quality output follows scene complexity. When music is enabled, a canonical low-resolution pixel pass creates a versioned visual score, the browser renders deterministic stereo 48 kHz PCM, and ffmpeg muxes it as AAC without re-encoding checkpointed video. Soundtrack exports are currently limited to five minutes so browser memory and temporary PCM storage remain bounded.
+**Export video…** opens a confirmation dialog for MP4 or MKV container, resolution, quality and range. The default is a 30-second MP4 clip starting at the current frame, shortened to fit when the loop is shorter than 30 seconds. Whole-loop export remains available. A clip window uses a start and duration in seconds, `MM:SS`, or `HH:MM:SS`; the window must remain inside one loop. The confirmation lists exact frames, duration and a size estimate before any work begins. If that file name already labels a clip in `videos/`, the viewer asks before adding another. **Master · dark detail** is a compilation/intermediate profile: libx264 CRF 12, slow preset, grain tuning and dark-scene adaptive quantization (`aq-mode=3`, strength 1.1), with no bitrate ceiling. It retains compatible 8-bit H.264 `yuv420p` output while giving near-black photographic texture substantially more data. Its displayed size is a conservative disk allowance because constant-quality output follows scene complexity. When music is enabled, a canonical low-resolution pixel pass creates a versioned visual score, the browser renders deterministic stereo 48 kHz PCM, and ffmpeg muxes it as AAC without re-encoding checkpointed video. Soundtrack clips are currently limited to fifteen minutes. Audio synthesis replays the complete loop from frame zero, retaining drone phases, note tails and effects history, then crops the requested PCM sample range without clip-specific fades or startup notes. Full-loop exports additionally carry the ending's natural sustains and effects into the opening with a 2.5-second equal-power overlap, without fading to silence or changing the loop length. Clips and live playback do not receive this overlap. Outside that opening handover, a direct clip has the same musical content as cropping the full-loop export (independent Web Audio renders can differ below one 16-bit PCM LSB; AAC encoding adds its own boundary effects). Preparation time and browser memory depend on the complete loop length, even for short clips. Starting live playback or seeking joins the current step without replaying its attack.
 
-Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Capture uses a reusable OffscreenCanvas with promise-based PNG encoding where supported, falling back to synchronous capture for compatibility. A failed or timed-out offscreen encoder is bypassed for the rest of that export, rather than repeatedly waiting or accumulating pending frame copies. The selected skybox must finish loading before export; its actual face hashes and music settings are part of the resume signature, and environment changes are locked during rendering. An uploaded soundtrack is saved durably before the first video frame, survives checkpoint pause/resume, and is hashed in the adjacent JSON provenance. Completed videos include that provenance file. Static published works can display the export UI but cannot encode video without the local API server.
+Rendering and encoding are intentionally split. The active browser renders the exact live WebGL scene one deterministic PNG frame at a time. The server encodes independent H.264/Matroska checkpoint segments, then losslessly concatenates them into the selected MP4 or MKV under `videos/`. Frames are not retained as an image sequence or accumulated in browser memory. Capture uses a reusable OffscreenCanvas with promise-based PNG encoding where supported, falling back to synchronous capture for compatibility. Encoded blobs are read and validated before upload, and frames are uploaded as PNG byte buffers: Chromium can produce nonempty but unreadable encoder blobs during long exports, and read failures now activate the same sticky compatibility fallback. A failed or timed-out offscreen encoder is bypassed for the rest of that export, rather than repeatedly waiting or accumulating pending frame copies. The selected skybox must finish loading before export; its actual face hashes and music settings are part of the resume signature, and environment changes are locked during rendering. An uploaded soundtrack is saved durably before the first video frame, survives checkpoint pause/resume, and is hashed in the adjacent JSON provenance. Completed videos include that provenance file. Filename hash suffixes identify the scene and soundtrack configuration (including synthesis version), so clips and full exports share a suffix. Export range, resolution, FPS, container/encoding and the automatic full-loop overlap are recorded in provenance but excluded from that identity; resume matching still checks the complete render signature. Static published works can display the export UI but cannot encode video without the local API server.
 
 New exports preserve the browser's sRGB transfer curve, convert full-range RGB to limited-range BT.709 YUV, and explicitly tag the sRGB transfer (`iec61966-2-1`), BT.709 matrix and BT.709/sRGB primaries in H.264 and the container. This labels the source curve accurately; it does not bake in a gamma/brightness adjustment. MP4/MKV tests verify the tags and decoded RGB sample fidelity. Existing jobs pinned to the previous BT.709 transfer profile, and untagged legacy jobs, retain their original conversion so resuming never mixes color policies. Color-managed playback (including Finder Quick Look) still needs visual comparison; players that ignore transfer tags can differ. Checkpoint encoder failures preserve the last 4 KB of diagnostics in the interrupted job's reason.
 
@@ -180,24 +193,37 @@ their old encoders have exited. Multi-hour and network-share endurance remain
 unvalidated.
 
 `make test-video-encoder` checks real encoding; `make test-video-simple-browser`
-checks browser export/cancellation. `make test` checks both modes. Tests remain
+checks browser export/cancellation. `make test-all` checks both modes. Tests remain
 standard-library `unittest`: pytest would not replace the owned-process guard
 and bounded cleanup.
 
-### Video validation commands
+### Test feedback by area
 
 ```sh
-make test-fast           # routine editing: no Chromium, networking or real encoder
-make test-python         # durable store, API and real ffmpeg recovery tests
-make test-browser        # isolated capture + complete browser integration
+make test                # fast default; no Chromium, networking or real encoder
+make test-app            # geometry, skybox paths, drag/drop and score/frame units
+make test-studio         # resolution + Studio HTTP API (isolated localhost)
+make test-video          # export UI/store/audio configuration units
+
+# Select only the integration checks affected by your change:
+make test-app-render     # actual GPU shaders, lighting and reflections
+make test-app-browser    # app settings, gallery, publication and live audio
+make test-studio-browser # Studio gestures, processing, export/handoff, persistence
+make test-video-backend  # video HTTP API, durable store and real encoders
+make test-video-browser  # resumable export/recovery UI, real encoder
+make test-video-simple-browser # simple export, audible AAC, PNG restore, cancellation
+make test-audio          # real offline synthesis, clip/loop/timeline correctness
 make test-video-capture  # pixel integrity and capture-fallback test; no HTTP server
-make test-video-encoder  # store + real encoder tests without localhost networking
+make test-tools          # process guard and cleanup regression tests
+make test-all            # all of the above + cross-app agent API; before merge/release
 make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4"
 # Longer encoder validation is opt-in; duration is output video seconds:
 make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4" VIDEO_SOAK_SECONDS=600
 ```
 
-Use `make test-fast` during development and select `test-video-capture` or `test-video-encoder` only for relevant changes. Run `make test-browser` once for final integration validation; do not automatically retry failed full browser suites.
+`make test` (also `make test-fast` / `bun test:fast`) is deliberately cheap, not a full validation claim. Use the area targets while editing; add the relevant browser/encoder target when changing those paths. Do not run the full suite for every shader or UI adjustment. `make test-all` / `bun run test:all` is the merge/release gate; dependency updates also run it. Avoid concurrent heavy tests and automatic retries.
+
+The browser scenarios are separate files: `studio/test_app_browser.cjs`, `studio/test_studio_browser.cjs`, and `studio/test_video_browser.cjs` (both modes). Shared code only manages isolated fixtures and cleanup. App/video fixtures supply synthetic cubemaps directly, rather than repeating Studio editing and export. The real Studio → viewer → Studio handoff is still tested once. Studio and video HTTP API tests are likewise separate (`test_server.py` / `test_server_video.py`). `test-browser` and `test-python` remain available as explicit broad checks.
 
 Resource-heavy targets share a per-user nonblocking lock across checkout directories, a wall-clock timeout, and an owned-process cleanup guard. Concurrent runs are refused rather than queued. Network-heavy targets refuse to start at 8,000 or more host `TIME_WAIT` sockets; nested stages recheck pressure before proceeding. Browser tests also use this guard when invoked directly. The guard attempts graceful cleanup, then terminates only the invocation's process group and recorded descendants whose PID/start time still match—not the user's server or browser. Test encoders are limited to two threads; production exports keep their normal thread policy.
 

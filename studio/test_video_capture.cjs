@@ -23,7 +23,7 @@ const assert = require('assert/strict');
       const ctx = canvas.getContext('2d');
       const paint = color => { ctx.fillStyle=color;ctx.fillRect(0,0,128,72); };
       const read = async blob => {
-        const bitmap = await createImageBitmap(blob);
+        const bitmap = await createImageBitmap(new Blob([blob], {type:'image/png'}));
         const surface = new OffscreenCanvas(128,72);
         const context = surface.getContext('2d');context.drawImage(bitmap,0,0);bitmap.close();
         return Array.from(context.getImageData(20,20,1,1).data);
@@ -50,7 +50,18 @@ const assert = require('assert/strict');
       try {
         timedOut=await canvasPNG(canvas);paint('#00ff00');afterTimeout=await canvasPNG(canvas);
       } finally {window.setTimeout=setTimer;OffscreenCanvas.prototype.convertToBlob=original;}
-      return {first:await read(first),second:await read(second),fallback:await read(fallback),sticky:await read(sticky),timedOut:await read(timedOut),afterTimeout:await read(afterTimeout),failureRerenders,failureCalls,timeoutCalls,rerenders};
+      // A nonempty disk-backed encoder Blob can fail only when read. This
+      // was the real long-export failure; size alone must not count as success.
+      videoCaptureFallback=false;videoCaptureSurface=videoCaptureContext=null;
+      let unreadableCalls=0;
+      OffscreenCanvas.prototype.convertToBlob=async()=>({size:4096,arrayBuffer:async()=>{
+        unreadableCalls++;throw new DOMException('Backing file unavailable','NotReadableError');
+      }});
+      let unreadable,afterUnreadable;
+      try {
+        unreadable=await canvasPNG(canvas);paint('#ffff00');afterUnreadable=await canvasPNG(canvas);
+      } finally {OffscreenCanvas.prototype.convertToBlob=original;}
+      return {first:await read(first),second:await read(second),fallback:await read(fallback),sticky:await read(sticky),timedOut:await read(timedOut),afterTimeout:await read(afterTimeout),unreadable:await read(unreadable),afterUnreadable:await read(afterUnreadable),unreadableCalls,returnsBytes:first instanceof Uint8Array,failureRerenders,failureCalls,timeoutCalls,rerenders};
     });
     assert.deepEqual(result.first,[255,0,0,255]);
     assert.deepEqual(result.second,[0,255,0,255]);
@@ -58,8 +69,11 @@ const assert = require('assert/strict');
     assert.deepEqual(result.sticky,[255,0,255,255]);
     assert.deepEqual(result.timedOut,[0,0,255,255]);
     assert.deepEqual(result.afterTimeout,[0,255,0,255]);
-    assert.equal(result.failureRerenders,1);assert.equal(result.rerenders,2);
+    assert.deepEqual(result.unreadable,[0,0,255,255]);
+    assert.deepEqual(result.afterUnreadable,[255,255,0,255]);
+    assert.equal(result.unreadableCalls,1);assert.equal(result.returnsBytes,true);
+    assert.equal(result.failureRerenders,1);assert.equal(result.rerenders,3);
     assert.equal(result.failureCalls,1);assert.equal(result.timeoutCalls,1);
-    console.log('PASS: capture preserves pixels, reuses surface, and makes failure/timeout fallback sticky.');
+    console.log('PASS: PNG byte capture preserves pixels; encoder/read/timeout failures activate sticky fallback.');
   } finally { await cleanup(); }
 })().catch(error => { console.error(error);process.exitCode=1; });

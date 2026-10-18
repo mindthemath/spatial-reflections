@@ -43,6 +43,29 @@ class VideoAudioValidationTest(unittest.TestCase):
         self.assertEqual(details['sampleRate'], 48000)
         self.assertEqual(details['channels'], 2)
 
+    def test_canonical_timeline_provenance(self):
+        request = music_request()
+        request['music'].update(analysisRender='chrome-grain-aging-v1', synthesis='whole-timeline-v2')
+        self.assertEqual(validate_music_request(request)['synthesis'], 'whole-timeline-v2')
+        request['music']['synthesis'] = 'whole-timeline-v3'
+        self.assertEqual(validate_music_request(request)['synthesis'], 'whole-timeline-v3')
+        request['music']['synthesis'] = 'unknown'
+        with self.assertRaisesRegex(ValueError, 'incompatible'):
+            validate_music_request(request)
+
+    def test_crossfade_is_full_loop_only(self):
+        request = music_request()
+        request.update(startFrame=0, loopFrameCount=request['frames'])
+        request['music']['loopCrossfadeSeconds'] = 2.5
+        self.assertEqual(validate_music_request(request)['loopCrossfadeSeconds'], 2.5)
+        for changes in ({'startFrame': 1}, {'loopFrameCount': 48}):
+            with self.assertRaisesRegex(ValueError, 'incompatible'):
+                validate_music_request({**request, **changes})
+        for invalid in (-1, 6, '2.5', float('nan')):
+            request['music']['loopCrossfadeSeconds'] = invalid
+            with self.assertRaisesRegex(ValueError, 'incompatible'):
+                validate_music_request(request)
+
     def test_wave_rejects_wrong_duration_format_and_truncation(self):
         request = music_request()
         with self.assertRaisesRegex(ValueError, 'exactly'):
