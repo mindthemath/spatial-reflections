@@ -73,6 +73,30 @@ class SimpleVideoIntegrationTest(unittest.TestCase):
                 self.assertEqual(int(stream['nb_frames']),6)
             finally:backend.pause_all();backend.release_server()
 
+    def test_high_dark_detail_profile_encodes_compatible_h264(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            backend = SimpleVideoBackend(root, shutil.which('ffmpeg'))
+            try:
+                job = backend.start({'name': 'high-real', 'width': 64, 'height': 64, 'fps': 24,
+                                     'frames': 6, 'format': 'mp4', 'quality': 'high', 'bitRate': 100000})
+                for frame in range(6):
+                    backend.write_frame(job['id'], frame, solid_png(64, 64, 4 + frame), job['lease'])
+                result = backend.finish(job['id'])
+                path = root / result['url'].lstrip('/')
+                probe = subprocess.run([shutil.which('ffprobe'), '-v', 'error', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=codec_name,pix_fmt,nb_frames,color_range,color_transfer',
+                    '-of', 'json', str(path)], capture_output=True, text=True, check=True, timeout=15)
+                stream = json.loads(probe.stdout)['streams'][0]
+                self.assertEqual(stream['codec_name'], 'h264')
+                self.assertEqual(stream['pix_fmt'], 'yuv420p')
+                self.assertEqual(int(stream['nb_frames']), 6)
+                self.assertEqual(stream['color_range'], 'tv')
+                self.assertEqual(stream['color_transfer'], 'iec61966-2-1')
+            finally:
+                backend.pause_all()
+                backend.release_server()
+
     def test_cancel_real_encoder_leaves_no_partial_or_running_process(self):
         with tempfile.TemporaryDirectory() as temporary:
             backend=SimpleVideoBackend(temporary,shutil.which('ffmpeg'))
