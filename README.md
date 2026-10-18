@@ -132,7 +132,8 @@ Bun owns JavaScript dependencies through `package.json` and `bun.lock`. Playwrig
 ```sh
 make sync      # copy Three.js entry points, relative imports and license into vendor/
 make update    # update packages/Chromium, sync vendor/, then run the full suite
-make test      # vendor integrity, syntax, unit/API and Playwright browser tests
+make test      # quick editing feedback: syntax, vendor integrity and unit tests
+make test-all  # full validation, including API, Chromium, audio and real encoders
 ```
 
 `make update` deliberately moves Three.js and Playwright to their current releases. Vendor synchronization recursively follows relative module imports because newer Three.js releases may split the runtime across additional files. The update target fails unless vendor integrity and the complete browser suite pass. Still review visual output before committing `package.json`, `bun.lock`, and `vendor/`. Existing published work remains unchanged because each `site/work/<slug>/` contains its own runtime snapshot.
@@ -192,24 +193,37 @@ their old encoders have exited. Multi-hour and network-share endurance remain
 unvalidated.
 
 `make test-video-encoder` checks real encoding; `make test-video-simple-browser`
-checks browser export/cancellation. `make test` checks both modes. Tests remain
+checks browser export/cancellation. `make test-all` checks both modes. Tests remain
 standard-library `unittest`: pytest would not replace the owned-process guard
 and bounded cleanup.
 
-### Video validation commands
+### Test feedback by area
 
 ```sh
-make test-fast           # routine editing: no Chromium, networking or real encoder
-make test-python         # durable store, API and real ffmpeg recovery tests
-make test-browser        # isolated capture + complete browser integration
+make test                # fast default; no Chromium, networking or real encoder
+make test-app            # geometry, skybox paths, drag/drop and score/frame units
+make test-studio         # resolution + Studio HTTP API (isolated localhost)
+make test-video          # export UI/store/audio configuration units
+
+# Select only the integration checks affected by your change:
+make test-app-render     # actual GPU shaders, lighting and reflections
+make test-app-browser    # app settings, gallery, publication and live audio
+make test-studio-browser # Studio gestures, processing, export/handoff, persistence
+make test-video-backend  # video HTTP API, durable store and real encoders
+make test-video-browser  # resumable export/recovery UI, real encoder
+make test-video-simple-browser # simple export, audible AAC, PNG restore, cancellation
+make test-audio          # real offline synthesis, clip/loop/timeline correctness
 make test-video-capture  # pixel integrity and capture-fallback test; no HTTP server
-make test-video-encoder  # store + real encoder tests without localhost networking
+make test-tools          # process guard and cleanup regression tests
+make test-all            # all of the above + cross-app agent API; before merge/release
 make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4"
 # Longer encoder validation is opt-in; duration is output video seconds:
 make test-video-soak VIDEO_SOAK_SOURCE="videos/example.mp4" VIDEO_SOAK_SECONDS=600
 ```
 
-Use `make test-fast` during development and select `test-video-capture` or `test-video-encoder` only for relevant changes. Run `make test-browser` once for final integration validation; do not automatically retry failed full browser suites.
+`make test` (also `make test-fast` / `bun test:fast`) is deliberately cheap, not a full validation claim. Use the area targets while editing; add the relevant browser/encoder target when changing those paths. Do not run the full suite for every shader or UI adjustment. `make test-all` / `bun run test:all` is the merge/release gate; dependency updates also run it. Avoid concurrent heavy tests and automatic retries.
+
+The browser scenarios are separate files: `studio/test_app_browser.cjs`, `studio/test_studio_browser.cjs`, and `studio/test_video_browser.cjs` (both modes). Shared code only manages isolated fixtures and cleanup. App/video fixtures supply synthetic cubemaps directly, rather than repeating Studio editing and export. The real Studio → viewer → Studio handoff is still tested once. Studio and video HTTP API tests are likewise separate (`test_server.py` / `test_server_video.py`). `test-browser` and `test-python` remain available as explicit broad checks.
 
 Resource-heavy targets share a per-user nonblocking lock across checkout directories, a wall-clock timeout, and an owned-process cleanup guard. Concurrent runs are refused rather than queued. Network-heavy targets refuse to start at 8,000 or more host `TIME_WAIT` sockets; nested stages recheck pressure before proceeding. Browser tests also use this guard when invoked directly. The guard attempts graceful cleanup, then terminates only the invocation's process group and recorded descendants whose PID/start time still match—not the user's server or browser. Test encoders are limited to two threads; production exports keep their normal thread policy.
 
