@@ -43,10 +43,13 @@ def embed(html, piece):
     return html[:start] + embedded + html[end:]
 
 
-def build(slug, out, *, show_controls, touch, inspector):
-    source = ROOT / 'site' / 'work' / slug
+def build(slug, out, *, show_controls, touch, inspector, source=None):
+    source = (source or ROOT / 'site' / 'work' / slug).resolve()
+    out = out.resolve()
     if not (source / 'piece.json').is_file():
-        raise SystemExit(f'site/work/{slug}/ is not a published work')
+        raise SystemExit(f'{source}/ is not a published work')
+    if out.is_relative_to(source) or source.is_relative_to(out):
+        raise SystemExit('Source and output directories must not overlap')
     if out.exists():
         if not (out / 'autorun.brs').is_file():
             raise SystemExit(f'{out} exists and is not a previous BrightSign build; refusing to replace it')
@@ -66,11 +69,12 @@ def build(slug, out, *, show_controls, touch, inspector):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('slug', help='published work under site/work/')
+    parser.add_argument('--source', type=Path, help='published work directory in another checkout (preserves its runtime)')
     parser.add_argument('-o', '--out', type=Path, help='output folder (default: brightsign/<slug>)')
     parser.add_argument('--show-controls', action='store_true', help='start with the control panel visible')
     parser.add_argument('--no-touch', dest='touch', action='store_false', help='ignore touch and mouse input')
     parser.add_argument('--inspector', action='store_true', help='expose Chrome DevTools on <player-ip>:2999')
     args = parser.parse_args()
     out = build(args.slug, args.out or ROOT / 'brightsign' / args.slug,
-                show_controls=args.show_controls, touch=args.touch, inspector=args.inspector)
+                show_controls=args.show_controls, touch=args.touch, inspector=args.inspector, source=args.source)
     print(f'Copy the contents of {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out}/ to the SD card root.')
