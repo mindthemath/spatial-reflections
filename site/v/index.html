@@ -33,10 +33,10 @@ td.m { white-space: nowrap; }
   <tr class="rule"><th colspan="4"><hr></th></tr>
   <tr class="entry parent"><td class="i"><img src="../icons/back.gif" alt="[PARENTDIR]" width="20" height="22"></td><td class="n"><a href="/">Parent Directory</a></td><td class="m">&nbsp;</td><td class="d">&nbsp;</td></tr>
   <!-- Unlisted: nothing on the site links here. Videos live in R2 behind sr-cdn.clfx.cc. -->
-  <tr class="entry"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/submission.mp4">submission.mp4</a></td><td class="m" align="right">&nbsp;</td><td class="d">Submission</td></tr>
-  <tr class="entry"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill1.mp4">mill1.mp4</a></td><td class="m" align="right">&nbsp;</td><td class="d">The Mill, I</td></tr>
-  <tr class="entry"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill2.mp4">mill2.mp4</a></td><td class="m" align="right">&nbsp;</td><td class="d">The Mill, II</td></tr>
-  <tr class="entry"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill3.mp4">mill3.mp4</a></td><td class="m" align="right">&nbsp;</td><td class="d">The Mill, III</td></tr>
+  <tr class="entry" data-modified="2026-10-30T02:39:02Z"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/submission.mp4">submission.mp4</a></td><td class="m" align="right">2026-10-30 02:39  </td><td class="d">Submission</td></tr>
+  <tr class="entry" data-modified="2026-10-30T03:24:27Z"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill1.mp4">mill1.mp4</a></td><td class="m" align="right">2026-10-30 03:24  </td><td class="d">The Mill, I</td></tr>
+  <tr class="entry" data-modified="2026-10-30T03:31:57Z"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill2.mp4">mill2.mp4</a></td><td class="m" align="right">2026-10-30 03:31  </td><td class="d">The Mill, II</td></tr>
+  <tr class="entry" data-modified="2026-10-30T03:39:39Z"><td class="i"><img src="../icons/movie.gif" alt="[VID]" width="20" height="22"></td><td class="n"><a href="https://sr-cdn.clfx.cc/mill3.mp4">mill3.mp4</a></td><td class="m" align="right">2026-10-30 03:39  </td><td class="d">The Mill, III</td></tr>
   <tr class="rule"><th colspan="4"><hr></th></tr>
  </tbody>
 </table>
@@ -55,16 +55,7 @@ for (const link of listing.querySelectorAll('a[data-column]')) {
   link.href = `?C=${link.dataset.column};O=${next}`;
 }
 
-// Real modification times from the CDN. Last-Modified is readable cross-origin,
-// but only if the bucket's CORS policy allows HEAD; otherwise the column stays blank.
-await Promise.all(rows.map(async row => {
-  const response = await fetch(row.querySelector('td.n a').href, { method: 'HEAD' }).catch(() => null);
-  const modified = new Date(response?.ok ? response.headers.get('Last-Modified') ?? NaN : NaN);
-  if (Number.isNaN(modified.getTime())) return;
-  row.dataset.modified = modified.toISOString();
-  row.querySelector('td.m').textContent = `${row.dataset.modified.slice(0, 16).replace('T', ' ')}  `;
-}));
-
+// Last-modified times are fixed in the markup: when each video was rendered (UTC).
 const keys = {
   N: row => row.querySelector('td.n').textContent,
   M: row => row.dataset.modified || '',
