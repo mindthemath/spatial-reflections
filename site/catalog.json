@@ -2,6 +2,14 @@
   "schemaVersion": 1,
   "work": [
     {
+      "slug": "submission",
+      "title": "submission",
+      "description": "I can't talk about it, but I found an exit.",
+      "publishedAt": "2026-10-30T02:48:50.083243+00:00",
+      "url": "work/submission/",
+      "thumbnail": ""
+    },
+    {
       "slug": "mill1",
       "title": "The Mill, I",
       "description": "An encapsulation of a disorienting season.",
