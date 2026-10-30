@@ -15,7 +15,7 @@
   },
   "viewer": {
     "shape": "tesseract",
-    "rotationSpeed": 0.005,
+    "rotationSpeed": 0.002,
     "rotationCoefficients": {
       "xw": 0.7,
       "yw": -0.05,
@@ -33,7 +33,7 @@
     "videoExportWidth": 1920,
     "videoExportHeight": 1080,
     "videoExportQuality": "master",
-    "timelineFrame": 9221,
+    "timelineFrame": 23052,
     "panelExpanded": true,
     "videoTimingExpanded": true,
     "music": {
