@@ -3,6 +3,7 @@ import base64
 import hashlib
 import http.client
 import json
+import shutil
 import unittest
 
 import server
@@ -159,6 +160,11 @@ class StudioAPITest(ServerAPITestCase):
         self.assertIn('"slug":"mirror-study"', (folder / 'index.html').read_text())
         self.assertTrue(all((folder / 'skybox' / f'{face}.png').is_file() for face in server.FACES))
         self.assertEqual([path.name for path in (server.ROOT / 'site' / 'work').iterdir()], ['mirror-study'])
+
+        shutil.rmtree(folder / 'skybox')
+        self.assertEqual(server.refresh_published_runtime(), ['mirror-study'])
+        self.assertFalse((folder / 'skybox').exists())
+        self.assertEqual(json.loads((folder / 'piece.json').read_text()), piece)
 
 
     def test_studio_code_bypasses_cache(self):

@@ -185,7 +185,9 @@ def refresh_published_runtime():
         temporary = work / f'.{destination.name}-{uuid.uuid4().hex}.pending'
         temporary.mkdir()
         try:
-            shutil.copytree(destination / 'skybox', temporary / 'skybox')
+            # Pieces on shared site/assets/ have no local skybox folder.
+            if (destination / 'skybox').is_dir():
+                shutil.copytree(destination / 'skybox', temporary / 'skybox')
             write_runtime(temporary, piece)
             previous = work / f'.{destination.name}-{uuid.uuid4().hex}.previous'
             destination.replace(previous)

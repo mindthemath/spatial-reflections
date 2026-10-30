@@ -58,12 +58,15 @@ update:
 	# Validate every domain after dependency updates, not just the fast default.
 	$(MAKE) test-all
 
-# Propagate the canonical notice in SOURCE_RIGHTS.txt to all first-party source files.
+# Propagate the canonical notice in SOURCE_RIGHTS.txt to all first-party source files,
+# and the one in DISTRIBUTION_RIGHTS.txt into published image metadata.
 copyright:
 	python3 scripts/copyright_headers.py
+	python3 scripts/image_copyright.py
 
 test-copyright:
 	python3 scripts/copyright_headers.py --check
+	python3 scripts/image_copyright.py --check
 
 # Default feedback is cheap. Browsers/encoders and infrastructure tests are opt-in.
 test: test-fast
@@ -123,6 +126,7 @@ test-guard:
 test-python:
 	$(TEST_GUARD) --network --timeout 180 -- python3 -m unittest discover -s studio -p 'test_*.py'
 	$(TEST_GUARD) --timeout 60 -- python3 -m unittest discover -s scripts -p 'test_audio_diff.py'
+	$(TEST_GUARD) --timeout 60 -- python3 -m unittest discover -s scripts -p 'test_image_copyright.py'
 
 # Video backend only: no Studio API, app browser, or unrelated tools.
 test-video-backend:

@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "slug": "submission",
+  "title": "submission",
+  "description": "I can't talk about it, but I found an exit.",
+  "publishedAt": "2026-10-30T02:48:50.083243+00:00",
+  "size": 2048,
+  "skybox": {
+    "px": "../../assets/mill/px.jpg",
+    "nx": "../../assets/mill/nx.jpg",
+    "py": "../../assets/mill/py.jpg",
+    "ny": "../../assets/mill/ny.jpg",
+    "pz": "../../assets/mill/pz.jpg",
+    "nz": "../../assets/mill/nz.jpg"
+  },
+  "viewer": {
+    "shape": "tesseract",
+    "rotationSpeed": 0.002,
+    "rotationCoefficients": {
+      "xw": 0.7,
+      "yw": -0.05,
+      "zw": 0.55
+    },
+    "shader": "chrome",
+    "lighting": "diffuse",
+    "lightDistance": 20,
+    "showVertices": false,
+    "surfaceGrain": false,
+    "dirtyMirrors": true,
+    "mirrorReflections": true,
+    "animationPaused": false,
+    "exportFps": 30,
+    "videoExportWidth": 1920,
+    "videoExportHeight": 1080,
+    "videoExportQuality": "capped",
+    "timelineFrame": 30000,
+    "panelExpanded": true,
+    "videoTimingExpanded": true,
+    "music": {
+      "preset": "abyssdrive",
+      "enabled": true,
+      "level": 1,
+      "density": 0.33,
+      "tension": 0.88,
+      "influence": 0.87,
+      "space": 0.3,
+      "tempo": 88,
+      "seed": 1701,
+      "layers": {
+        "drone": 1,
+        "field": 0,
+        "bells": 0.99,
+        "pulse": 0.96,
+        "metal": 0.11,
+        "texture": 0.07
+      }
+    },
+    "camera": {
+      "position": {
+        "x": 0.4753730207555585,
+        "y": 0.6614910726672039,
+        "z": -0.006185055867625938
+      },
+      "target": {
+        "x": 0.03368044528063224,
+        "y": 0.14378424398829004,
+        "z": 0.03306209421786711
+      }
+    },
+    "musicAutoplay": true
+  },
+  "source": {
+    "export": "exports/mill1-20261009T042042Z-61366611df21",
+    "manifestSha256": "d84aeafa304ce37e9d5faa5376cd4c854056690856b55b6606d3be7ee30ad949"
+  }
+}
