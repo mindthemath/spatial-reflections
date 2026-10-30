@@ -7,6 +7,7 @@ import { installVisualMusic } from './visual-music.js';
 // Main Three.js scene setup
 let scene, camera, renderer, controls;
 const physicalLights = [];
+let diffuseOverheadLight;
 let shadowState = '';
 let tesseract;
 let visualMusic;
@@ -165,7 +166,7 @@ function applyViewerSettings(saved) {
         rotationCoefficients[axis] = clamp(saved.rotationCoefficients?.[axis], -1, 1, rotationCoefficients[axis]);
     }
     if (['rough', 'iridescent', 'chrome'].includes(saved.shader)) currentShader = saved.shader;
-    if (['diagonal', 'topdown', 'quad'].includes(saved.lighting)) currentLighting = saved.lighting;
+    if (['diagonal', 'topdown', 'quad', 'diffuse'].includes(saved.lighting)) currentLighting = saved.lighting;
     if ([24, 25, 30, 50, 60].includes(Number(saved.exportFps))) exportFps = Number(saved.exportFps);
     const videoWidth = Number(saved.videoExportWidth);
     const videoHeight = Number(saved.videoExportHeight);
@@ -259,9 +260,11 @@ function clampCameraCoordinates() {
 
 function updatePhysicalLighting() {
     const quad = currentLighting === 'quad';
+    const diffuse = currentLighting === 'diffuse';
+    diffuseOverheadLight.visible = diffuse;
     const radius = lightDistance;
     physicalLights.forEach((light, index) => {
-        light.intensity = quad ? Math.PI : index === 0 ? 4 * Math.PI : 0;
+        light.intensity = diffuse ? 0 : quad ? Math.PI : index === 0 ? 4 * Math.PI : 0;
         light.visible = light.castShadow = light.intensity > 0;
         if (quad) {
             light.position.set(index === 0 ? radius : index === 1 ? -radius : 0, 0,
@@ -288,6 +291,11 @@ function init() {
     
     // Create scene
     scene = new THREE.Scene();
+    // Broad overhead fill has no direct specular lobe (no reflected bulbs).
+    // Metals retain their environment reflections; deposits receive diffuse fill.
+    diffuseOverheadLight = new THREE.HemisphereLight(0xffffff, 0x000000, 1);
+    diffuseOverheadLight.visible = false;
+    scene.add(diffuseOverheadLight);
     for (let i = 0; i < 4; i++) {
         const light = new THREE.PointLight(0xffffff, 0, 0, 2);
         light.shadow.mapSize.set(256, 256);
@@ -786,6 +794,7 @@ function applyViewSettings(metadata) {
                 lightingTypeInt = 0;
                 break;
         }
+        if (currentLighting === 'diffuse') lightingTypeInt = 3;
         
         // Update the uniform values in all materials
         materials.forEach(material => {
@@ -1163,6 +1172,12 @@ function createControls() {
     quadOption.textContent = 'Spot Quadrants (4)';
     quadOption.selected = currentLighting === 'quad';
     lightingSelect.appendChild(quadOption);
+
+    const diffuseOption = document.createElement('option');
+    diffuseOption.value = 'diffuse';
+    diffuseOption.textContent = 'Diffuse Overhead (no bulb highlights)';
+    diffuseOption.selected = currentLighting === 'diffuse';
+    lightingSelect.appendChild(diffuseOption);
     
     // Light distance control
     const distanceLabel = document.createElement('label');
@@ -1200,6 +1215,7 @@ function createControls() {
                 lightingTypeInt = 0;
                 break;
         }
+        if (currentLighting === 'diffuse') lightingTypeInt = 3;
         
         // Update existing materials' uniforms directly
         const materials = [];
@@ -2572,7 +2588,7 @@ function withSoundAnalysisMaterial(render) {
     if (uniforms.mirrorReflections) uniforms.mirrorReflections.value = mirrorReflections ? 1 : 0;
     uniforms.faceSides.value = currentShape === 'rectified-5-cell' ? 3 : 4;
     uniforms.lightDistance.value = lightDistance;
-    uniforms.lightingType.value = currentLighting === 'topdown' ? 1 : currentLighting === 'quad' ? 2 : 0;
+    uniforms.lightingType.value = currentLighting === 'diffuse' ? 3 : currentLighting === 'topdown' ? 1 : currentLighting === 'quad' ? 2 : 0;
     const previous = scene.overrideMaterial;
     try {
         scene.overrideMaterial = soundAnalysisMaterial;
@@ -3249,6 +3265,8 @@ function createShaderMaterial(shaderType = currentShader) {
             break;
     }
     
+    if (currentLighting === 'diffuse') lightingTypeInt = 3;
+
     const uniforms = {
         lightingType: { value: lightingTypeInt },
         lightDistance: { value: lightDistance },
@@ -3320,7 +3338,10 @@ function shaderUtilities() {
             vec3 worldNormal = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
             // Approximate uniform indirect illumination, not computed light bounce.
             float illumination = 0.02;
-            if (lightingType == 2) {
+            if (lightingType == 3) {
+                // Hemispherical overhead fill: no point source or distance falloff.
+                illumination += 0.9 * (0.5 + 0.5 * worldNormal.y);
+            } else if (lightingType == 2) {
                 illumination += pointIllumination(worldNormal, worldPosition, vec3(lightDist, 0.0, 0.0), 0.25);
                 illumination += pointIllumination(worldNormal, worldPosition, vec3(-lightDist, 0.0, 0.0), 0.25);
                 illumination += pointIllumination(worldNormal, worldPosition, vec3(0.0, 0.0, lightDist), 0.25);
@@ -4142,7 +4163,7 @@ function installViewerAPI() {
     const SETTINGS = {
         shape: { control: 'viewer-shape', values: ['tesseract', 'rectified-5-cell'] },
         shader: { control: 'viewer-shader', values: ['chrome', 'rough', 'iridescent'] },
-        lighting: { control: 'viewer-lighting', values: ['diagonal', 'topdown', 'quad'] },
+        lighting: { control: 'viewer-lighting', values: ['diagonal', 'topdown', 'quad', 'diffuse'] },
         lightDistance: { control: 'viewer-light-distance', min: 0.1, max: 20, step: 0.1 },
         rotationSpeed: { min: 0, max: 0.01, step: 0.001 },
         rotationCoefficients: { axes: ['xw', 'yw', 'zw'], min: -1, max: 1, step: 0.05 },

@@ -18,10 +18,10 @@ from urllib.parse import parse_qs, urlparse
 
 try:
     from .video_audio import MAX_AUDIO_BYTES, validate_music_request, validate_wave
-    from .video_encoding import CRF_QUALITIES
+    from .video_encoding import ENCODING_PROFILES
 except ImportError:
     from video_audio import MAX_AUDIO_BYTES, validate_music_request, validate_wave
-    from video_encoding import CRF_QUALITIES
+    from video_encoding import ENCODING_PROFILES
 
 # Lazy selection keeps the simple fallback independent of the resume module.
 VideoJobStore = None
@@ -446,8 +446,8 @@ def start_video(request):
         raise ValueError('Encoder startup recovery failed; inspect the video job index')
     width, height, fps, frames, quality, video_format, bit_rate, estimate = validate_video_request(request)
     request = {**request, 'width': width, 'height': height, 'fps': fps, 'frames': frames}
-    if quality in CRF_QUALITIES:
-        request['encoding'] = dict(CRF_QUALITIES[quality])
+    if quality in ENCODING_PROFILES:
+        request['encoding'] = dict(ENCODING_PROFILES[quality])
     else:
         request.pop('encoding', None)
     music = validate_music_request(request)

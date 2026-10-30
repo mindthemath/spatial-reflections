@@ -18,7 +18,7 @@ const rotationHelpers = source.slice(source.indexOf('function rotate4D('),source
 (async () => {
     const THREE = await import('three');
     const lighting = vm.createContext({physicalLights: Array.from({length:4}, () => new THREE.PointLight()),
-        shadowState:'', renderer:{shadowMap:{needsUpdate:false}}, currentLighting:'diagonal', lightDistance:3,
+        diffuseOverheadLight:new THREE.HemisphereLight(), shadowState:'', renderer:{shadowMap:{needsUpdate:false}}, currentLighting:'diagonal', lightDistance:3,
         time:0, currentShape:'tesseract', showVertices:false});
     vm.runInContext(source.slice(source.indexOf('function updatePhysicalLighting('), source.indexOf('// Initialize the scene')), lighting);
     lighting.updatePhysicalLighting();
@@ -36,6 +36,16 @@ const rotationHelpers = source.slice(source.indexOf('function rotate4D('),source
     lighting.updatePhysicalLighting();
     assert.equal(lighting.physicalLights.filter(light=>light.visible && light.castShadow).length,4);
     assert.equal(lighting.physicalLights.reduce((sum,light)=>sum+light.intensity,0),4*Math.PI);
+    lighting.currentLighting='diffuse';
+    lighting.updatePhysicalLighting();
+    assert(lighting.diffuseOverheadLight.visible);
+    assert(lighting.physicalLights.every(light=>!light.visible && !light.castShadow && light.intensity===0));
+    lighting.currentLighting='topdown';
+    lighting.updatePhysicalLighting();
+    assert.equal(lighting.diffuseOverheadLight.visible,false);
+    assert.equal(lighting.physicalLights[0].intensity,4*Math.PI);
+    context.currentLighting='diffuse';
+    assert.equal(context.createShaderMaterial('rough').uniforms.lightingType.value,3);
     const browser = await chromium.launch({ headless: true });
     try {
         const page = await browser.newPage();
@@ -102,6 +112,13 @@ const rotationHelpers = source.slice(source.indexOf('function rotate4D('),source
             point.intensity = 4 * Math.PI;
             renderer.render(scene, camera);
             const litMetal = pixel();
+            point.intensity = 0;
+            const overhead = new THREE.HemisphereLight(0xffffff,0x000000,1);
+            scene.add(overhead);
+            renderer.render(scene,camera);
+            const diffuseMetal = pixel();
+            scene.remove(overhead);
+            point.intensity = 4 * Math.PI;
             const framePixels = () => {
                 renderer.render(scene,camera);
                 const values=new Uint8Array(32*32*4),gl=renderer.getContext();
@@ -216,6 +233,17 @@ const rotationHelpers = source.slice(source.indexOf('function rotate4D('),source
             uniforms.preset.value = 2;
             uniforms.worldNormal.value.set(1, 0, 0);
             const quad = measure();
+            uniforms.preset.value = 3;
+            uniforms.worldNormal.value.set(0,1,0);
+            const diffuseUp = measure();
+            uniforms.radius.value = 20;
+            uniforms.worldPosition.value.set(10,-10,5);
+            const diffuseMoved = measure();
+            uniforms.worldNormal.value.set(1,0,0);
+            const diffuseSide = measure();
+            uniforms.worldNormal.value.set(0,-1,0);
+            const diffuseDown = measure();
+            uniforms.preset.value = 2;
             uniforms.backFaceTest.value = true;
             uniforms.worldNormal.value.set(0, 0, 2);
             const front = measure();
@@ -319,7 +347,7 @@ const rotationHelpers = source.slice(source.indexOf('function rotate4D('),source
             const reflectionOffMs=benchmark(0),reflectionOnMs=benchmark(1);
             const reflectionRecompiled=renderer.info.programs.length!==programs;
             renderer.dispose();
-            return { reflectionOffMs, reflectionOnMs, reflectionRecompiled, emptyReflection, faceReflection, disabledReflection, reverseReflection, nearestReflection, selfReflection, missedReflection, selfShadowErrors, grainDifference, dirtyDifference, cleanEnergy, dirtyEnergy, sharpContrast, filteredContrast, displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
+            return { diffuseMetal, diffuseUp, diffuseMoved, diffuseSide, diffuseDown, reflectionOffMs, reflectionOnMs, reflectionRecompiled, emptyReflection, faceReflection, disabledReflection, reverseReflection, nearestReflection, selfReflection, missedReflection, selfShadowErrors, grainDifference, dirtyDifference, cleanEnergy, dirtyEnergy, sharpContrast, filteredContrast, displaySide, roundTrip, metalPixel, unlitMetal, litMetal, clearLight, blockedLight, highlights, near, far, oblique, unlit, translated, orbited, diagonal, quad, front, back };
         }, { shaders, utilities: context.shaderUtilities(), helpers, textureHelper, topologyHelpers, rotationHelpers });
         assert.deepEqual(errors, [], 'all viewer shaders compile without WebGL errors');
         assert.equal(result.reflectionRecompiled,false,'toggling reflections does not recompile shaders');
@@ -342,6 +370,9 @@ const rotationHelpers = source.slice(source.indexOf('function rotate4D('),source
         assert(result.unlitMetal[0] > 0, 'metal reflects the environment without local lights');
         assert(Math.abs(result.litMetal[0] - result.unlitMetal[0]) < 3, 'off-specular point light does not brighten the entire reflection');
         const close = (key, expected) => assert(Math.abs(result[key] - expected) <= 1.5 / 255, `${key}: ${result[key]} ≈ ${expected}`);
+        assert.deepEqual(result.diffuseMetal,result.unlitMetal,'diffuse fill preserves clean chrome reflections without specular bulbs');
+        close('diffuseUp',0.92); close('diffuseMoved',0.92);
+        close('diffuseSide',0.47); close('diffuseDown',0.02);
         close('near', 0.92); close('far', 0.245); // direct contribution falls by four
         close('oblique', 0.47); close('unlit', 0.02); // cosine law, no negative light
         close('translated', 0.245); // actual surface position, not distance to origin

@@ -1,17 +1,35 @@
 # Copyright 2026 Michael Pilosov. All rights reserved.
 import unittest
 
-from studio.video_encoding import CAPPED_ENCODING, MASTER_ENCODING, h264_encoding_args
+from studio.video_encoding import CAPPED_ENCODING, HIGH_ENCODING, MASTER_ENCODING, h264_encoding_args
 
 
 class VideoEncodingProfileTest(unittest.TestCase):
-    def test_existing_quality_keeps_capped_average_bitrate(self):
+    def test_high_preserves_bitrate_budget_with_dark_biased_aq(self):
         command = h264_encoding_args({'quality': 'high', 'bitRate': 7_464_960}, ['-threads', '2'])
-        self.assertEqual(command[command.index('-preset') + 1], 'medium')
+        self.assertEqual(command[command.index('-preset') + 1], 'slow')
+        self.assertEqual(command[command.index('-x264-params') + 1], 'aq-mode=3:aq-strength=1.1')
+        self.assertEqual(command[command.index('-pix_fmt') + 1], 'yuv420p')
+        self.assertNotIn('-tune', command)
         self.assertEqual(command[command.index('-b:v') + 1], '7464960')
         self.assertEqual(command[command.index('-maxrate') + 1], str(round(7_464_960 * 1.5)))
         self.assertEqual(command[command.index('-bufsize') + 1], str(7_464_960 * 2))
         self.assertNotIn('-crf', command)
+
+    def test_draft_and_standard_keep_existing_encoding(self):
+        for quality in ('draft', 'standard'):
+            with self.subTest(quality=quality):
+                command = h264_encoding_args({'quality': quality, 'bitRate': 100000})
+                self.assertEqual(command[command.index('-preset') + 1], 'medium')
+                self.assertNotIn('-x264-params', command)
+                self.assertNotIn('-crf', command)
+
+    def test_persisted_high_profile_pins_resumed_segments(self):
+        command = h264_encoding_args({'quality': 'high', 'bitRate': 100000, 'encoding': {
+            **HIGH_ENCODING, 'preset': 'slower', 'aqStrength': 1.25,
+        }})
+        self.assertEqual(command[command.index('-preset') + 1], 'slower')
+        self.assertEqual(command[command.index('-x264-params') + 1], 'aq-mode=3:aq-strength=1.25')
 
     def test_master_is_unconstrained_dark_detail_constant_quality(self):
         request = {'quality': 'master', 'bitRate': 99, 'encoding': dict(MASTER_ENCODING)}

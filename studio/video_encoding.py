@@ -9,12 +9,17 @@ MASTER_ENCODING = {
 # like master, while grain-heavy footage is held to the planning rate.
 CAPPED_ENCODING = {**MASTER_ENCODING, 'rateControl': 'capped-crf', 'keyint': 60}
 CRF_QUALITIES = {'master': MASTER_ENCODING, 'capped': CAPPED_ENCODING}
+HIGH_ENCODING = {
+    'rateControl': 'abr', 'preset': 'slow',
+    'aqMode': 3, 'aqStrength': 1.1, 'pixelFormat': 'yuv420p',
+}
+ENCODING_PROFILES = {**CRF_QUALITIES, 'high': HIGH_ENCODING}
 
 
 def h264_encoding_args(request, thread_args=()):
     """Return output-side libx264 options for a validated video request.
 
-    Existing qualities retain their capped average-bitrate behavior. Master is
+    High retains its capped average bitrate, with dark-biased AQ. Master is
     intentionally unconstrained constant quality: dark photographic texture is
     allowed to consume the bits it needs instead of competing with bright detail.
     """
@@ -35,8 +40,11 @@ def h264_encoding_args(request, thread_args=()):
             '-pix_fmt', str(profile['pixelFormat']),
         ]
     bit_rate = int(request['bitRate'])
+    profile = {**HIGH_ENCODING, **request.get('encoding', {})} if quality == 'high' else {}
+    aq = (['-x264-params', f"aq-mode={profile['aqMode']}:aq-strength={profile['aqStrength']}"]
+          if profile else [])
     return [
-        '-c:v', 'libx264', '-preset', 'medium', *thread_args,
+        '-c:v', 'libx264', '-preset', str(profile.get('preset', 'medium')), *thread_args, *aq,
         '-b:v', str(bit_rate), '-maxrate', str(round(bit_rate * 1.5)),
-        '-bufsize', str(bit_rate * 2), '-pix_fmt', 'yuv420p',
+        '-bufsize', str(bit_rate * 2), '-pix_fmt', str(profile.get('pixelFormat', 'yuv420p')),
     ]
