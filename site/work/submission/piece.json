@@ -33,7 +33,7 @@
     "videoExportWidth": 1920,
     "videoExportHeight": 1080,
     "videoExportQuality": "capped",
-    "timelineFrame": 29999,
+    "timelineFrame": 30000,
     "panelExpanded": true,
     "videoTimingExpanded": true,
     "music": {
