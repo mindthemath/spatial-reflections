@@ -22,10 +22,12 @@
       "zw": 0.55
     },
     "shader": "chrome",
-    "lighting": "diagonal",
+    "lighting": "diffuse",
     "lightDistance": 0.1,
     "showVertices": false,
     "surfaceGrain": false,
+    "dirtyMirrors": true,
+    "mirrorReflections": false,
     "animationPaused": false,
     "exportFps": 30,
     "videoExportWidth": 1920,

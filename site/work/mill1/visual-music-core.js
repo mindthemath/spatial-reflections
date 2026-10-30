@@ -5,6 +5,22 @@
 
 export const MUSIC_SCHEMA = 'spatial-reflections-music-v1';
 
+// Hand the natural post-loop continuation back to the existing opening.
+// Only the opening overlap changes; duration and the ending stay untouched.
+export function blendLoopOpening(buffer, loopSamples, seconds = 2.5) {
+    const count = Math.min(Math.round(seconds * buffer.sampleRate), loopSamples,
+        buffer.length - loopSamples);
+    if (count < 2) return;
+    for (let channel = 0; channel < 2; channel++) {
+        const samples = buffer.getChannelData(channel);
+        for (let i = 0; i < count; i++) {
+            const angle = Math.PI / 2 * i / (count - 1);
+            samples[i] = samples[loopSamples + i] * Math.cos(angle)
+                + samples[i] * Math.sin(angle);
+        }
+    }
+}
+
 export function hash32(...values) {
     let hash = 0x811c9dc5;
     for (const value of values) {
@@ -29,6 +45,21 @@ export function random01(seed, step, stream = 0) {
 
 export function quantize(value, levels = 1024) {
     return Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * levels) / levels;
+}
+
+// One analysis timeline shared by live playback and video export: analysis k
+// reads visual frame round(k * fps / 8) and is the score's input from k/8 s
+// (loop time) until the next one. Both paths derive every time from these.
+export const ANALYSIS_RATE = 8;
+export function analysisIndex(seconds) {
+    // The epsilon keeps exact boundaries (e.g. 3/8 s) from flooring to the previous index.
+    return Math.floor(seconds * ANALYSIS_RATE + 1e-9);
+}
+export function analysisFrame(index, fps) {
+    return Math.round(index * fps / ANALYSIS_RATE);
+}
+export function stepSeconds(step, tempo) {
+    return step * 60 / tempo / 4;
 }
 
 export function analyzeRGBA(data, width, height, previousLuma = null) {

@@ -1,5 +1,5 @@
 /* Copyright 2026 Michael Pilosov. All rights reserved. */
-import {PRESETS, analyzeRGBA, compositionAt, hash32, midiFrequency, random01} from './visual-music-core.js';
+import {PRESETS, analysisFrame, analysisIndex, analyzeRGBA, blendLoopOpening, compositionAt, hash32, midiFrequency, random01, stepSeconds} from './visual-music-core.js';
 
 const STORAGE_KEY = 'spatial-reflections.music-prototype.v1';
 const DEFAULTS = {
@@ -82,7 +82,8 @@ class SpatialMusicEngine {
         this.analysisCanvas.width = 48;
         this.analysisCanvas.height = 27;
         this.analysisContext = this.analysisCanvas.getContext('2d', {willReadFrequently: true, alpha: false});
-        this.lastAnalysisBucket = null;
+        this.lastAnalysisIndex = null;
+        this.analysisMemo = new Map();
         this.lastStep = null;
         this.lastFrame = null;
         this.lastComposition = null;
@@ -98,7 +99,11 @@ class SpatialMusicEngine {
         if (!this.context) this.buildAudioGraph();
         await this.context.resume();
         this.settings.enabled = true;
-        this.lastStep = null;
+        const {frame = 0, fps = 30} = this.timeline || {};
+        this.lastStep = Math.floor(frame / fps * this.settings.tempo / 60 * 4);
+        this.features = this.analyzeAt(analysisIndex(frame / fps), fps);
+        this.lastAnalysisIndex = analysisIndex(frame / fps);
+        this.lastFrame = frame;
         this.rebuildSustains();
         this.updateMix();
         this.onStatus('Listening to the framebuffer… play the geometry to drive events.', 'running');
@@ -191,51 +196,76 @@ class SpatialMusicEngine {
         return source;
     }
 
-    analyze() {
+    // Analysis k renders exactly the frames an export reads (k, and k-1 for
+    // motion), so dropped frames, seeks or window size never change the score.
+    analyzeAt(index, fps) {
+        const key = `${fps}:${index}`;
+        if (this.analysisMemo.has(key)) return this.analysisMemo.get(key);
         try {
-            const context = this.analysisContext;
-            context.drawImage(this.canvas, 0, 0, 48, 27);
-            const image = context.getImageData(0, 0, 48, 27);
-            const analysis = analyzeRGBA(image.data, 48, 27, this.previousLuma);
-            this.previousLuma = analysis.luma;
-            this.features = analysis.features;
-            return true;
+            let features;
+            if (this.sampleFrame) {
+                const read = frame => {
+                    const image = this.sampleFrame(frame);
+                    return [image.data, image.width, image.height];
+                };
+                const previous = index > 0 ? analyzeRGBA(...read(analysisFrame(index - 1, fps))).luma : null;
+                features = analyzeRGBA(...read(analysisFrame(index, fps)), previous).features;
+            } else {
+                // Without a host renderer, fall back to the visible canvas.
+                const context = this.analysisContext;
+                context.drawImage(this.canvas, 0, 0, 48, 27);
+                const analysis = analyzeRGBA(context.getImageData(0, 0, 48, 27).data, 48, 27, this.previousLuma);
+                this.previousLuma = analysis.luma;
+                features = analysis.features;
+            }
+            this.analysisMemo.set(key, features);
+            if (this.analysisMemo.size > 4) this.analysisMemo.delete(this.analysisMemo.keys().next().value);
+            return features;
         } catch (error) {
             this.onStatus(`Pixel analysis unavailable: ${error.message}`, 'error');
-            return false;
+            return this.features;
         }
     }
 
     tick({frame, fps, paused}) {
+        this.timeline = {frame, fps};
         if (!this.settings.enabled || !this.context || this.context.state !== 'running') return;
-        const framesPerAnalysis = Math.max(1, Math.round(fps / 8));
-        const analysisBucket = Math.floor(frame / framesPerAnalysis);
-        if (analysisBucket !== this.lastAnalysisBucket) {
-            this.lastAnalysisBucket = analysisBucket;
-            this.analyze();
+        const index = analysisIndex(frame / fps);
+        if (index !== this.lastAnalysisIndex) {
+            this.lastAnalysisIndex = index;
+            this.features = this.analyzeAt(index, fps);
             this.modulateSustains();
         }
         const visualSeconds = frame / fps;
         const step = Math.floor(visualSeconds * this.settings.tempo / 60 * 4);
         const discontinuity = this.lastFrame !== null && Math.abs(frame - this.lastFrame) > Math.max(4, fps / 2);
         if (discontinuity || step < (this.lastStep ?? step)) {
-            this.lastStep = null;
+            this.lastStep = step;
+            this.analysisMemo.clear();
             this.releaseSustains(.8);
             this.rebuildSustains();
         }
         this.lastFrame = frame;
+        // Starting/unmuting/seeking joins the current step without replaying its
+        // attack. Events only fire when the timeline crosses the next step.
+        if (this.lastStep === null) {
+            this.lastStep = step;
+            return;
+        }
         if (paused || step === this.lastStep) return;
         // Do not fire a backlog after hidden-tab throttling or a timeline seek.
         this.lastStep = step;
-        this.performStep(step);
+        this.performStep(step, fps);
     }
 
-    performStep(step) {
+    performStep(step, fps) {
+        if (step === 0) return;
         const now = this.context.currentTime + .018;
-        const score = compositionAt({seed: this.settings.seed, step, settings: this.settings, features: this.features});
-        const previous = this.lastComposition;
+        // Each step hears the analysis for its own musical time, exactly as in export.
+        const features = this.analyzeAt(analysisIndex(stepSeconds(step, this.settings.tempo)), fps);
+        const score = compositionAt({seed: this.settings.seed, step, settings: this.settings, features});
         this.lastComposition = score;
-        if (!previous || previous.bar !== score.bar) this.playHarmonicField(score, now);
+        if (step > 0 && step % 16 === 0) this.playHarmonicField(score, now);
         if (score.pulse) this.playUndertow(score, now);
         if (score.bell) this.playBell(score, now);
         if (score.metal) this.playMetal(score, now);
@@ -275,6 +305,9 @@ class SpatialMusicEngine {
             filter.type = index === 0 ? 'lowpass' : 'bandpass';
             filter.frequency.value = index === 0 ? 420 : 260 + index * 310;
             filter.Q.value = index === 0 ? .55 : 1.2 + index;
+            // Set the intrinsic value too: the first modulation at time zero
+            // cancels scheduled values, which otherwise exposes default gain 1.
+            gain.gain.value = .0001;
             gain.gain.setValueAtTime(.0001, now);
             gain.gain.exponentialRampToValueAtTime((.032 / (1 + index * .28)) * this.settings.layers.drone, now + 3.5 + index);
             gain.connect(filter);
@@ -295,14 +328,15 @@ class SpatialMusicEngine {
         });
     }
 
-    modulateSustains() {
+    // Shared by live playback (now) and offline export (each analysis time), so
+    // drones glide identically in both.
+    modulateSustains(now = this.context?.currentTime, features = this.features) {
         if (!this.context) return;
-        const now = this.context.currentTime;
         const influence = this.settings.influence;
-        const luminance = lerp(.24, this.features.luminance, influence);
-        const contrast = lerp(.18, this.features.contrast, influence);
-        const edge = lerp(.12, this.features.edge, influence);
-        const centroidX = lerp(.5, this.features.centroidX, influence);
+        const luminance = lerp(.24, features.luminance, influence);
+        const contrast = lerp(.18, features.contrast, influence);
+        const edge = lerp(.12, features.edge, influence);
+        const centroidX = lerp(.5, features.centroidX, influence);
         for (const voice of this.sustains) {
             const cutoff = 160 + voice.index * 250 + luminance * 1800 + edge * 900;
             setParam(voice.filter.frequency, cutoff, now, .35 + voice.index * .15);
@@ -447,22 +481,37 @@ class SpatialMusicEngine {
         });
     }
 
-    async renderOffline({duration, startFrame, fps, featureFrames, onProgress = null, signal = null}) {
+    async renderOffline({duration, startFrame, fps, timelineFrames = startFrame + Math.round(duration * fps), featureFrames, firstIndex = 0, loopCrossfadeSeconds = 0, onProgress = null, signal = null}) {
         const sampleRate = 48000;
         const sampleCount = Math.round(duration * sampleRate);
+        const sampleOffset = Math.round(startFrame / fps * sampleRate);
+        const totalSamples = Math.round(timelineFrames / fps * sampleRate);
+        const overlapSamples = sampleOffset === 0 && sampleCount === totalSamples
+            ? Math.round(loopCrossfadeSeconds * sampleRate) : 0;
+        const renderDuration = (totalSamples + overlapSamples) / sampleRate;
+        if (firstIndex !== 0 || totalSamples < sampleOffset + sampleCount) {
+            throw new Error('Soundtrack synthesis requires the complete timeline from frame zero');
+        }
         const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
         if (!OfflineContext) throw new Error('This browser cannot render an offline soundtrack');
         signal?.throwIfAborted();
-        const context = new OfflineContext(2, sampleCount, sampleRate);
+        // Always render the same complete timeline, including oscillator phases,
+        // drones, note tails and effects history, then crop exact PCM. Keeping
+        // the graph and render length identical also avoids Web Audio floating
+        // point differences caused by rendering different-length prefixes.
+        // Full-loop exports alone add a short note-free post-roll, carrying
+        // existing sustains/effects into the opening instead of silencing it.
+        const context = new OfflineContext(2, totalSamples + overlapSamples, sampleRate);
         const offline = new SpatialMusicEngine(null, () => {}, this.settings);
         offline.settings = normalizeSettings({...this.settings, enabled: true});
         offline.buildAudioGraph(context);
-        offline.features = featureFrames[0] || this.features;
         const secondsPerStep = 60 / offline.settings.tempo / 4;
-        const absoluteStart = startFrame / fps;
-        const firstStep = Math.floor(absoluteStart / secondsPerStep);
-        const finalStep = Math.floor((absoluteStart + duration - 1 / sampleRate) / secondsPerStep);
-        offline.lastStep = firstStep;
+        // featureFrames[i] is analysis firstIndex + i on the shared loop-time timeline.
+        const featuresAt = seconds => featureFrames[Math.min(featureFrames.length - 1,
+            Math.max(0, analysisIndex(seconds) - firstIndex))];
+        offline.features = featuresAt(0) || this.features;
+        const finalStep = Math.floor((totalSamples / sampleRate - 1 / sampleRate) / secondsPerStep);
+        offline.lastStep = 0;
         offline.rebuildSustains();
 
         // Scheduling the whole score up front stalls long exports: every note
@@ -472,56 +521,34 @@ class SpatialMusicEngine {
         const windowSeconds = 10;
         const lookahead = 2;
         let nextFeature = 0;
-        let nextStep = firstStep;
-        let previous = null;
+        // Frame zero is a starting position, not a new musical attack. Keep
+        // every subsequent event and all synthesis settings unchanged.
+        let nextStep = 1;
         const scheduleUntil = horizon => {
-            for (; nextFeature < featureFrames.length && nextFeature / 8 < horizon; nextFeature++) {
-                const features = featureFrames[nextFeature];
-                const at = Math.min(duration, nextFeature / 8);
-                const influence = offline.settings.influence;
-                const luminance = lerp(.24, features.luminance, influence);
-                const contrast = lerp(.18, features.contrast, influence);
-                const edge = lerp(.12, features.edge, influence);
-                const centroidX = lerp(.5, features.centroidX, influence);
-                for (const voice of offline.sustains) {
-                    const cutoff = 160 + voice.index * 250 + luminance * 1800 + edge * 900;
-                    const gain = (.025 + luminance * .018) * offline.settings.layers.drone / (1 + voice.index * .22);
-                    const schedule = (parameter, value) => nextFeature
-                        ? parameter.linearRampToValueAtTime(value, at)
-                        : parameter.setValueAtTime(value, 0);
-                    schedule(voice.filter.frequency, cutoff);
-                    schedule(voice.filter.Q, .65 + contrast * (2 + voice.index));
-                    schedule(voice.gain.gain, Math.max(.0001, gain));
-                    voice.oscillators.forEach((oscillator, partial) => schedule(
-                        oscillator.detune, (centroidX - .5) * (partial - 1) * 13));
-                }
+            for (; nextFeature < featureFrames.length && (firstIndex + nextFeature) / 8 < horizon; nextFeature++) {
+                const at = (firstIndex + nextFeature) / 8;
+                offline.modulateSustains(at, featureFrames[nextFeature]);
             }
             for (; nextStep <= finalStep; nextStep++) {
-                const eventTime = Math.max(0, nextStep * secondsPerStep - absoluteStart);
+                const eventTime = stepSeconds(nextStep, offline.settings.tempo);
                 if (eventTime >= horizon) break;
-                const featureIndex = Math.min(featureFrames.length - 1, Math.max(0, Math.floor(eventTime * 8)));
-                offline.features = featureFrames[featureIndex] || offline.features;
+                offline.features = featuresAt(stepSeconds(nextStep, offline.settings.tempo)) || offline.features;
                 const score = compositionAt({seed: offline.settings.seed, step: nextStep, settings: offline.settings, features: offline.features});
-                if (!previous || previous.bar !== score.bar) offline.playHarmonicField(score, eventTime);
+                if (nextStep > 0 && nextStep % 16 === 0) offline.playHarmonicField(score, eventTime);
                 if (score.pulse) offline.playUndertow(score, eventTime);
                 if (score.bell) offline.playBell(score, eventTime);
                 if (score.metal) offline.playMetal(score, eventTime);
                 if (score.texture) offline.playTexture(score, eventTime);
                 if (score.upper) offline.playShimmer(score, eventTime);
-                previous = score;
             }
         };
         scheduleUntil(windowSeconds + lookahead);
-        // A very short deterministic edge fade prevents PCM clicks for clips.
-        const master = offline.nodes.master.gain;
-        const fadeStart = Math.max(0, duration - .025);
-        master.setValueAtTime(dbGain(-15 + offline.settings.level * 11), fadeStart);
-        master.linearRampToValueAtTime(0, duration);
-
+        // No clip-specific fade: a direct clip must equal the same PCM slice
+        // of a longer export, including the final samples.
         let aborted = null;
-        for (let at = windowSeconds; at < duration; at += windowSeconds) {
+        for (let at = windowSeconds; at < renderDuration; at += windowSeconds) {
             context.suspend(at).then(async () => {
-                onProgress?.(at / duration);
+                onProgress?.(at / renderDuration);
                 // Let the page paint progress and handle a cancel click.
                 await new Promise(resolve => setTimeout(resolve, 0));
                 if (signal?.aborted) {
@@ -540,8 +567,13 @@ class SpatialMusicEngine {
             signal?.addEventListener('abort', () => reject(signal.reason), {once: true});
             context.startRendering().then(resolve, reject);
         });
+        if (overlapSamples) blendLoopOpening(rendered, totalSamples, loopCrossfadeSeconds);
         onProgress?.(1);
-        return rendered;
+        return {
+            length: sampleCount,
+            sampleRate,
+            getChannelData: channel => rendered.getChannelData(channel).subarray(sampleOffset, sampleOffset + sampleCount)
+        };
     }
 
     applyPreset(name) {
@@ -603,7 +635,7 @@ async function audioBufferWav(buffer, onProgress = null) {
     return new Blob([output], {type: 'audio/wav'});
 }
 
-export function installVisualMusic({mount, canvas, initialSettings = null, onStateChange = null, onPlaybackChange = null}) {
+export function installVisualMusic({mount, canvas, sampleFrame = null, initialSettings = null, onStateChange = null, onPlaybackChange = null}) {
     const section = document.createElement('section');
     section.className = 'visual-music';
     section.innerHTML = `
@@ -628,6 +660,7 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
         status.classList.toggle('error', state === 'error');
         dot.classList.toggle('active', state === 'running');
     }, initialSettings, onStateChange);
+    engine.sampleFrame = sampleFrame;
     const preset = section.querySelector('.music-preset');
     for (const [value, definition] of Object.entries(PRESETS)) {
         const option = document.createElement('option'); option.value = value; option.textContent = definition.label; preset.appendChild(option);
@@ -723,6 +756,10 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
     drawMeter();
     const applySettings = value => {
         engine.settings = normalizeSettings({...engine.settings, ...value, layers: {...engine.settings.layers, ...value?.layers}});
+        engine.analysisMemo.clear();
+        engine.lastAnalysisIndex = null;
+        engine.lastStep = null;
+        engine.lastFrame = null;
         engine.save();
         refreshControls();
         engine.updateMix();
@@ -766,30 +803,40 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
                 status.classList.remove('error');
             }
         },
-        async prepareExport({startFrame, frames, fps, samplePixels, onProgress = null, signal = null}) {
+        async prepareExport({startFrame, frames, fps, timelineFrames = startFrame + frames, samplePixels, onProgress = null, signal = null}) {
             if (!engine.settings.enabled) return null;
             const duration = frames / fps;
             if (duration > 900) throw new Error('Generative soundtrack exports are currently limited to 15 minutes');
+            // Analyze the same complete timeline for every export so synthesis and
+            // effects history are independent of the selected clip window.
+            const firstIndex = 0;
+            const lastIndex = analysisIndex(timelineFrames / fps);
+            const read = async index => {
+                const pixels = await samplePixels(analysisFrame(index, fps));
+                return [pixels.data, pixels.width, pixels.height];
+            };
             const featureFrames = [];
-            let previousLuma = null;
-            const analysisFrames = Math.max(1, Math.ceil(duration * 8));
-            for (let index = 0; index < analysisFrames; index++) {
+            let previousLuma = firstIndex > 0 ? analyzeRGBA(...await read(firstIndex - 1)).luma : null;
+            const analysisFrames = lastIndex - firstIndex + 1;
+            for (let index = firstIndex; index <= lastIndex; index++) {
                 signal?.throwIfAborted();
-                const frame = startFrame + Math.min(frames - 1, Math.round(index * fps / 8));
-                const pixels = await samplePixels(frame);
-                const analysis = analyzeRGBA(pixels.data, pixels.width, pixels.height, previousLuma);
+                const analysis = analyzeRGBA(...await read(index), previousLuma);
                 previousLuma = analysis.luma;
                 featureFrames.push(analysis.features);
-                if (index % 16 === 0 || index + 1 === analysisFrames) {
-                    onProgress?.({phase: 'analyze', progress: (index + 1) / analysisFrames});
+                const done = index - firstIndex + 1;
+                if (done % 16 === 1 || done === analysisFrames) {
+                    onProgress?.({phase: 'analyze', progress: done / analysisFrames});
                     await new Promise(resolve => setTimeout(resolve, 0));
                 }
             }
             const settings = structuredClone(engine.settings);
-            const scoreDocument = JSON.stringify({schema: 'spatial-reflections-music-v1', settings, startFrame, frames, fps, featureFrames});
+            const scoreDocument = JSON.stringify({schema: 'spatial-reflections-music-v1', settings, startFrame, frames, fps,
+                analysis: {rate: 8, firstIndex, render: 'chrome-grain-aging-v1'},
+                synthesis: 'whole-timeline-v3', timelineFrames, featureFrames});
             const scoreHash = await sha256(scoreDocument);
             onProgress?.({phase: 'synthesize', progress: 0});
-            const rendered = await engine.renderOffline({duration, startFrame, fps, featureFrames, signal,
+            const loopCrossfadeSeconds = startFrame === 0 && frames === timelineFrames ? 2.5 : 0;
+            const rendered = await engine.renderOffline({duration, startFrame, fps, timelineFrames, featureFrames, firstIndex, signal, loopCrossfadeSeconds,
                 onProgress: progress => onProgress?.({phase: 'synthesize', progress})});
             signal?.throwIfAborted();
             const wav = await audioBufferWav(rendered, progress => onProgress?.({phase: 'encode', progress}));
@@ -799,7 +846,9 @@ export function installVisualMusic({mount, canvas, initialSettings = null, onSta
                 metadata: {
                     schema: 'spatial-reflections-music-v1', enabled: true,
                     sampleRate: 48000, channels: 2, samples: rendered.length,
-                    settings, scoreHash
+                    settings, scoreHash,
+                    analysisRender: 'chrome-grain-aging-v1', synthesis: 'whole-timeline-v3',
+                    ...(loopCrossfadeSeconds ? {loopCrossfadeSeconds} : {})
                 }
             };
         },
